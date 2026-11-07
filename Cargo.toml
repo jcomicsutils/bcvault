@@ -38,6 +38,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 rusqlite = { version = "0.37", features = ["bundled"] }
 directories = "6"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+lofty = "0.25"
 
 # Errors / logging
 thiserror = "2"

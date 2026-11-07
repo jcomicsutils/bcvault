@@ -21,6 +21,7 @@ chrono = { workspace = true }
 rusqlite = { workspace = true }
 directories = { workspace = true }
 zip = { workspace = true }
+lofty = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
