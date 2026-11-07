@@ -396,7 +396,8 @@ impl UiState {
             WorkerToUiEvent::LibraryProgress { .. }
             | WorkerToUiEvent::ReconcileReport { .. }
             | WorkerToUiEvent::FolderStatus { .. }
-            | WorkerToUiEvent::LibraryApplied { .. } => {}
+            | WorkerToUiEvent::LibraryApplied { .. }
+            | WorkerToUiEvent::MissingFound { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }

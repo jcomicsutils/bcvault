@@ -10,8 +10,10 @@ use crate::library::link::probe_folder;
 use crate::library::matcher::assign_matches;
 use crate::library::scan::scan_linked_folder;
 use crate::library::service::ReconcileReport;
+use crate::library::verify::{VerifyResult, is_mass_missing, verify_single_release};
 use crate::types::{
-    BatchSummary, FolderState, ItemKey, LibraryPhase, LogLevel, MatchDecision, ReleaseQuery,
+    BatchSummary, FolderState, ItemKey, LibraryPhase, LocalStatus, LogLevel, MatchDecision,
+    MissingItem, ReleaseQuery, SyncScope,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -227,6 +229,263 @@ impl LibraryService {
     pub async fn apply_reconcile(&self, batch_id: u64, decisions: Vec<MatchDecision>) {
         let _guard = self.job_lock.lock().await;
         self.apply_reconcile_internal(batch_id, decisions).await;
+    }
+
+    /// Verifies all downloaded releases in the given scope against the filesystem.
+    /// Emits progress events and, if any files are missing, a MissingFound event.
+    pub async fn verify_files(&self, scope: SyncScope, cancel: CancellationToken) {
+        let _guard = self.job_lock.lock().await;
+        {
+            let mut c_guard = self.current_cancel.lock().await;
+            *c_guard = Some(cancel.clone());
+        }
+
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+
+        // 1. Read settings for out_dir
+        let st = match pool
+            .reader
+            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to read settings: {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+
+        // 2. Determine artist IDs in scope
+        let band_ids: Vec<i64> = match scope {
+            SyncScope::Selected(v) => v,
+            SyncScope::All => {
+                let ids_res = pool
+                    .reader
+                    .call(|c| {
+                        let views = artists::list_views(c)?;
+                        Ok::<_, DbError>(views.into_iter().map(|v| v.band_id).collect())
+                    })
+                    .await;
+                match ids_res {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        bridge.log(
+                            LogLevel::Error,
+                            "library",
+                            format!("Failed to query artists: {e}"),
+                            None,
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
+        // 3. Probe folder health for each artist in scope
+        let mut folder_probe_ok = std::collections::HashMap::new();
+        for &band_id in &band_ids {
+            let folder_opt = pool
+                .reader
+                .call(move |c| lib_repo::get_folder(c, band_id))
+                .await
+                .unwrap_or(None);
+
+            let state = if let Some(folder) = folder_opt {
+                probe_folder(&folder.path)
+            } else {
+                probe_folder(&st.out_dir)
+            };
+
+            if state != FolderState::Ok {
+                bridge.log(
+                    LogLevel::Warn,
+                    "library",
+                    format!("Folder unavailable for artist {band_id}: {state:?}"),
+                    None,
+                );
+            }
+            folder_probe_ok.insert(band_id, state == FolderState::Ok);
+        }
+
+        // 4. Query all downloaded = 1 releases in scope
+        let releases_res = pool
+            .reader
+            .call(move |c| {
+                let mut rows = Vec::new();
+                for band_id in band_ids {
+                    let q = ReleaseQuery {
+                        band_id: Some(band_id),
+                        ..Default::default()
+                    };
+                    let rels = releases::query_releases(c, &q)?;
+                    rows.extend(rels.into_iter().filter(|r| r.downloaded));
+                }
+                Ok::<_, DbError>(rows)
+            })
+            .await;
+
+        let downloaded_releases = match releases_res {
+            Ok(r) => r,
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to query downloaded releases: {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+
+        let total_releases = downloaded_releases.len() as u32;
+        bridge.emit(WorkerToUiEvent::LibraryProgress {
+            phase: LibraryPhase::Verifying,
+            done: 0,
+            total: total_releases,
+            current: None,
+        });
+
+        // 5. Verify releases in spawn_blocking
+        let probe_map_clone = folder_probe_ok.clone();
+        let cancel_verify = cancel.clone();
+        let releases_clone = downloaded_releases.clone();
+
+        let verify_res = tokio::task::spawn_blocking(move || {
+            let mut present = Vec::new();
+            let mut missing = Vec::new();
+            let mut unknown = Vec::new();
+
+            for rel in releases_clone {
+                if cancel_verify.is_cancelled() {
+                    break;
+                }
+                let is_ok = probe_map_clone.get(&rel.band_id).copied().unwrap_or(false);
+                let outcome = verify_single_release(&rel, is_ok);
+                match outcome {
+                    Some(VerifyResult::Present) => present.push(rel),
+                    Some(VerifyResult::Missing) => missing.push(rel),
+                    Some(VerifyResult::Unknown) => unknown.push(rel),
+                    None => {}
+                }
+            }
+
+            (present, missing, unknown)
+        })
+        .await;
+
+        let (present_rels, missing_rels, unknown_rels) = match verify_res {
+            Ok(triplet) => triplet,
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Verification task failed: {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+
+        if cancel.is_cancelled() {
+            return;
+        }
+
+        // 6. Update present rows in DB
+        let present_keys: Vec<ItemKey> = present_rels.iter().map(|r| r.key).collect();
+        let present_keys_db = present_keys.clone();
+        let update_res = pool
+            .writer
+            .call(move |c| {
+                let mut updated = Vec::new();
+                for key in present_keys_db {
+                    lib_repo::set_local_status(c, key, Some(LocalStatus::Present))?;
+                    if let Some(r) = releases::get_release(c, key)? {
+                        updated.push(r);
+                    }
+                }
+                Ok::<_, DbError>(updated)
+            })
+            .await;
+
+        if let Ok(updated_rows) = update_res {
+            for row in updated_rows {
+                bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(row)));
+            }
+        }
+
+        // 7. Check mass-missing guard
+        let total_evaluated = present_rels.len() + missing_rels.len();
+        let mass_missing = is_mass_missing(missing_rels.len(), total_evaluated);
+
+        if mass_missing {
+            bridge.log(
+                LogLevel::Warn,
+                "library",
+                format!(
+                    "Many albums are missing ({} of {}): is a drive disconnected?",
+                    missing_rels.len(),
+                    total_evaluated
+                ),
+                None,
+            );
+        }
+
+        // 8. If missing releases found, create a batch and emit MissingFound
+        let missing_count = missing_rels.len();
+        if !missing_rels.is_empty() {
+            let missing_items: Vec<MissingItem> = missing_rels
+                .into_iter()
+                .map(|r| MissingItem {
+                    key: r.key,
+                    band_id: r.band_id,
+                    artist_name: r.artist_name,
+                    title: r.title,
+                    last_known_path: r.local_path,
+                    best_candidate: None,
+                })
+                .collect();
+
+            let batch_id = match pool
+                .writer
+                .call(|c| lib_repo::create_batch(c, "verify", &BatchSummary::default()))
+                .await
+            {
+                Ok(id) => id.max(0) as u64,
+                Err(e) => {
+                    bridge.log(
+                        LogLevel::Error,
+                        "library",
+                        format!("Failed to create verification batch: {e}"),
+                        None,
+                    );
+                    return;
+                }
+            };
+
+            bridge.emit(WorkerToUiEvent::MissingFound {
+                batch_id,
+                items: missing_items,
+                mass_missing,
+            });
+        }
+
+        bridge.log(
+            LogLevel::Info,
+            "library",
+            format!(
+                "Verification finished: {} present, {} missing, {} unknown",
+                present_keys.len(),
+                missing_count,
+                unknown_rels.len()
+            ),
+            None,
+        );
     }
 
     /// Reverses all modifications committed in a given batch.
@@ -1147,5 +1406,315 @@ mod tests {
         assert_eq!(report.band_id, band_id);
         assert_eq!(report.matched.len(), 1);
         assert_eq!(report.matched[0].release_key, release_key);
+    }
+
+    #[tokio::test]
+    async fn test_library_service_verify_present_and_missing() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("verify_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 111;
+        let key_present = ItemKey::new(ItemType::Album, 101);
+        let key_missing = ItemKey::new(ItemType::Album, 102);
+
+        let artist_dir = dir.path().join("Artist 111");
+        let album_present_dir = artist_dir.join("Album Present");
+        fs::create_dir_all(&album_present_dir).unwrap();
+        fs::write(album_present_dir.join("01.mp3"), b"audio").unwrap();
+
+        let album_missing_dir = artist_dir.join("Album Missing");
+        // missing dir is deleted / not created on disk
+
+        let p1 = album_present_dir.clone();
+        let p2 = album_missing_dir.clone();
+        let out_dir = dir.path().join("Downloads");
+
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-111",
+                        name: "Artist 111",
+                        url: "https://artist111.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc1 = DiscoveredRelease {
+                    key: key_present,
+                    band_id,
+                    title: "Album Present",
+                    artist_name: "Artist 111",
+                    url: "https://artist111.bandcamp.com/album/present",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc1)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key_present,
+                    &p1,
+                    Some(crate::types::AudioFormat::Mp3_320),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+
+                let disc2 = DiscoveredRelease {
+                    key: key_missing,
+                    band_id,
+                    title: "Album Missing",
+                    artist_name: "Artist 111",
+                    url: "https://artist111.bandcamp.com/album/missing",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc2)?;
+                lib_repo::adopt(
+                    c,
+                    key_missing,
+                    &p2,
+                    Some(crate::types::AudioFormat::Mp3_320),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+
+                lib_repo::link_folder(c, band_id, &artist_dir, &out_dir)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::Selected(vec![band_id]), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Verify present album was updated to present
+        let row_p = pool
+            .reader
+            .call(move |c| releases::get_release(c, key_present))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row_p.local_status, Some(LocalStatus::Present));
+
+        // Verify MissingFound was emitted for key_missing
+        let missing_found = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::MissingFound {
+                    items,
+                    mass_missing,
+                    ..
+                } => Some((items, mass_missing)),
+                _ => None,
+            })
+            .expect("should emit MissingFound");
+
+        assert_eq!(missing_found.0.len(), 1);
+        assert_eq!(missing_found.0[0].key, key_missing);
+        assert!(!missing_found.1); // mass_missing is false
+    }
+
+    #[tokio::test]
+    async fn test_library_service_verify_unavailable_folder_guard() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("unavailable_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 222;
+        let key = ItemKey::new(ItemType::Album, 201);
+        let artist_dir = dir.path().join("Unmounted Drive Artist");
+        // artist_dir does not exist
+
+        let p = artist_dir.join("Album");
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-222",
+                        name: "Artist 222",
+                        url: "https://artist222.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Album",
+                    artist_name: "Artist 222",
+                    url: "https://artist222.bandcamp.com/album/album",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+
+                // Insert directly into artist_folders with nonexistent path
+                c.execute(
+                    "INSERT INTO artist_folders (band_id, path, path_key, added_at) VALUES (?1, ?2, ?3, unixepoch())",
+                    rusqlite::params![band_id, artist_dir.to_string_lossy(), "artist_222"],
+                )?;
+
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &p,
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::Selected(vec![band_id]), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Because folder is unavailable, outcome is Unknown, NEVER Missing
+        let has_missing_event = events
+            .iter()
+            .any(|e| matches!(e, WorkerToUiEvent::MissingFound { .. }));
+        assert!(!has_missing_event);
+
+        // Release status should NOT be changed to missing
+        let row = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(row.local_status, Some(LocalStatus::Missing));
+    }
+
+    #[tokio::test]
+    async fn test_library_service_verify_mass_missing_guard() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mass_missing_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 333;
+        let artist_dir = dir.path().join("Artist 333");
+        fs::create_dir_all(&artist_dir).unwrap();
+
+        let a_dir = artist_dir.clone();
+        let out_dir = dir.path().join("Downloads");
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-333",
+                        name: "Artist 333",
+                        url: "https://artist333.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                lib_repo::link_folder(c, band_id, &a_dir, &out_dir)?;
+
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+
+                // Create 25 downloaded releases whose local folders are deleted
+                for i in 1..=25 {
+                    let key = ItemKey::new(ItemType::Album, i);
+                    let disc = DiscoveredRelease {
+                        key,
+                        band_id,
+                        title: &format!("Album {i}"),
+                        artist_name: "Artist 333",
+                        url: &format!("https://artist333.bandcamp.com/album/{i}"),
+                        cover_url: None,
+                        art_id: None,
+                    };
+                    releases::upsert_discovered(c, &disc)?;
+                    let path = a_dir.join(format!("Album {i}"));
+                    lib_repo::adopt(
+                        c,
+                        key,
+                        &path,
+                        Some(crate::types::AudioFormat::Flac),
+                        crate::types::Origin::App,
+                        None,
+                        b_id,
+                    )?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::Selected(vec![band_id]), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        let missing_found = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::MissingFound {
+                    items,
+                    mass_missing,
+                    ..
+                } => Some((items, mass_missing)),
+                _ => None,
+            })
+            .expect("should emit MissingFound");
+
+        assert_eq!(missing_found.0.len(), 25);
+        assert!(missing_found.1); // mass_missing MUST be true!
     }
 }

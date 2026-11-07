@@ -385,6 +385,13 @@ impl Supervisor {
                     svc.undo_batch(batch_id).await;
                 });
             }
+            UiToWorkerCommand::VerifyFiles { scope } => {
+                let svc = self.library_service.clone();
+                let tok = self.library_cancel.child_token();
+                tokio::spawn(async move {
+                    svc.verify_files(scope, tok).await;
+                });
+            }
             UiToWorkerCommand::CancelLibrary => {
                 self.library_service.cancel();
                 self.library_cancel.cancel();

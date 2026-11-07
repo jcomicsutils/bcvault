@@ -72,6 +72,9 @@ pub enum UiToWorkerCommand {
     UndoBatch {
         batch_id: u64,
     },
+    VerifyFiles {
+        scope: SyncScope,
+    },
     CancelLibrary,
     // misc
     UpdateSettings(Settings),
@@ -152,6 +155,11 @@ pub enum WorkerToUiEvent {
     LibraryApplied {
         batch_id: u64,
         summary: crate::types::BatchSummary,
+    },
+    MissingFound {
+        batch_id: u64,
+        items: Vec<crate::types::MissingItem>,
+        mass_missing: bool,
     },
     Log(LogEntry),
 }

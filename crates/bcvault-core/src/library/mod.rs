@@ -4,6 +4,7 @@ pub mod scan;
 pub mod service;
 pub mod tags;
 pub mod textmatch;
+pub mod verify;
 
 pub use link::{
     FolderLinkError, FolderWarning, ValidatedLink, check_looks_like_library, normalize_path_key,
@@ -17,8 +18,11 @@ pub use scan::{
     AUDIO_EXTENSIONS, AlbumCandidate, CandidateKind, ScanReport, is_audio_file,
     is_disc_folder_name, normalize_candidate_path_key, scan_linked_folder,
 };
-pub use service::{ReconcileReport, run_scan_and_match};
+pub use service::{LibraryProgressCallback, ReconcileReport, run_scan_and_match};
 pub use tags::{AudioMetadata, guess_audio_format, read_audio_tags};
 pub use textmatch::{
     name_variant_keys, name_variants, normalize, strip_diacritics, strip_noise_tokens,
+};
+pub use verify::{
+    VerifyReport, VerifyResult, check_disk_release_path, is_mass_missing, verify_single_release,
 };

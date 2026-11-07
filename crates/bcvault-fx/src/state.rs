@@ -419,7 +419,8 @@ impl FxState {
             | WorkerToUiEvent::LibraryProgress { .. }
             | WorkerToUiEvent::ReconcileReport { .. }
             | WorkerToUiEvent::FolderStatus { .. }
-            | WorkerToUiEvent::LibraryApplied { .. } => {}
+            | WorkerToUiEvent::LibraryApplied { .. }
+            | WorkerToUiEvent::MissingFound { .. } => {}
             WorkerToUiEvent::ReleaseUpdated(rel) => {
                 let key = rel.key;
                 let was_dl = self

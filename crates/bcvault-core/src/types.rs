@@ -365,6 +365,22 @@ pub enum MatchDecision {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MissingCandidate {
+    pub path: PathBuf,
+    pub score: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MissingItem {
+    pub key: ItemKey,
+    pub band_id: i64,
+    pub artist_name: String,
+    pub title: String,
+    pub last_known_path: Option<PathBuf>,
+    pub best_candidate: Option<MissingCandidate>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
