@@ -121,21 +121,28 @@ impl Supervisor {
             UiToWorkerCommand::AddArtist { input } => {
                 let svc = self.sync_service.clone();
                 let bridge = self.bridge.clone();
+                let lib_svc = self.library_service.clone();
                 let tok = self.sync_cancel.child_token();
+                let lib_tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
-                    if let Err(e) = svc.add_and_sync_artist(&input, tok).await {
-                        bridge.log(
-                            LogLevel::Error,
-                            "sync",
-                            format!("Add artist '{input}' failed: {e}"),
-                            None,
-                        );
-                        bridge.emit(WorkerToUiEvent::SyncFinished {
-                            band_id: 0,
-                            new_items: 0,
-                            updated: 0,
-                            error: Some(e.to_string()),
-                        });
+                    match svc.add_and_sync_artist(&input, tok).await {
+                        Ok(outcome) => {
+                            lib_svc.on_artist_synced(outcome.band_id, lib_tok).await;
+                        }
+                        Err(e) => {
+                            bridge.log(
+                                LogLevel::Error,
+                                "sync",
+                                format!("Add artist '{input}' failed: {e}"),
+                                None,
+                            );
+                            bridge.emit(WorkerToUiEvent::SyncFinished {
+                                band_id: 0,
+                                new_items: 0,
+                                updated: 0,
+                                error: Some(e.to_string()),
+                            });
+                        }
                     }
                 });
             }
@@ -192,7 +199,9 @@ impl Supervisor {
                 let pool = self.pool.clone();
                 let svc = self.sync_service.clone();
                 let bridge = self.bridge.clone();
+                let lib_svc = self.library_service.clone();
                 let tok = self.sync_cancel.child_token();
+                let lib_tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
                     let ids: Vec<i64> = match scope {
                         SyncScope::Selected(v) => v,
@@ -210,19 +219,24 @@ impl Supervisor {
                         if tok.is_cancelled() {
                             break;
                         }
-                        if let Err(e) = svc.sync_artist(band_id, mode, tok.clone()).await {
-                            bridge.log(
-                                LogLevel::Error,
-                                "sync",
-                                format!("Sync artist {band_id} failed: {e}"),
-                                None,
-                            );
-                            bridge.emit(WorkerToUiEvent::SyncFinished {
-                                band_id,
-                                new_items: 0,
-                                updated: 0,
-                                error: Some(e.to_string()),
-                            });
+                        match svc.sync_artist(band_id, mode, tok.clone()).await {
+                            Ok(_) => {
+                                lib_svc.on_artist_synced(band_id, lib_tok.clone()).await;
+                            }
+                            Err(e) => {
+                                bridge.log(
+                                    LogLevel::Error,
+                                    "sync",
+                                    format!("Sync artist {band_id} failed: {e}"),
+                                    None,
+                                );
+                                bridge.emit(WorkerToUiEvent::SyncFinished {
+                                    band_id,
+                                    new_items: 0,
+                                    updated: 0,
+                                    error: Some(e.to_string()),
+                                });
+                            }
                         }
                     }
                 });

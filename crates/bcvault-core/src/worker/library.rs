@@ -24,6 +24,7 @@ pub struct LibraryService {
     bridge: UiBridge,
     job_lock: Arc<Mutex<()>>,
     current_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    pending_first_matches: Arc<Mutex<std::collections::HashMap<i64, bool>>>,
 }
 
 impl LibraryService {
@@ -34,6 +35,7 @@ impl LibraryService {
             bridge,
             job_lock: Arc::new(Mutex::new(())),
             current_cancel: Arc::new(Mutex::new(None)),
+            pending_first_matches: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -138,6 +140,10 @@ impl LibraryService {
             .unwrap_or(false);
 
         if !has_releases {
+            self.pending_first_matches
+                .lock()
+                .await
+                .insert(band_id, auto_apply_confident);
             bridge.log(
                 LogLevel::Info,
                 "library",
@@ -154,6 +160,7 @@ impl LibraryService {
     /// Removes an existing artist folder link.
     pub async fn unlink_artist_folder(&self, band_id: i64) {
         let _guard = self.job_lock.lock().await;
+        self.pending_first_matches.lock().await.remove(&band_id);
         let pool = self.pool.clone();
         let bridge = self.bridge.clone();
 
@@ -290,6 +297,25 @@ impl LibraryService {
                     None,
                 );
             }
+        }
+    }
+
+    /// Checks if a match was queued for this artist prior to its first sync, and executes it.
+    pub async fn on_artist_synced(&self, band_id: i64, cancel: CancellationToken) {
+        let queued_opt = {
+            let mut guard = self.pending_first_matches.lock().await;
+            guard.remove(&band_id)
+        };
+
+        if let Some(auto_apply_confident) = queued_opt {
+            self.bridge.log(
+                LogLevel::Info,
+                "library",
+                format!("Artist {band_id} finished first sync; triggering queued match"),
+                None,
+            );
+            self.match_artist_folder(band_id, auto_apply_confident, cancel)
+                .await;
         }
     }
 
@@ -1005,5 +1031,121 @@ mod tests {
         assert!(row.downloaded);
         assert_eq!(row.local_status, Some(crate::types::LocalStatus::Present));
         assert_eq!(row.origin, Some(crate::types::Origin::Imported));
+    }
+
+    #[tokio::test]
+    async fn test_library_service_queue_first_match_until_synced() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("queue_first_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 888;
+        // Insert artist with NO releases yet
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "unsynced-artist",
+                        name: "Unsynced Artist",
+                        url: "https://unsynced.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let artist_dir = dir.path().join("Unsynced Artist");
+        let album_dir = artist_dir.join("Debut Album");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+        let cancel = CancellationToken::new();
+
+        // 1. Link folder before sync
+        svc.link_artist_folder(band_id, artist_dir.clone(), false, cancel.clone())
+            .await;
+
+        // Verify folder is linked in DB
+        let folder_opt = pool
+            .reader
+            .call(move |c| lib_repo::get_folder(c, band_id))
+            .await
+            .unwrap();
+        assert!(folder_opt.is_some());
+
+        // Check emitted events: should have FolderStatus Ok, but NO ReconcileReport
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        let has_folder_ok = events.iter().any(|e| {
+            matches!(
+                e,
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    state: FolderState::Ok
+                } if *b == band_id
+            )
+        });
+        assert!(has_folder_ok);
+
+        let has_report_premature = events
+            .iter()
+            .any(|e| matches!(e, WorkerToUiEvent::ReconcileReport { .. }));
+        assert!(!has_report_premature);
+
+        // 2. Now simulate artist sync completing (releases added)
+        let release_key = ItemKey::new(ItemType::Album, 30);
+        pool.writer
+            .call(move |c| {
+                let disc = DiscoveredRelease {
+                    key: release_key,
+                    band_id,
+                    title: "Debut Album",
+                    artist_name: "Unsynced Artist",
+                    url: "https://unsynced.bandcamp.com/album/debut-album",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        // Notify that artist sync finished
+        svc.on_artist_synced(band_id, cancel).await;
+
+        let mut sync_events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            sync_events.push(ev);
+        }
+
+        // ReconcileReport should now be emitted!
+        let report = sync_events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ReconcileReport { report } => Some(report),
+                _ => None,
+            })
+            .expect("should have emitted queued ReconcileReport after sync");
+
+        assert_eq!(report.band_id, band_id);
+        assert_eq!(report.matched.len(), 1);
+        assert_eq!(report.matched[0].release_key, release_key);
     }
 }
