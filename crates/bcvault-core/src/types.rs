@@ -341,6 +341,30 @@ pub struct BatchSummary {
     pub ignored: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchDecision {
+    Adopt {
+        key: ItemKey,
+        path: PathBuf,
+        format: Option<AudioFormat>,
+        folder_mtime: Option<Ts>,
+    },
+    Restore {
+        key: ItemKey,
+        path: PathBuf,
+    },
+    Attach {
+        key: ItemKey,
+        path: PathBuf,
+        format: Option<AudioFormat>,
+        folder_mtime: Option<Ts>,
+    },
+    Ignore {
+        band_id: i64,
+        path: PathBuf,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,

@@ -10,7 +10,9 @@ use crate::library::link::probe_folder;
 use crate::library::matcher::assign_matches;
 use crate::library::scan::scan_linked_folder;
 use crate::library::service::ReconcileReport;
-use crate::types::{FolderState, LibraryPhase, LogLevel, ReleaseQuery};
+use crate::types::{
+    BatchSummary, FolderState, ItemKey, LibraryPhase, LogLevel, MatchDecision, ReleaseQuery,
+};
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
 
@@ -214,10 +216,87 @@ impl LibraryService {
             .await;
     }
 
+    /// Applies user-accepted reconcile decisions for a batch and emits updates.
+    pub async fn apply_reconcile(&self, batch_id: u64, decisions: Vec<MatchDecision>) {
+        let _guard = self.job_lock.lock().await;
+        self.apply_reconcile_internal(batch_id, decisions).await;
+    }
+
+    /// Reverses all modifications committed in a given batch.
+    pub async fn undo_batch(&self, batch_id: u64) {
+        let _guard = self.job_lock.lock().await;
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+
+        let undo_res = pool
+            .writer
+            .call(move |c| {
+                let summary = lib_repo::undo_batch(c, batch_id as i64)?;
+
+                let mut stmt = c.prepare(
+                    "SELECT DISTINCT item_type, item_id FROM library_events WHERE batch_id = ?1",
+                )?;
+                let keys: Vec<ItemKey> = stmt
+                    .query_map(rusqlite::params![batch_id as i64], |r| {
+                        let k_str: String = r.get(0)?;
+                        let id: i64 = r.get(1)?;
+                        let kind = crate::types::ItemType::parse(&k_str)
+                            .unwrap_or(crate::types::ItemType::Album);
+                        Ok(ItemKey::new(kind, id))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                let mut updated_rows = Vec::new();
+                let mut touched_bands = std::collections::HashSet::new();
+                for key in keys {
+                    if let Some(row) = releases::get_release(c, key)? {
+                        touched_bands.insert(row.band_id);
+                        updated_rows.push(row);
+                    }
+                }
+
+                let mut band_stats = Vec::new();
+                for band_id in touched_bands {
+                    let stats = artists::stats_with_quota(c, band_id)?;
+                    band_stats.push((band_id, stats));
+                }
+
+                Ok::<_, DbError>((summary, updated_rows, band_stats))
+            })
+            .await;
+
+        match undo_res {
+            Ok((summary, rows, stats_per_band)) => {
+                for row in rows {
+                    bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(row)));
+                }
+                for (band_id, stats) in stats_per_band {
+                    bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                }
+                bridge.emit(WorkerToUiEvent::LibraryApplied { batch_id, summary });
+                bridge.log(
+                    LogLevel::Info,
+                    "library",
+                    format!("Undid batch {batch_id}"),
+                    None,
+                );
+            }
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to undo batch {batch_id}: {e}"),
+                    None,
+                );
+            }
+        }
+    }
+
     async fn match_artist_folder_internal(
         &self,
         band_id: i64,
-        _auto_apply_confident: bool,
+        auto_apply_confident: bool,
         cancel: CancellationToken,
     ) {
         let pool = self.pool.clone();
@@ -400,6 +479,133 @@ impl LibraryService {
             ),
             None,
         );
+
+        if auto_apply_confident && !report.matched.is_empty() {
+            let decisions: Vec<MatchDecision> = report
+                .matched
+                .iter()
+                .map(|m| MatchDecision::Adopt {
+                    key: m.release_key,
+                    path: m.candidate_path.clone(),
+                    format: m.format_guess,
+                    folder_mtime: None,
+                })
+                .collect();
+            self.apply_reconcile_internal(report.batch_id, decisions)
+                .await;
+        }
+    }
+
+    async fn apply_reconcile_internal(&self, batch_id: u64, decisions: Vec<MatchDecision>) {
+        if decisions.is_empty() {
+            return;
+        }
+
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+
+        let res = pool
+            .writer
+            .call(move |c| {
+                let mut summary = BatchSummary::default();
+                let mut touched_keys = Vec::new();
+
+                for decision in decisions {
+                    match decision {
+                        MatchDecision::Adopt {
+                            key,
+                            path,
+                            format,
+                            folder_mtime,
+                        }
+                        | MatchDecision::Attach {
+                            key,
+                            path,
+                            format,
+                            folder_mtime,
+                        } => {
+                            let mtime = folder_mtime.or_else(|| {
+                                std::fs::metadata(&path)
+                                    .and_then(|m| m.modified())
+                                    .ok()
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs() as i64)
+                            });
+                            lib_repo::adopt(
+                                c,
+                                key,
+                                &path,
+                                format,
+                                crate::types::Origin::Imported,
+                                mtime,
+                                batch_id as i64,
+                            )?;
+                            summary.adopted += 1;
+                            touched_keys.push(key);
+                        }
+                        MatchDecision::Restore { key, path } => {
+                            lib_repo::restore(c, key, &path, batch_id as i64)?;
+                            summary.restored += 1;
+                            touched_keys.push(key);
+                        }
+                        MatchDecision::Ignore { band_id, path } => {
+                            let path_key =
+                                crate::library::scan::normalize_candidate_path_key(&path);
+                            lib_repo::ignore_local(c, band_id, &path_key)?;
+                            summary.ignored += 1;
+                        }
+                    }
+                }
+
+                lib_repo::update_batch_summary(c, batch_id as i64, &summary)?;
+
+                let mut updated_rows = Vec::new();
+                let mut touched_bands = std::collections::HashSet::new();
+                for key in touched_keys {
+                    if let Some(row) = releases::get_release(c, key)? {
+                        touched_bands.insert(row.band_id);
+                        updated_rows.push(row);
+                    }
+                }
+
+                let mut band_stats = Vec::new();
+                for band_id in touched_bands {
+                    let stats = artists::stats_with_quota(c, band_id)?;
+                    band_stats.push((band_id, stats));
+                }
+
+                Ok::<_, DbError>((summary, updated_rows, band_stats))
+            })
+            .await;
+
+        match res {
+            Ok((summary, rows, stats_per_band)) => {
+                for row in rows {
+                    bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(row)));
+                }
+                for (band_id, stats) in stats_per_band {
+                    bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                }
+                bridge.emit(WorkerToUiEvent::LibraryApplied { batch_id, summary });
+                bridge.log(
+                    LogLevel::Info,
+                    "library",
+                    format!(
+                        "Applied batch {batch_id}: {} adopted, {} restored, {} ignored",
+                        summary.adopted, summary.restored, summary.ignored
+                    ),
+                    None,
+                );
+            }
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to apply batch {batch_id}: {e}"),
+                    None,
+                );
+            }
+        }
     }
 }
 
@@ -590,5 +796,214 @@ mod tests {
             .iter()
             .any(|e| matches!(e, WorkerToUiEvent::ReconcileReport { .. }));
         assert!(!has_report);
+    }
+
+    #[tokio::test]
+    async fn test_library_service_apply_reconcile_and_undo() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("apply_undo_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 555;
+        let release_key = ItemKey::new(ItemType::Album, 10);
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-555",
+                        name: "Artist 555",
+                        url: "https://artist555.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc = DiscoveredRelease {
+                    key: release_key,
+                    band_id,
+                    title: "Album 10",
+                    artist_name: "Artist 555",
+                    url: "https://artist555.bandcamp.com/album/album-10",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let artist_dir = dir.path().join("Artist 555");
+        let album_dir = artist_dir.join("Album 10");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.flac"), b"audio").unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.link_artist_folder(band_id, artist_dir.clone(), false, cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        let report = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ReconcileReport { report } => Some(report),
+                _ => None,
+            })
+            .expect("should have emitted ReconcileReport");
+
+        assert_eq!(report.matched.len(), 1);
+        let batch_id = report.batch_id;
+
+        // Apply reconcile
+        let decisions = vec![MatchDecision::Adopt {
+            key: release_key,
+            path: album_dir.clone(),
+            format: Some(crate::types::AudioFormat::Flac),
+            folder_mtime: None,
+        }];
+        svc.apply_reconcile(batch_id, decisions).await;
+
+        // Verify DB updated
+        let row_after_apply = pool
+            .reader
+            .call(move |c| releases::get_release(c, release_key))
+            .await
+            .unwrap()
+            .expect("row should exist");
+        assert!(row_after_apply.downloaded);
+        assert_eq!(
+            row_after_apply.local_status,
+            Some(crate::types::LocalStatus::Present)
+        );
+        assert_eq!(row_after_apply.origin, Some(crate::types::Origin::Imported));
+        assert_eq!(row_after_apply.local_path, Some(album_dir));
+
+        let mut apply_events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            apply_events.push(ev);
+        }
+
+        let has_applied_event = apply_events.iter().any(|e| {
+            matches!(
+                e,
+                WorkerToUiEvent::LibraryApplied {
+                    batch_id: b,
+                    summary
+                } if *b == batch_id && summary.adopted == 1
+            )
+        });
+        assert!(has_applied_event);
+
+        // Undo batch
+        svc.undo_batch(batch_id).await;
+
+        // Verify DB reverted
+        let row_after_undo = pool
+            .reader
+            .call(move |c| releases::get_release(c, release_key))
+            .await
+            .unwrap()
+            .expect("row should exist");
+        assert!(!row_after_undo.downloaded);
+        assert_eq!(row_after_undo.local_status, None);
+        assert_eq!(row_after_undo.origin, None);
+        assert_eq!(row_after_undo.local_path, None);
+
+        let mut undo_events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            undo_events.push(ev);
+        }
+        let has_undone_event = undo_events.iter().any(|e| {
+            matches!(
+                e,
+                WorkerToUiEvent::LibraryApplied {
+                    batch_id: b,
+                    ..
+                } if *b == batch_id
+            )
+        });
+        assert!(has_undone_event);
+    }
+
+    #[tokio::test]
+    async fn test_library_service_auto_apply_confident() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("auto_apply_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 777;
+        let release_key = ItemKey::new(ItemType::Album, 20);
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-777",
+                        name: "Artist 777",
+                        url: "https://artist777.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc = DiscoveredRelease {
+                    key: release_key,
+                    band_id,
+                    title: "Album 20",
+                    artist_name: "Artist 777",
+                    url: "https://artist777.bandcamp.com/album/album-20",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let artist_dir = dir.path().join("Artist 777");
+        let album_dir = artist_dir.join("Album 20");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+        let cancel = CancellationToken::new();
+        // Link with auto_apply_confident = true
+        svc.link_artist_folder(band_id, artist_dir, true, cancel)
+            .await;
+
+        let row = pool
+            .reader
+            .call(move |c| releases::get_release(c, release_key))
+            .await
+            .unwrap()
+            .expect("row should exist");
+
+        // Should be automatically adopted
+        assert!(row.downloaded);
+        assert_eq!(row.local_status, Some(crate::types::LocalStatus::Present));
+        assert_eq!(row.origin, Some(crate::types::Origin::Imported));
     }
 }

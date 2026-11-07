@@ -65,6 +65,13 @@ pub enum UiToWorkerCommand {
         band_id: i64,
         auto_apply_confident: bool,
     },
+    ApplyReconcile {
+        batch_id: u64,
+        decisions: Vec<crate::types::MatchDecision>,
+    },
+    UndoBatch {
+        batch_id: u64,
+    },
     CancelLibrary,
     // misc
     UpdateSettings(Settings),
@@ -141,6 +148,10 @@ pub enum WorkerToUiEvent {
     FolderStatus {
         band_id: i64,
         state: crate::types::FolderState,
+    },
+    LibraryApplied {
+        batch_id: u64,
+        summary: crate::types::BatchSummary,
     },
     Log(LogEntry),
 }

@@ -418,7 +418,8 @@ impl FxState {
             | WorkerToUiEvent::QuotaWarning { .. }
             | WorkerToUiEvent::LibraryProgress { .. }
             | WorkerToUiEvent::ReconcileReport { .. }
-            | WorkerToUiEvent::FolderStatus { .. } => {}
+            | WorkerToUiEvent::FolderStatus { .. }
+            | WorkerToUiEvent::LibraryApplied { .. } => {}
             WorkerToUiEvent::ReleaseUpdated(rel) => {
                 let key = rel.key;
                 let was_dl = self

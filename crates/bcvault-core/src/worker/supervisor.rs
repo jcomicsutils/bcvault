@@ -356,6 +356,21 @@ impl Supervisor {
                         .await;
                 });
             }
+            UiToWorkerCommand::ApplyReconcile {
+                batch_id,
+                decisions,
+            } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.apply_reconcile(batch_id, decisions).await;
+                });
+            }
+            UiToWorkerCommand::UndoBatch { batch_id } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.undo_batch(batch_id).await;
+                });
+            }
             UiToWorkerCommand::CancelLibrary => {
                 self.library_service.cancel();
                 self.library_cancel.cancel();
