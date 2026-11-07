@@ -796,6 +796,81 @@ fn format_signals(signals: &[crate::library::matcher::Signal]) -> String {
         .join("\n")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColumnBudget {
+    pub title_width: f32,
+    pub cand_width: f32,
+}
+
+pub fn compute_balanced_columns(
+    avail_w: f32,
+    fixed_w: f32,
+    title_max_chars: usize,
+    cand_max_chars: usize,
+) -> ColumnBudget {
+    let rem_w = (avail_w - fixed_w).max(180.0);
+    let est_title = (title_max_chars as f32 * 7.5 + 16.0).max(80.0);
+    let est_cand = (cand_max_chars as f32 * 7.5 + 16.0).max(80.0);
+
+    // Case 1: Both fit comfortably without truncation
+    if est_title + est_cand <= rem_w {
+        return ColumnBudget {
+            title_width: est_title,
+            cand_width: rem_w - est_title,
+        };
+    }
+
+    // Baseline split: ~46% Title, ~54% Candidate (candidate includes artist + tags)
+    let title_share = (rem_w * 0.46).round();
+    let cand_share = rem_w - title_share;
+
+    // Case 2: Title is short and does not need its full share
+    if est_title < title_share {
+        let title_w = est_title.max(80.0);
+        return ColumnBudget {
+            title_width: title_w,
+            cand_width: rem_w - title_w,
+        };
+    }
+
+    // Case 3: Candidate is short and does not need its full share
+    if est_cand < cand_share {
+        let cand_w = est_cand.max(80.0);
+        return ColumnBudget {
+            title_width: rem_w - cand_w,
+            cand_width: cand_w,
+        };
+    }
+
+    // Case 4: Both are long -> Fair middle-ground split
+    ColumnBudget {
+        title_width: title_share,
+        cand_width: cand_share,
+    }
+}
+
+fn truncated_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    text: impl Into<egui::WidgetText>,
+    tooltip: Option<String>,
+) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_max_width(width);
+            let mut resp = ui.add(egui::Label::new(text).truncate());
+            if let Some(tip) = tooltip {
+                resp = resp.on_hover_text(tip);
+            }
+            resp
+        },
+    )
+    .inner
+}
+
 fn show_reconcile_report_modal(
     ctx: &Context,
     state: &mut UiState,
@@ -932,6 +1007,23 @@ fn show_reconcile_report_modal(
                             });
                             ui.add_space(4.0);
 
+                            let avail_w = ui.available_width();
+                            let title_max = modal
+                                .report
+                                .matched
+                                .iter()
+                                .map(|m| m.release_title.chars().count())
+                                .max()
+                                .unwrap_or(20);
+                            let cand_max = modal
+                                .report
+                                .matched
+                                .iter()
+                                .map(|m| m.candidate_name.chars().count())
+                                .max()
+                                .unwrap_or(20);
+                            let budget = compute_balanced_columns(avail_w, 104.0, title_max, cand_max);
+
                             egui::Grid::new("matched_tab_grid")
                                 .num_columns(4)
                                 .spacing([8.0, 6.0])
@@ -947,76 +1039,110 @@ fn show_reconcile_report_modal(
                                             }
                                         }
 
-                                            ui.add(egui::Label::new(RichText::new(&m.release_title).strong()).truncate())
-                                                .on_hover_text(&m.release_title);
+                                        truncated_cell(
+                                            ui,
+                                            budget.title_width,
+                                            20.0,
+                                            RichText::new(&m.release_title).strong(),
+                                            Some(m.release_title.clone()),
+                                        );
 
-                                            let fmt_str = m
-                                                .format_guess
-                                                .map(|f| format!("[{}]", f.label()))
-                                                .unwrap_or_default();
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(format!("{} {fmt_str}", m.candidate_name))
-                                                        .color(pal::TEXT_DIM)
-                                                        .monospace(),
-                                                )
-                                                .truncate(),
-                                            )
-                                            .on_hover_text(m.candidate_path.display().to_string());
+                                        let fmt_str = m
+                                            .format_guess
+                                            .map(|f| format!("[{}]", f.label()))
+                                            .unwrap_or_default();
+                                        let cand_disp = format!("{} {fmt_str}", m.candidate_name);
+                                        truncated_cell(
+                                            ui,
+                                            budget.cand_width,
+                                            20.0,
+                                            RichText::new(cand_disp)
+                                                .color(pal::TEXT_DIM)
+                                                .monospace(),
+                                            Some(m.candidate_path.display().to_string()),
+                                        );
 
-                                            let tip = format!(
-                                                "Score: {:.2}\nSignals:\n{}",
-                                                m.score.value,
-                                                format_signals(&m.score.signals)
-                                            );
-                                            ui.label(
-                                                RichText::new(format!("{:.0}%", m.score.value * 100.0))
-                                                    .color(pal::OK)
-                                                    .monospace(),
-                                            )
-                                            .on_hover_text(tip);
+                                        let tip = format!(
+                                            "Score: {:.2}\nSignals:\n{}",
+                                            m.score.value,
+                                            format_signals(&m.score.signals)
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{:.0}%", m.score.value * 100.0))
+                                                .color(pal::OK)
+                                                .monospace(),
+                                        )
+                                        .on_hover_text(tip);
 
-                                            ui.end_row();
-                                        }
-                                    });
-                            } else if modal.report.linked.is_empty() {
-                                ui.label(RichText::new("No matched releases.").color(pal::TEXT_DIM));
-                            }
+                                        ui.end_row();
+                                    }
+                                });
+                        } else if modal.report.linked.is_empty() {
+                            ui.label(RichText::new("No matched releases.").color(pal::TEXT_DIM));
+                        }
 
-                            if !modal.report.linked.is_empty() {
-                                ui.add_space(8.0);
-                                ui.label(
-                                    RichText::new(format!(
-                                        "Already linked ({})",
-                                        modal.report.linked.len()
-                                    ))
-                                    .strong()
-                                    .color(pal::TEXT_DIM),
-                                );
-                                ui.add_space(4.0);
-                                egui::Grid::new("linked_tab_grid")
-                                    .num_columns(2)
-                                    .spacing([8.0, 6.0])
-                                    .show(ui, |ui| {
-                                        for l in &modal.report.linked {
-                                            ui.add(egui::Label::new(RichText::new(&l.release_title).strong()).truncate())
-                                                .on_hover_text(&l.release_title);
-                                            let name = l
-                                                .path
-                                                .file_name()
-                                                .map(|n| n.to_string_lossy().to_string())
-                                                .unwrap_or_else(|| l.path.display().to_string());
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(name).color(pal::TEXT_DIM).monospace(),
-                                                )
-                                                .truncate(),
-                                            )
-                                            .on_hover_text(l.path.display().to_string());
-                                            ui.end_row();
-                                        }
-                                    });
-                            }
+                        if !modal.report.linked.is_empty() {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Already linked ({})",
+                                    modal.report.linked.len()
+                                ))
+                                .strong()
+                                .color(pal::TEXT_DIM),
+                            );
+                            ui.add_space(4.0);
+
+                            let avail_w = ui.available_width();
+                            let title_max = modal
+                                .report
+                                .linked
+                                .iter()
+                                .map(|l| l.release_title.chars().count())
+                                .max()
+                                .unwrap_or(20);
+                            let cand_max = modal
+                                .report
+                                .linked
+                                .iter()
+                                .map(|l| {
+                                    l.path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().chars().count())
+                                        .unwrap_or(20)
+                                    })
+                                    .max()
+                                    .unwrap_or(20);
+                            let budget = compute_balanced_columns(avail_w, 16.0, title_max, cand_max);
+
+                            egui::Grid::new("linked_tab_grid")
+                                .num_columns(2)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for l in &modal.report.linked {
+                                        truncated_cell(
+                                            ui,
+                                            budget.title_width,
+                                            20.0,
+                                            RichText::new(&l.release_title).strong(),
+                                            Some(l.release_title.clone()),
+                                        );
+                                        let name = l
+                                            .path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| l.path.display().to_string());
+                                        truncated_cell(
+                                            ui,
+                                            budget.cand_width,
+                                            20.0,
+                                            RichText::new(name).color(pal::TEXT_DIM).monospace(),
+                                            Some(l.path.display().to_string()),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        }
                         }
                     ReportTab::Review => {
                         if modal.report.review.is_empty() {
@@ -1045,18 +1171,17 @@ fn show_reconcile_report_modal(
                                             if ui.radio(is_chosen, "").clicked() {
                                                 modal.selected_review.insert(r.release_key, c_idx);
                                             }
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(format!(
-                                                        "{} {fmt_str}",
-                                                        c.candidate_name
-                                                    ))
-                                                    .monospace(),
-                                                )
-                                                .truncate(),
-                                            )
-                                            .on_hover_text(
-                                                c.candidate_path.display().to_string(),
+                                            let cand_w = (ui.available_width() - 65.0).max(100.0);
+                                            truncated_cell(
+                                                ui,
+                                                cand_w,
+                                                20.0,
+                                                RichText::new(format!(
+                                                    "{} {fmt_str}",
+                                                    c.candidate_name
+                                                ))
+                                                .monospace(),
+                                                Some(c.candidate_path.display().to_string()),
                                             );
                                             ui.label(
                                                 RichText::new(format!(
@@ -1324,6 +1449,23 @@ fn show_reconcile_report_modal(
                             });
                             ui.add_space(4.0);
 
+                            let avail_w = ui.available_width();
+                            let title_max = modal
+                                .report
+                                .restorable
+                                .iter()
+                                .map(|m| m.release_title.chars().count())
+                                .max()
+                                .unwrap_or(20);
+                            let cand_max = modal
+                                .report
+                                .restorable
+                                .iter()
+                                .map(|m| m.candidate_name.chars().count())
+                                .max()
+                                .unwrap_or(20);
+                            let budget = compute_balanced_columns(avail_w, 48.0, title_max, cand_max);
+
                             egui::Grid::new("restorable_tab_grid")
                                 .num_columns(3)
                                 .spacing([8.0, 6.0])
@@ -1338,21 +1480,27 @@ fn show_reconcile_report_modal(
                                                 modal.selected_restorable.remove(&m.release_key);
                                             }
                                         }
-                                        ui.add(egui::Label::new(RichText::new(&m.release_title).strong()).truncate())
-                                            .on_hover_text(&m.release_title);
+                                        truncated_cell(
+                                            ui,
+                                            budget.title_width,
+                                            20.0,
+                                            RichText::new(&m.release_title).strong(),
+                                            Some(m.release_title.clone()),
+                                        );
                                         let fmt_str = m
                                             .format_guess
                                             .map(|f| format!("[{}]", f.label()))
                                             .unwrap_or_default();
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(format!("{} {fmt_str}", m.candidate_name))
-                                                    .color(pal::TEXT_DIM)
-                                                    .monospace(),
-                                            )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(m.candidate_path.display().to_string());
+                                        let cand_disp = format!("{} {fmt_str}", m.candidate_name);
+                                        truncated_cell(
+                                            ui,
+                                            budget.cand_width,
+                                            20.0,
+                                            RichText::new(cand_disp)
+                                                .color(pal::TEXT_DIM)
+                                                .monospace(),
+                                            Some(m.candidate_path.display().to_string()),
+                                        );
                                         ui.end_row();
                                     }
                                 });
