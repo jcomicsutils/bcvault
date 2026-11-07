@@ -124,7 +124,7 @@ pub fn show(
                 state.filename_pattern_input = state.settings.filename_pattern.clone();
                 state.settings_modal_open = true;
             }
-            if paint::sharp_button(ui, "⌘K Palette")
+            if paint::sharp_button(ui, "Ctrl+K Palette")
                 .on_hover_text("Open Command Palette (Ctrl+K)")
                 .clicked()
             {
