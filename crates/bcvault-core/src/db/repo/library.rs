@@ -1,9 +1,16 @@
 use crate::{
     error::{DbError, LinkFolderError},
-    types::{ArtistFolder, FolderState},
+    types::{
+        ArtistFolder, AudioFormat, BatchSummary, FolderState, ItemKey, ItemType, LocalStatus,
+        Origin, Ts,
+    },
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 pub fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
@@ -152,6 +159,488 @@ pub fn all_folders(conn: &Connection) -> Result<Vec<ArtistFolder>, DbError> {
     Ok(out)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseSnapshot {
+    pub downloaded: bool,
+    pub downloaded_at: Option<Ts>,
+    pub downloaded_format: Option<AudioFormat>,
+    pub downloaded_track_count: Option<u32>,
+    pub downloaded_modified_at: Option<Ts>,
+    pub local_path: Option<PathBuf>,
+    pub local_status: Option<LocalStatus>,
+    pub local_checked_at: Option<Ts>,
+    pub missing_ack_at: Option<Ts>,
+    pub origin: Option<Origin>,
+}
+
+pub fn get_release_snapshot(
+    conn: &Connection,
+    key: ItemKey,
+) -> Result<Option<ReleaseSnapshot>, DbError> {
+    conn.query_row(
+        "SELECT downloaded, downloaded_at, downloaded_format, downloaded_track_count,
+                downloaded_modified_at, local_path, local_status, local_checked_at,
+                missing_ack_at, origin
+         FROM releases WHERE item_type = ?1 AND item_id = ?2",
+        params![key.kind.as_str(), key.id],
+        |r| {
+            let downloaded: i64 = r.get(0)?;
+            let downloaded_at: Option<Ts> = r.get(1)?;
+            let fmt_str: Option<String> = r.get(2)?;
+            let downloaded_format = fmt_str.as_deref().and_then(AudioFormat::parse);
+            let downloaded_track_count: Option<u32> = r.get(3)?;
+            let downloaded_modified_at: Option<Ts> = r.get(4)?;
+            let local_path: Option<PathBuf> = r.get::<_, Option<String>>(5)?.map(PathBuf::from);
+            let status_str: Option<String> = r.get(6)?;
+            let local_status = status_str.as_deref().and_then(LocalStatus::parse);
+            let local_checked_at: Option<Ts> = r.get(7)?;
+            let missing_ack_at: Option<Ts> = r.get(8)?;
+            let origin_str: Option<String> = r.get(9)?;
+            let origin = origin_str.as_deref().and_then(Origin::parse);
+
+            Ok(ReleaseSnapshot {
+                downloaded: downloaded != 0,
+                downloaded_at,
+                downloaded_format,
+                downloaded_track_count,
+                downloaded_modified_at,
+                local_path,
+                local_status,
+                local_checked_at,
+                missing_ack_at,
+                origin,
+            })
+        },
+    )
+    .optional()
+    .map_err(DbError::from)
+}
+
+fn apply_release_snapshot(
+    conn: &Connection,
+    key: ItemKey,
+    snap: &ReleaseSnapshot,
+) -> Result<(), DbError> {
+    // Invariant check: downloaded = 0 => local_status IS NULL
+    let status_str = if snap.downloaded {
+        snap.local_status.map(|s| s.as_str())
+    } else {
+        None
+    };
+    conn.execute(
+        "UPDATE releases SET
+             downloaded = ?1,
+             downloaded_at = ?2,
+             downloaded_format = ?3,
+             downloaded_track_count = ?4,
+             downloaded_modified_at = ?5,
+             local_path = ?6,
+             local_status = ?7,
+             local_checked_at = ?8,
+             missing_ack_at = ?9,
+             origin = ?10
+         WHERE item_type = ?11 AND item_id = ?12",
+        params![
+            if snap.downloaded { 1 } else { 0 },
+            snap.downloaded_at,
+            snap.downloaded_format.map(|f| f.as_str()),
+            snap.downloaded_track_count,
+            snap.downloaded_modified_at,
+            snap.local_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            status_str,
+            snap.local_checked_at,
+            snap.missing_ack_at,
+            snap.origin.map(|o| o.as_str()),
+            key.kind.as_str(),
+            key.id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn record_library_event(
+    conn: &Connection,
+    batch_id: i64,
+    key: ItemKey,
+    kind: &str,
+    old_snap: Option<&ReleaseSnapshot>,
+    new_snap: Option<&ReleaseSnapshot>,
+) -> Result<(), DbError> {
+    let old_json = match old_snap {
+        Some(s) => Some(serde_json::to_string(s)?),
+        None => None,
+    };
+    let new_json = match new_snap {
+        Some(s) => Some(serde_json::to_string(s)?),
+        None => None,
+    };
+    conn.execute(
+        "INSERT INTO library_events (batch_id, item_type, item_id, kind, old_json, new_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            batch_id,
+            key.kind.as_str(),
+            key.id,
+            kind,
+            old_json,
+            new_json,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn set_local_status(
+    conn: &Connection,
+    key: ItemKey,
+    status: Option<LocalStatus>,
+) -> Result<(), DbError> {
+    if let Some(st) = status {
+        conn.execute(
+            "UPDATE releases SET local_status = ?3, local_checked_at = unixepoch()
+             WHERE item_type = ?1 AND item_id = ?2 AND downloaded = 1",
+            params![key.kind.as_str(), key.id, st.as_str()],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE releases SET local_status = NULL, local_checked_at = unixepoch()
+             WHERE item_type = ?1 AND item_id = ?2",
+            params![key.kind.as_str(), key.id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn adopt(
+    conn: &mut Connection,
+    key: ItemKey,
+    path: &Path,
+    format: Option<AudioFormat>,
+    origin: Origin,
+    folder_mtime: Option<Ts>,
+    batch_id: i64,
+) -> Result<(), DbError> {
+    let old_snap = get_release_snapshot(conn, key)?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+    let path_str = path.to_string_lossy().into_owned();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE releases SET
+             downloaded = 1,
+             downloaded_at = COALESCE(?3, unixepoch()),
+             downloaded_format = COALESCE(?4, downloaded_format),
+             downloaded_track_count = track_count,
+             downloaded_modified_at = modified_at,
+             local_path = ?5,
+             local_status = 'present',
+             local_checked_at = unixepoch(),
+             origin = ?6,
+             has_remote_update = 0,
+             remote_update_reason = NULL
+         WHERE item_type = ?1 AND item_id = ?2",
+        params![
+            key.kind.as_str(),
+            key.id,
+            folder_mtime,
+            format.map(|f| f.as_str()),
+            path_str,
+            origin.as_str(),
+        ],
+    )?;
+
+    let new_snap = get_release_snapshot(&tx, key)?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+    record_library_event(
+        &tx,
+        batch_id,
+        key,
+        "adopted",
+        Some(&old_snap),
+        Some(&new_snap),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn relink(
+    conn: &mut Connection,
+    key: ItemKey,
+    new_path: &Path,
+    batch_id: i64,
+) -> Result<(), DbError> {
+    let old_snap = get_release_snapshot(conn, key)?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+    let path_str = new_path.to_string_lossy().into_owned();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE releases SET
+             local_path = ?3,
+             local_status = 'present',
+             local_checked_at = unixepoch()
+         WHERE item_type = ?1 AND item_id = ?2 AND downloaded = 1",
+        params![key.kind.as_str(), key.id, path_str],
+    )?;
+
+    let new_snap = get_release_snapshot(&tx, key)?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+    record_library_event(
+        &tx,
+        batch_id,
+        key,
+        "relinked",
+        Some(&old_snap),
+        Some(&new_snap),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn archive(conn: &mut Connection, keys: &[ItemKey], batch_id: i64) -> Result<(), DbError> {
+    let mut old_snaps = Vec::with_capacity(keys.len());
+    for &k in keys {
+        if let Some(snap) = get_release_snapshot(conn, k)? {
+            old_snaps.push((k, snap));
+        }
+    }
+
+    let tx = conn.transaction()?;
+    for (key, old_snap) in old_snaps {
+        tx.execute(
+            "UPDATE releases SET
+                 local_status = 'archived',
+                 local_checked_at = unixepoch()
+             WHERE item_type = ?1 AND item_id = ?2 AND downloaded = 1",
+            params![key.kind.as_str(), key.id],
+        )?;
+        let new_snap = get_release_snapshot(&tx, key)?
+            .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        record_library_event(
+            &tx,
+            batch_id,
+            key,
+            "archived",
+            Some(&old_snap),
+            Some(&new_snap),
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn unmark(conn: &mut Connection, keys: &[ItemKey], batch_id: i64) -> Result<(), DbError> {
+    let mut old_snaps = Vec::with_capacity(keys.len());
+    for &k in keys {
+        if let Some(snap) = get_release_snapshot(conn, k)? {
+            old_snaps.push((k, snap));
+        }
+    }
+
+    let tx = conn.transaction()?;
+    for (key, old_snap) in old_snaps {
+        tx.execute(
+            "UPDATE releases SET
+                 downloaded = 0,
+                 downloaded_at = NULL,
+                 downloaded_format = NULL,
+                 downloaded_track_count = NULL,
+                 downloaded_modified_at = NULL,
+                 local_path = NULL,
+                 local_status = NULL,
+                 local_checked_at = NULL,
+                 missing_ack_at = NULL,
+                 origin = NULL
+             WHERE item_type = ?1 AND item_id = ?2",
+            params![key.kind.as_str(), key.id],
+        )?;
+        let new_snap = get_release_snapshot(&tx, key)?
+            .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        record_library_event(
+            &tx,
+            batch_id,
+            key,
+            "unmarked",
+            Some(&old_snap),
+            Some(&new_snap),
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn restore(
+    conn: &mut Connection,
+    key: ItemKey,
+    path: &Path,
+    batch_id: i64,
+) -> Result<(), DbError> {
+    let old_snap = get_release_snapshot(conn, key)?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+    let path_str = path.to_string_lossy().into_owned();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE releases SET
+             downloaded = 1,
+             local_path = ?3,
+             local_status = 'present',
+             local_checked_at = unixepoch()
+         WHERE item_type = ?1 AND item_id = ?2",
+        params![key.kind.as_str(), key.id, path_str],
+    )?;
+
+    let new_snap = get_release_snapshot(&tx, key)?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+    record_library_event(
+        &tx,
+        batch_id,
+        key,
+        "restored",
+        Some(&old_snap),
+        Some(&new_snap),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn ignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO artist_folder_ignored (band_id, path_key) VALUES (?1, ?2)",
+        params![band_id, path_key],
+    )?;
+    Ok(())
+}
+
+pub fn unignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result<(), DbError> {
+    conn.execute(
+        "DELETE FROM artist_folder_ignored WHERE band_id = ?1 AND path_key = ?2",
+        params![band_id, path_key],
+    )?;
+    Ok(())
+}
+
+pub fn get_ignored_local(conn: &Connection, band_id: i64) -> Result<HashSet<String>, DbError> {
+    let mut stmt = conn.prepare("SELECT path_key FROM artist_folder_ignored WHERE band_id = ?1")?;
+    let rows = stmt.query_map(params![band_id], |r| r.get::<_, String>(0))?;
+    let mut set = HashSet::new();
+    for r in rows {
+        set.insert(r?);
+    }
+    Ok(set)
+}
+
+pub fn create_batch(conn: &Connection, kind: &str, summary: &BatchSummary) -> Result<i64, DbError> {
+    let summary_json = serde_json::to_string(summary)?;
+    conn.execute(
+        "INSERT INTO library_batches (kind, summary_json, ts) VALUES (?1, ?2, unixepoch())",
+        params![kind, summary_json],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_batch_summary(
+    conn: &Connection,
+    batch_id: i64,
+    summary: &BatchSummary,
+) -> Result<(), DbError> {
+    let summary_json = serde_json::to_string(summary)?;
+    conn.execute(
+        "UPDATE library_batches SET summary_json = ?2 WHERE id = ?1",
+        params![batch_id, summary_json],
+    )?;
+    Ok(())
+}
+
+pub fn get_batch_summary(
+    conn: &Connection,
+    batch_id: i64,
+) -> Result<Option<BatchSummary>, DbError> {
+    let summary_opt: Option<String> = conn
+        .query_row(
+            "SELECT summary_json FROM library_batches WHERE id = ?1",
+            params![batch_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    match summary_opt {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, DbError> {
+    let (undone_at, summary_json): (Option<Ts>, String) = conn
+        .query_row(
+            "SELECT undone_at, summary_json FROM library_batches WHERE id = ?1",
+            params![batch_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+    if undone_at.is_some() {
+        return Ok(serde_json::from_str(&summary_json)?);
+    }
+
+    let summary: BatchSummary = serde_json::from_str(&summary_json)?;
+
+    // Fetch events in reverse order
+    let events = {
+        let mut stmt = conn.prepare(
+            "SELECT item_type, item_id, kind, old_json FROM library_events
+             WHERE batch_id = ?1 ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(params![batch_id], |r| {
+            let t_str: String = r.get(0)?;
+            let kind = ItemType::parse(&t_str).unwrap_or(ItemType::Album);
+            let id: i64 = r.get(1)?;
+            let ev_kind: String = r.get(2)?;
+            let old_json: Option<String> = r.get(3)?;
+            Ok((ItemKey { kind, id }, ev_kind, old_json))
+        })?;
+        let mut evs = Vec::new();
+        for r in rows {
+            evs.push(r?);
+        }
+        evs
+    };
+
+    let tx = conn.transaction()?;
+    for (key, _ev_kind, old_json) in events {
+        if let Some(json_str) = old_json {
+            let snap: ReleaseSnapshot = serde_json::from_str(&json_str)?;
+            apply_release_snapshot(&tx, key, &snap)?;
+        }
+    }
+
+    tx.execute(
+        "UPDATE library_batches SET undone_at = unixepoch() WHERE id = ?1",
+        params![batch_id],
+    )?;
+    tx.commit()?;
+
+    Ok(summary)
+}
+
+pub fn assert_library_invariants(conn: &Connection) -> Result<(), DbError> {
+    let violated: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM releases WHERE downloaded = 0 AND local_status IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    if violated != 0 {
+        return Err(DbError::SchemaMismatch(format!(
+            "Invariant violation: {violated} releases have downloaded = 0 but local_status IS NOT NULL"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -291,5 +780,143 @@ mod tests {
         assert_eq!(dl, 1);
         assert_eq!(lp, "/some/path");
         assert_eq!(ls, "present");
+    }
+
+    #[test]
+    fn batches_events_undo_and_invariants() {
+        let mut conn = test_db();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, downloaded, track_count, modified_at)
+             VALUES ('album', 100, 1, 'Album 100', 'Artist 1', 'https://art1.bandcamp.com/album/100', 0, 10, 1700000000)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, downloaded, track_count, modified_at)
+             VALUES ('album', 200, 1, 'Album 200', 'Artist 1', 'https://art1.bandcamp.com/album/200', 0, 8, 1700000000)",
+            [],
+        ).unwrap();
+
+        // Initial invariant check: downloaded = 0 => local_status IS NULL
+        assert_library_invariants(&conn).unwrap();
+
+        // 1. Adopt release 100 in a batch
+        let summary1 = BatchSummary {
+            adopted: 1,
+            ..Default::default()
+        };
+        let b1 = create_batch(&conn, "adopt", &summary1).unwrap();
+        let key100 = ItemKey::new(ItemType::Album, 100);
+        let path100 = Path::new("/music/art1/album100");
+        adopt(
+            &mut conn,
+            key100,
+            path100,
+            Some(AudioFormat::Flac),
+            Origin::Imported,
+            Some(1700005000),
+            b1,
+        )
+        .unwrap();
+
+        assert_library_invariants(&conn).unwrap();
+        let snap100 = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert!(snap100.downloaded);
+        assert_eq!(snap100.local_status, Some(LocalStatus::Present));
+        assert_eq!(snap100.downloaded_format, Some(AudioFormat::Flac));
+        assert_eq!(snap100.origin, Some(Origin::Imported));
+        assert_eq!(snap100.downloaded_track_count, Some(10));
+
+        // 2. Relink release 100
+        let b2 = create_batch(
+            &conn,
+            "relink",
+            &BatchSummary {
+                relinked: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let path100_moved = Path::new("/music/art1/album100_moved");
+        relink(&mut conn, key100, path100_moved, b2).unwrap();
+        let snap_relinked = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert_eq!(
+            snap_relinked.local_path,
+            Some(PathBuf::from("/music/art1/album100_moved"))
+        );
+        assert_library_invariants(&conn).unwrap();
+
+        // 3. Archive release 100
+        let b3 = create_batch(
+            &conn,
+            "resolve",
+            &BatchSummary {
+                archived: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        archive(&mut conn, &[key100], b3).unwrap();
+        let snap_archived = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert_eq!(snap_archived.local_status, Some(LocalStatus::Archived));
+        assert!(snap_archived.downloaded); // Still downloaded!
+        assert_library_invariants(&conn).unwrap();
+
+        // 4. Undo archive batch (b3)
+        let undid3 = undo_batch(&mut conn, b3).unwrap();
+        assert_eq!(undid3.archived, 1);
+        let snap_unarchived = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert_eq!(snap_unarchived.local_status, Some(LocalStatus::Present));
+        assert_library_invariants(&conn).unwrap();
+
+        // 5. Unmark release 100
+        let b4 = create_batch(
+            &conn,
+            "resolve",
+            &BatchSummary {
+                unmarked: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        unmark(&mut conn, &[key100], b4).unwrap();
+        let snap_unmarked = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert!(!snap_unmarked.downloaded);
+        assert_eq!(snap_unmarked.local_status, None);
+        assert_eq!(snap_unmarked.local_path, None);
+        assert_library_invariants(&conn).unwrap();
+
+        // 6. Undo unmark (b4)
+        undo_batch(&mut conn, b4).unwrap();
+        let snap_restored = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert!(snap_restored.downloaded);
+        assert_eq!(snap_restored.local_status, Some(LocalStatus::Present));
+        assert_library_invariants(&conn).unwrap();
+
+        // 7. Undo adopt (b1) - restores release 100 back to downloaded = 0
+        undo_batch(&mut conn, b1).unwrap();
+        let snap_init = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert!(!snap_init.downloaded);
+        assert_eq!(snap_init.local_status, None);
+        assert_library_invariants(&conn).unwrap();
+
+        // 8. Test ignore_local and unignore_local (requires linked folder)
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("downloads");
+        std::fs::create_dir(&out_dir).unwrap();
+        let art_dir = tmp.path().join("artist1");
+        std::fs::create_dir(&art_dir).unwrap();
+        link_folder(&mut conn, 1, &art_dir, &out_dir).unwrap();
+
+        ignore_local(&conn, 1, "orphan_folder").unwrap();
+        let ignored = get_ignored_local(&conn, 1).unwrap();
+        assert!(ignored.contains("orphan_folder"));
+        unignore_local(&conn, 1, "orphan_folder").unwrap();
+        let ignored2 = get_ignored_local(&conn, 1).unwrap();
+        assert!(!ignored2.contains("orphan_folder"));
+
+        // 9. set_local_status
+        set_local_status(&conn, key100, Some(LocalStatus::Present)).unwrap();
+        // key100 has downloaded = 0, so set_local_status Some does not set local_status
+        assert_library_invariants(&conn).unwrap();
     }
 }

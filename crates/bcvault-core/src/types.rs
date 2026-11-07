@@ -303,6 +303,16 @@ pub struct ArtistFolder {
     pub state: FolderState,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchSummary {
+    pub adopted: u32,
+    pub relinked: u32,
+    pub archived: u32,
+    pub unmarked: u32,
+    pub restored: u32,
+    pub ignored: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
