@@ -198,9 +198,19 @@ pub struct ArtistView {
     pub band_id: i64,
     pub slug: String,
     pub name: String,
+    pub custom_name: Option<String>,
     pub url: String,
     pub last_synced_at: Option<Ts>,
     pub stats: ArtistStats,
+}
+
+impl ArtistView {
+    pub fn display_name(&self) -> &str {
+        self.custom_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +367,8 @@ pub struct Settings {
     pub format: AudioFormat,
     pub format_fallback: FormatFallback,
     pub layout: OutputLayout,
+    #[serde(default)]
+    pub filename_pattern: String,
     pub auto_extract: bool,
     pub delete_zip_after_extract: bool,
     pub batch_limit: u32, // 25 | 50 | 100 | 150 | 200, clamped to quota_hard
@@ -376,6 +388,7 @@ impl Settings {
             format: AudioFormat::Flac,
             format_fallback: FormatFallback::Nearest,
             layout: OutputLayout::Flat,
+            filename_pattern: String::new(),
             auto_extract: true,
             delete_zip_after_extract: false,
             batch_limit: 150,

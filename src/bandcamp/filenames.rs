@@ -1,5 +1,119 @@
-use crate::types::ItemType;
+use crate::types::{AudioFormat, ItemType, Ts};
+use chrono::TimeZone;
 use percent_encoding::percent_decode_str;
+
+#[derive(Clone, Debug)]
+pub struct ReleaseFormatContext<'a> {
+    pub artist: &'a str,
+    pub page_artist: &'a str,
+    pub title: &'a str,
+    pub published_at: Option<Ts>,
+    pub kind: ItemType,
+    pub format: AudioFormat,
+    pub item_id: i64,
+}
+
+impl ReleaseFormatContext<'_> {
+    pub fn year_str(&self) -> String {
+        self.published_at
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+            .map(|dt| dt.format("%Y").to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn date_str(&self) -> String {
+        self.published_at
+            .and_then(|ts| chrono::Utc.timestamp_opt(ts, 0).single())
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    }
+}
+
+/// Formats a custom filename stem from a pattern using standard tags:
+/// `{artist}`, `{page_artist}`, `{album}`, `{title}`, `{year}`, `{date}`, `{format}`, `{type}`, `{id}`
+/// (also supports `%artist%`, `%album%`, etc.).
+/// Returns `None` if `pattern` is empty/whitespace.
+pub fn format_release_stem(pattern: &str, ctx: &ReleaseFormatContext<'_>) -> Option<String> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let year = ctx.year_str();
+    let date = ctx.date_str();
+    let id_str = ctx.item_id.to_string();
+    let fmt_str = ctx.format.label();
+    let type_str = ctx.kind.as_str();
+
+    let replacements: &[(&str, &str)] = &[
+        ("{artist}", ctx.artist),
+        ("%artist%", ctx.artist),
+        ("{album_artist}", ctx.artist),
+        ("%album_artist%", ctx.artist),
+        ("{page_artist}", ctx.page_artist),
+        ("%page_artist%", ctx.page_artist),
+        ("{album}", ctx.title),
+        ("%album%", ctx.title),
+        ("{title}", ctx.title),
+        ("%title%", ctx.title),
+        ("{year}", &year),
+        ("%year%", &year),
+        ("{date}", &date),
+        ("%date%", &date),
+        ("{format}", fmt_str),
+        ("%format%", fmt_str),
+        ("{type}", type_str),
+        ("%type%", type_str),
+        ("{id}", &id_str),
+        ("%id%", &id_str),
+    ];
+
+    let mut expanded = replace_tags_case_insensitive(trimmed, replacements);
+    expanded = clean_empty_separators(&expanded);
+    Some(sanitize_stem(&expanded))
+}
+
+fn replace_tags_case_insensitive(input: &str, tags: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(input.len() + 32);
+    let mut rest = input;
+    while !rest.is_empty() {
+        let mut matched = false;
+        for &(tag, val) in tags {
+            if rest.len() >= tag.len()
+                && rest.is_char_boundary(tag.len())
+                && rest[..tag.len()].eq_ignore_ascii_case(tag)
+            {
+                out.push_str(val);
+                rest = &rest[tag.len()..];
+                matched = true;
+                break;
+            }
+        }
+        if !matched && let Some(ch) = rest.chars().next() {
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
+}
+
+fn clean_empty_separators(s: &str) -> String {
+    // Collapse empty brackets like "()", "[]" and dangling " - " separators when a tag (e.g. {year}) is empty
+    let mut cur = s
+        .replace("()", "")
+        .replace("[]", "")
+        .replace("( )", "")
+        .replace("[ ]", "");
+    while cur.contains(" -  - ") {
+        cur = cur.replace(" -  - ", " - ");
+    }
+    let words: Vec<&str> = cur.split_whitespace().collect();
+    let joined = words.join(" ");
+    let trimmed = joined
+        .trim_matches(|c: char| matches!(c, '-' | '_' | ' '))
+        .trim();
+    trimmed.to_string()
+}
 
 pub fn parse_content_disposition(header: &str) -> Option<String> {
     let mut star_val: Option<String> = None;
@@ -33,11 +147,28 @@ pub fn parse_content_disposition(header: &str) -> Option<String> {
 
 pub fn resolve_download_filename(
     content_disposition: Option<&str>,
+    custom_stem: Option<&str>,
     artist: &str,
     title: &str,
     kind: ItemType,
     ext: &str,
 ) -> String {
+    let clean_ext = ext.trim_start_matches('.');
+    let final_ext = if kind == ItemType::Album {
+        "zip"
+    } else {
+        clean_ext
+    };
+
+    if let Some(stem_override) = custom_stem.filter(|s| !s.trim().is_empty()) {
+        let stem = sanitize_stem(stem_override);
+        return if final_ext.is_empty() {
+            stem
+        } else {
+            truncate_with_ext(&stem, final_ext, 180)
+        };
+    }
+
     if let Some(cd) = content_disposition
         && let Some(parsed) = parse_content_disposition(cd)
     {
@@ -45,13 +176,10 @@ pub fn resolve_download_filename(
     }
 
     let stem = sanitize_stem(&format!("{artist} - {title}"));
-    let clean_ext = ext.trim_start_matches('.');
-    if clean_ext.is_empty() {
+    if final_ext.is_empty() {
         stem
-    } else if kind == ItemType::Album {
-        truncate_with_ext(&stem, "zip", 180)
     } else {
-        truncate_with_ext(&stem, clean_ext, 180)
+        truncate_with_ext(&stem, final_ext, 180)
     }
 }
 
@@ -265,8 +393,51 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_download_filename(None, "Artist", "Title", ItemType::Album, "zip"),
+            resolve_download_filename(None, None, "Artist", "Title", ItemType::Album, "zip"),
             "Artist - Title.zip"
+        );
+
+        assert_eq!(
+            resolve_download_filename(
+                Some(r#"attachment; filename="ServerName.zip""#),
+                Some("2023 - Custom Artist - Custom Album"),
+                "Artist",
+                "Title",
+                ItemType::Album,
+                "zip"
+            ),
+            "2023 - Custom Artist - Custom Album.zip"
+        );
+    }
+
+    #[test]
+    fn custom_pattern_formatting() {
+        let ctx = ReleaseFormatContext {
+            artist: "Release Artist",
+            page_artist: "Page Artist",
+            title: "Great Album",
+            published_at: Some(1_700_000_000), // 2023-11-14
+            kind: ItemType::Album,
+            format: AudioFormat::Flac,
+            item_id: 42,
+        };
+
+        assert_eq!(
+            format_release_stem("{year} - {artist} - {album}", &ctx).as_deref(),
+            Some("2023 - Release Artist - Great Album")
+        );
+        assert_eq!(
+            format_release_stem("{page_artist} - {title} [{format}] ({date})", &ctx).as_deref(),
+            Some("Page Artist - Great Album [FLAC] (2023-11-14)")
+        );
+
+        let no_date_ctx = ReleaseFormatContext {
+            published_at: None,
+            ..ctx
+        };
+        assert_eq!(
+            format_release_stem("{year} - {artist} - {album}", &no_date_ctx).as_deref(),
+            Some("Release Artist - Great Album")
         );
     }
 }

@@ -41,7 +41,7 @@ async fn fresh_db_pragmas_and_migrations() {
         .await
         .unwrap();
 
-    assert_eq!(uv, 2);
+    assert_eq!(uv, 3);
     assert_eq!(jm.to_lowercase(), "wal");
     assert_eq!(fk, 1);
 
@@ -67,7 +67,7 @@ async fn fresh_db_pragmas_and_migrations() {
         .call(|c| Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?))
         .await
         .unwrap();
-    assert_eq!(uv2, 2);
+    assert_eq!(uv2, 3);
 
     // Bump user_version to 99 and verify TooNew on reopen
     pool2
@@ -86,7 +86,7 @@ async fn fresh_db_pragmas_and_migrations() {
         err,
         DbError::TooNew {
             found: 99,
-            max_supported: 2
+            max_supported: 3
         }
     ));
 }

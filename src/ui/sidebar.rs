@@ -1,7 +1,7 @@
 use crate::{
     types::{ArtistStats, SyncMode, SyncScope},
     ui::{
-        state::UiState,
+        state::{RenameArtistModalState, UiState},
         theme::pal,
         widgets::{sharp_button, sharp_rect},
     },
@@ -54,6 +54,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
         .enumerate()
         .filter(|(_, a)| {
             filter_lower.is_empty()
+                || a.display_name().to_lowercase().contains(&filter_lower)
                 || a.name.to_lowercase().contains(&filter_lower)
                 || a.slug.to_lowercase().contains(&filter_lower)
         })
@@ -91,7 +92,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
 
                     let resp = draw_artist_row(
                         ui,
-                        &artist.name,
+                        artist.display_name(),
                         artist.stats,
                         is_selected,
                         sync_prog.as_ref().map(|p| {
@@ -143,13 +144,21 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             });
                             ui.close();
                         }
+                        if sharp_button(ui, "Rename Artist...").clicked() {
+                            state.rename_artist_modal = Some(RenameArtistModalState {
+                                band_id: artist.band_id,
+                                original_name: artist.name.clone(),
+                                name_input: artist.display_name().to_string(),
+                            });
+                            ui.close();
+                        }
                         if sharp_button(ui, "Open in Browser").clicked() {
                             let _ = open::that_detached(&artist.url);
                             ui.close();
                         }
                         if sharp_button(ui, "Remove Artist...").clicked() {
                             state.confirm_remove_artist =
-                                Some((artist.band_id, artist.name.clone()));
+                                Some((artist.band_id, artist.display_name().to_string()));
                             ui.close();
                         }
                     });

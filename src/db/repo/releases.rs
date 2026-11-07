@@ -286,10 +286,15 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
     Ok(stats)
 }
 
-const SELECT_RELEASE_COLS: &str = "item_type, item_id, band_id, title, artist_name, url, cover_url, art_id, \
-     classification, is_preorder, track_count, published_at, modified_at, \
-     downloaded, downloaded_at, downloaded_format, local_path, \
-     has_remote_update, remote_update_reason";
+const SELECT_RELEASE_COLS: &str = "r.item_type, r.item_id, r.band_id, r.title, \
+     CASE WHEN a.custom_name IS NOT NULL AND a.custom_name != '' AND r.artist_name = a.name \
+          THEN a.custom_name ELSE r.artist_name END AS artist_name, \
+     r.url, r.cover_url, r.art_id, \
+     r.classification, r.is_preorder, r.track_count, r.published_at, r.modified_at, \
+     r.downloaded, r.downloaded_at, r.downloaded_format, r.local_path, \
+     r.has_remote_update, r.remote_update_reason";
+
+const FROM_RELEASES_JOIN: &str = "releases r LEFT JOIN artists a ON r.band_id = a.band_id";
 
 fn map_release_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseRow> {
     let t_str: String = r.get(0)?;
@@ -352,8 +357,9 @@ fn map_release_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseRow> {
 }
 
 pub fn get_release(conn: &Connection, key: ItemKey) -> Result<Option<ReleaseRow>, DbError> {
-    let sql =
-        format!("SELECT {SELECT_RELEASE_COLS} FROM releases WHERE item_type = ?1 AND item_id = ?2");
+    let sql = format!(
+        "SELECT {SELECT_RELEASE_COLS} FROM {FROM_RELEASES_JOIN} WHERE r.item_type = ?1 AND r.item_id = ?2"
+    );
     let row = conn
         .query_row(&sql, params![key.kind.as_str(), key.id], map_release_row)
         .optional()?;
@@ -373,29 +379,29 @@ pub fn escape_like(input: &str) -> String {
 
 pub const fn order_by_clause(sort: SortKey, dir: SortDir) -> &'static str {
     match (sort, dir) {
-        (SortKey::Released, SortDir::Desc) => "published_at DESC, item_type, item_id",
-        (SortKey::Released, SortDir::Asc) => "published_at ASC, item_type, item_id",
+        (SortKey::Released, SortDir::Desc) => "r.published_at DESC, r.item_type, r.item_id",
+        (SortKey::Released, SortDir::Asc) => "r.published_at ASC, r.item_type, r.item_id",
         (SortKey::Artist, SortDir::Asc) => {
-            "artist_name COLLATE NOCASE ASC, title COLLATE NOCASE ASC, item_type, item_id"
+            "artist_name COLLATE NOCASE ASC, r.title COLLATE NOCASE ASC, r.item_type, r.item_id"
         }
         (SortKey::Artist, SortDir::Desc) => {
-            "artist_name COLLATE NOCASE DESC, title COLLATE NOCASE DESC, item_type, item_id"
+            "artist_name COLLATE NOCASE DESC, r.title COLLATE NOCASE DESC, r.item_type, r.item_id"
         }
-        (SortKey::Title, SortDir::Asc) => "title COLLATE NOCASE ASC, item_type, item_id",
-        (SortKey::Title, SortDir::Desc) => "title COLLATE NOCASE DESC, item_type, item_id",
-        (SortKey::Type, SortDir::Asc) => "item_type ASC, published_at DESC, item_id",
-        (SortKey::Type, SortDir::Desc) => "item_type DESC, published_at DESC, item_id",
-        (SortKey::Tracks, SortDir::Asc) => "track_count ASC, item_type, item_id",
-        (SortKey::Tracks, SortDir::Desc) => "track_count DESC, item_type, item_id",
-        (SortKey::Classification, SortDir::Asc) => "classification ASC, item_type, item_id",
-        (SortKey::Classification, SortDir::Desc) => "classification DESC, item_type, item_id",
-        (SortKey::Format, SortDir::Asc) => "downloaded_format ASC, item_type, item_id",
-        (SortKey::Format, SortDir::Desc) => "downloaded_format DESC, item_type, item_id",
+        (SortKey::Title, SortDir::Asc) => "r.title COLLATE NOCASE ASC, r.item_type, r.item_id",
+        (SortKey::Title, SortDir::Desc) => "r.title COLLATE NOCASE DESC, r.item_type, r.item_id",
+        (SortKey::Type, SortDir::Asc) => "r.item_type ASC, r.published_at DESC, r.item_id",
+        (SortKey::Type, SortDir::Desc) => "r.item_type DESC, r.published_at DESC, r.item_id",
+        (SortKey::Tracks, SortDir::Asc) => "r.track_count ASC, r.item_type, r.item_id",
+        (SortKey::Tracks, SortDir::Desc) => "r.track_count DESC, r.item_type, r.item_id",
+        (SortKey::Classification, SortDir::Asc) => "r.classification ASC, r.item_type, r.item_id",
+        (SortKey::Classification, SortDir::Desc) => "r.classification DESC, r.item_type, r.item_id",
+        (SortKey::Format, SortDir::Asc) => "r.downloaded_format ASC, r.item_type, r.item_id",
+        (SortKey::Format, SortDir::Desc) => "r.downloaded_format DESC, r.item_type, r.item_id",
         (SortKey::Status, SortDir::Asc) => {
-            "downloaded ASC, has_remote_update ASC, item_type, item_id"
+            "r.downloaded ASC, r.has_remote_update ASC, r.item_type, r.item_id"
         }
         (SortKey::Status, SortDir::Desc) => {
-            "downloaded DESC, has_remote_update DESC, item_type, item_id"
+            "r.downloaded DESC, r.has_remote_update DESC, r.item_type, r.item_id"
         }
     }
 }
@@ -405,25 +411,29 @@ pub fn build_query_sql(query: &ReleaseQuery) -> (String, Vec<Value>) {
     let mut values: Vec<Value> = Vec::new();
 
     if let Some(band_id) = query.band_id {
-        where_parts.push("band_id = ?");
+        where_parts.push("r.band_id = ?");
         values.push(Value::Integer(band_id));
     }
 
     match query.filter {
         ReleaseFilter::All => {}
-        ReleaseFilter::Free => where_parts.push("classification = 'free'"),
-        ReleaseFilter::Nyp => where_parts.push("classification = 'nyp'"),
-        ReleaseFilter::EmailRequired => where_parts.push("classification = 'email_required'"),
-        ReleaseFilter::Paid => where_parts.push("classification = 'paid'"),
-        ReleaseFilter::NotDownloaded => where_parts
-            .push("downloaded = 0 AND classification IN ('free','nyp','email_required','unknown')"),
-        ReleaseFilter::Updated => where_parts.push("has_remote_update = 1"),
+        ReleaseFilter::Free => where_parts.push("r.classification = 'free'"),
+        ReleaseFilter::Nyp => where_parts.push("r.classification = 'nyp'"),
+        ReleaseFilter::EmailRequired => where_parts.push("r.classification = 'email_required'"),
+        ReleaseFilter::Paid => where_parts.push("r.classification = 'paid'"),
+        ReleaseFilter::NotDownloaded => where_parts.push(
+            "r.downloaded = 0 AND r.classification IN ('free','nyp','email_required','unknown')",
+        ),
+        ReleaseFilter::Updated => where_parts.push("r.has_remote_update = 1"),
     }
 
     let trimmed = query.search.trim();
     if !trimmed.is_empty() {
         let pattern = format!("%{}%", escape_like(trimmed));
-        where_parts.push("(title LIKE ? ESCAPE '!' OR artist_name LIKE ? ESCAPE '!')");
+        where_parts.push(
+            "(r.title LIKE ? ESCAPE '!' OR r.artist_name LIKE ? ESCAPE '!' OR a.custom_name LIKE ? ESCAPE '!')",
+        );
+        values.push(Value::Text(pattern.clone()));
         values.push(Value::Text(pattern.clone()));
         values.push(Value::Text(pattern));
     }
@@ -435,8 +445,9 @@ pub fn build_query_sql(query: &ReleaseQuery) -> (String, Vec<Value>) {
     };
 
     let order_sql = order_by_clause(query.sort, query.dir);
-    let sql =
-        format!("SELECT {SELECT_RELEASE_COLS} FROM releases {where_sql} ORDER BY {order_sql}");
+    let sql = format!(
+        "SELECT {SELECT_RELEASE_COLS} FROM {FROM_RELEASES_JOIN} {where_sql} ORDER BY {order_sql}"
+    );
     (sql, values)
 }
 

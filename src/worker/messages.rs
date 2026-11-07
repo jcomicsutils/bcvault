@@ -13,6 +13,10 @@ pub enum UiToWorkerCommand {
     RemoveArtist {
         band_id: i64,
     },
+    RenameArtist {
+        band_id: i64,
+        custom_name: Option<String>,
+    },
     // sync
     Sync {
         scope: SyncScope,

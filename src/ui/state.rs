@@ -74,6 +74,13 @@ pub struct QuotaWarningModalState {
     pub opts: DownloadOpts,
 }
 
+#[derive(Clone, Debug)]
+pub struct RenameArtistModalState {
+    pub band_id: i64,
+    pub original_name: String,
+    pub name_input: String,
+}
+
 pub struct UiState {
     pub artists: Vec<ArtistView>,
     pub artist_filter: String,
@@ -114,6 +121,7 @@ pub struct UiState {
     pub redeem_modal: Option<RedeemModalState>,
     pub quota_modal: Option<QuotaWarningModalState>,
     pub confirm_remove_artist: Option<(i64, String)>,
+    pub rename_artist_modal: Option<RenameArtistModalState>,
 
     pub thumbs: ThumbCache,
     pub focus_search_next_frame: bool,
@@ -169,6 +177,7 @@ impl UiState {
             redeem_modal: None,
             quota_modal: None,
             confirm_remove_artist: None,
+            rename_artist_modal: None,
 
             thumbs: ThumbCache::new(),
             focus_search_next_frame: false,
@@ -248,8 +257,9 @@ impl UiState {
                     *existing = view;
                 } else {
                     self.artists.push(view);
-                    self.artists.sort_by_key(|a| a.name.to_lowercase());
                 }
+                self.artists
+                    .sort_by_key(|a| a.display_name().to_lowercase());
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::ArtistRemoved { band_id } => {

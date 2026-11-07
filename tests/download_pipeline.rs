@@ -392,8 +392,8 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
     assert!(!folder2.join("cover.jpg").exists());
     assert!(warn_logged);
 
-    // Verify OutputLayout::ByPageArtist creates folder using the page artist name (artists.name)
-    // rather than the release artist override (releases.artist_name)
+    // Verify OutputLayout::ByPageArtist creates folder using the page artist name (or custom_name)
+    // rather than the release artist override (releases.artist_name), and custom filename_pattern applies.
     let k3 = ItemKey::new(ItemType::Track, 201);
     pool.writer
         .call(move |c| {
@@ -407,6 +407,7 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
                     cover_url: None,
                 },
             )?;
+            artists::set_custom_name(c, 20, Some("Renamed Page Artist"))?;
             releases::upsert_discovered(
                 c,
                 &DiscoveredRelease {
@@ -425,6 +426,7 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
 
     let mut page_layout_settings = Settings::default_with_dir(out_dir.clone());
     page_layout_settings.layout = OutputLayout::ByPageArtist;
+    page_layout_settings.filename_pattern = "{year} - {artist} - {album}".to_string();
     mgr.update_settings(page_layout_settings);
 
     mgr.enqueue_downloads(
@@ -444,11 +446,14 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
             ..
         } = ev
         {
-            assert_eq!(
-                path,
-                out_dir
-                    .join("Label Page Artist")
-                    .join("Sub Release Artist - SongOne")
+            let expected_folder = out_dir
+                .join("Renamed Page Artist")
+                .join("2023 - Sub Release Artist - SongOne");
+            assert_eq!(path, expected_folder);
+            assert!(
+                expected_folder
+                    .join("2023 - Sub Release Artist - SongOne.flac")
+                    .exists()
             );
             break;
         }
@@ -503,6 +508,7 @@ async fn cancel_mid_stream_and_truncated_body() {
             url: &trunc_url,
             band_id: Some(1),
             dest_dir: &out_dir,
+            custom_stem: None,
             artist: "Art",
             title: "Trunc",
             kind: ItemType::Album,
@@ -532,6 +538,7 @@ async fn cancel_mid_stream_and_truncated_body() {
             url: &slow_url,
             band_id: Some(1),
             dest_dir: &out_dir,
+            custom_stem: None,
             artist: "Art",
             title: "Slow",
             kind: ItemType::Album,

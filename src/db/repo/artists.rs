@@ -48,24 +48,38 @@ pub fn delete(conn: &Connection, band_id: i64) -> Result<(), DbError> {
     Ok(())
 }
 
+pub fn set_custom_name(
+    conn: &Connection,
+    band_id: i64,
+    custom_name: Option<&str>,
+) -> Result<(), DbError> {
+    let normalized = custom_name.map(str::trim).filter(|s| !s.is_empty());
+    conn.execute(
+        "UPDATE artists SET custom_name = ?2 WHERE band_id = ?1",
+        params![band_id, normalized],
+    )?;
+    Ok(())
+}
+
 pub fn get_view(conn: &Connection, band_id: i64) -> Result<Option<ArtistView>, DbError> {
     let row = conn
         .query_row(
-            "SELECT band_id, slug, name, url, last_synced_at FROM artists WHERE band_id = ?1",
+            "SELECT band_id, slug, name, custom_name, url, last_synced_at FROM artists WHERE band_id = ?1",
             params![band_id],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, Option<Ts>>(4)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<Ts>>(5)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((band_id, slug, name, url, last_synced_at)) = row else {
+    let Some((band_id, slug, name, custom_name, url, last_synced_at)) = row else {
         return Ok(None);
     };
 
@@ -74,6 +88,7 @@ pub fn get_view(conn: &Connection, band_id: i64) -> Result<Option<ArtistView>, D
         band_id,
         slug,
         name,
+        custom_name,
         url,
         last_synced_at,
         stats,
@@ -83,29 +98,31 @@ pub fn get_view(conn: &Connection, band_id: i64) -> Result<Option<ArtistView>, D
 pub fn list_views(conn: &Connection) -> Result<Vec<ArtistView>, DbError> {
     let stats_map = releases::all_artist_stats(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT band_id, slug, name, url, last_synced_at
+        "SELECT band_id, slug, name, custom_name, url, last_synced_at
          FROM artists
-         ORDER BY name COLLATE NOCASE ASC, band_id ASC",
+         ORDER BY COALESCE(custom_name, name) COLLATE NOCASE ASC, band_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<Ts>>(4)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<Ts>>(5)?,
         ))
     })?;
 
     let mut out = Vec::new();
     for r in rows {
-        let (band_id, slug, name, url, last_synced_at) = r?;
+        let (band_id, slug, name, custom_name, url, last_synced_at) = r?;
         let mut stats = stats_map.get(&band_id).copied().unwrap_or_default();
         stats.quota_used_30d = history::quota_used_30d(conn, band_id)?;
         out.push(ArtistView {
             band_id,
             slug,
             name,
+            custom_name,
             url,
             last_synced_at,
             stats,

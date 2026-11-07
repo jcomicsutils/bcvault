@@ -24,6 +24,7 @@ pub struct StreamRequest<'a> {
     pub url: &'a str,
     pub band_id: Option<i64>,
     pub dest_dir: &'a Path,
+    pub custom_stem: Option<&'a str>,
     pub artist: &'a str,
     pub title: &'a str,
     pub kind: ItemType,
@@ -74,6 +75,7 @@ pub async fn stream_download(
     let expected_len = resp.content_length();
     let file_name = resolve_download_filename(
         content_disp.as_deref(),
+        req.custom_stem,
         req.artist,
         req.title,
         req.kind,

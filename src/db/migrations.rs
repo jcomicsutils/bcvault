@@ -4,9 +4,13 @@ use rusqlite::Connection;
 pub const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_indexes.sql")),
+    (
+        3,
+        include_str!("../../migrations/0003_custom_artist_name.sql"),
+    ),
 ];
 
-pub const MAX_VERSION: i32 = 2;
+pub const MAX_VERSION: i32 = 3;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     let current_version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -41,14 +45,14 @@ mod tests {
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 2);
+        assert_eq!(v, 3);
 
         // Re-running is a no-op
         run(&mut conn).unwrap();
         let v2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v2, 2);
+        assert_eq!(v2, 3);
 
         // Bump to version 99 and verify TooNew
         conn.pragma_update(None, "user_version", 99).unwrap();
@@ -57,7 +61,7 @@ mod tests {
             err,
             DbError::TooNew {
                 found: 99,
-                max_supported: 2
+                max_supported: 3
             }
         ));
     }

@@ -1,5 +1,9 @@
 use crate::{
-    bandcamp::{BandcampClient, download_api::choose_format, filenames::sanitize_stem},
+    bandcamp::{
+        BandcampClient,
+        download_api::choose_format,
+        filenames::{ReleaseFormatContext, format_release_stem, sanitize_stem},
+    },
     db::{
         DbPool,
         repo::{
@@ -784,26 +788,38 @@ impl DownloadManager {
             state: JobState::Downloading,
         });
 
+        let band_id = row.band_id;
+        let page_artist = self
+            .pool
+            .reader
+            .call(move |c| artists::get_view(c, band_id))
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v.display_name().to_string())
+            .unwrap_or_else(|| row.artist_name.clone());
+
         let base_out = match settings.layout {
             OutputLayout::Flat => spec.opts.out_dir.clone(),
             OutputLayout::ByArtist => spec.opts.out_dir.join(sanitize_stem(&row.artist_name)),
-            OutputLayout::ByPageArtist => {
-                let band_id = row.band_id;
-                let page_artist = self
-                    .pool
-                    .reader
-                    .call(move |c| artists::get_view(c, band_id))
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|v| v.name)
-                    .unwrap_or_else(|| row.artist_name.clone());
-                spec.opts.out_dir.join(sanitize_stem(&page_artist))
-            }
+            OutputLayout::ByPageArtist => spec.opts.out_dir.join(sanitize_stem(&page_artist)),
         };
 
+        let fmt_ctx = ReleaseFormatContext {
+            artist: &row.artist_name,
+            page_artist: &page_artist,
+            title: &row.title,
+            published_at: row.published_at,
+            kind: row.key.kind,
+            format: chosen_fmt,
+            item_id: row.key.id,
+        };
+        let custom_stem = format_release_stem(&settings.filename_pattern, &fmt_ctx);
+
         let dest_dir = if row.key.kind == ItemType::Track {
-            let folder_name = sanitize_stem(&format!("{} - {}", row.artist_name, row.title));
+            let folder_name = custom_stem
+                .clone()
+                .unwrap_or_else(|| sanitize_stem(&format!("{} - {}", row.artist_name, row.title)));
             base_out.join(folder_name)
         } else {
             base_out
@@ -823,6 +839,7 @@ impl DownloadManager {
                 url: download_url,
                 band_id: Some(row.band_id),
                 dest_dir: &dest_dir,
+                custom_stem: custom_stem.as_deref(),
                 artist: &row.artist_name,
                 title: &row.title,
                 kind: row.key.kind,

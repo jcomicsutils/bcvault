@@ -170,6 +170,36 @@ impl Supervisor {
                     }
                 });
             }
+            UiToWorkerCommand::RenameArtist {
+                band_id,
+                custom_name,
+            } => {
+                let pool = self.pool.clone();
+                let bridge = self.bridge.clone();
+                tokio::spawn(async move {
+                    let res = pool
+                        .writer
+                        .call(move |c| {
+                            artists::set_custom_name(c, band_id, custom_name.as_deref())?;
+                            artists::get_view(c, band_id)
+                        })
+                        .await;
+                    match res {
+                        Ok(Some(av)) => {
+                            bridge.emit(WorkerToUiEvent::ArtistUpserted(av));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            bridge.log(
+                                LogLevel::Error,
+                                "db",
+                                format!("Failed to rename artist {band_id}: {e}"),
+                                None,
+                            );
+                        }
+                    }
+                });
+            }
             UiToWorkerCommand::Sync { scope, mode } => {
                 let pool = self.pool.clone();
                 let svc = self.sync_service.clone();

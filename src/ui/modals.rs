@@ -15,7 +15,8 @@ pub fn show(ctx: &Context, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWor
     let any_modal = state.redeem_modal.is_some()
         || state.quota_modal.is_some()
         || state.settings_draft.is_some()
-        || state.confirm_remove_artist.is_some();
+        || state.confirm_remove_artist.is_some()
+        || state.rename_artist_modal.is_some();
 
     if !any_modal {
         return;
@@ -49,6 +50,9 @@ pub fn show(ctx: &Context, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWor
     }
     if state.confirm_remove_artist.is_some() {
         show_confirm_remove_modal(ctx, state, cmd_tx, esc);
+    }
+    if state.rename_artist_modal.is_some() {
+        show_rename_artist_modal(ctx, state, cmd_tx, esc);
     }
 }
 
@@ -213,6 +217,24 @@ fn show_settings_modal(
                     });
                     ui.end_row();
 
+                    ui.label("Filename Pattern:")
+                        .on_hover_text("Tags: {artist}, {page_artist}, {album} / {title}, {year}, {date}, {format}, {type}, {id}\nLeave blank to use default / Bandcamp server filename.");
+                    ui.vertical(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut draft.filename_pattern)
+                                .hint_text("Default (e.g. {artist} - {album} or {year} - {artist} - {album})")
+                                .desired_width(280.0),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Tags: {artist}, {page_artist}, {album}, {title}, {year}, {date}, {format}, {type}, {id}",
+                            )
+                            .size(11.0)
+                            .color(pal::TEXT_DIM),
+                        );
+                    });
+                    ui.end_row();
+
                     ui.label("Format Fallback:");
                     ui.horizontal(|ui| {
                         ui.selectable_value(
@@ -341,5 +363,68 @@ fn show_confirm_remove_modal(
 
     if keep_open {
         state.confirm_remove_artist = Some((band_id, name));
+    }
+}
+
+fn show_rename_artist_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    esc: bool,
+) {
+    let Some(mut modal) = state.rename_artist_modal.take() else {
+        return;
+    };
+    let mut keep_open = !esc;
+
+    egui::Window::new("Rename Page Artist")
+        .order(Order::Foreground)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(380.0);
+            ui.label(
+                RichText::new(format!("Bandcamp page name: {}", modal.original_name))
+                    .color(pal::TEXT_DIM),
+            );
+            ui.label("Custom display & folder name:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut modal.name_input)
+                    .hint_text(&modal.original_name)
+                    .desired_width(f32::INFINITY),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if sharp_button(ui, "Save").clicked() || enter {
+                    let trimmed = modal.name_input.trim();
+                    let custom_name = if trimmed.is_empty() || trimmed == modal.original_name {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                    let _ = cmd_tx.send(UiToWorkerCommand::RenameArtist {
+                        band_id: modal.band_id,
+                        custom_name,
+                    });
+                    keep_open = false;
+                }
+                if sharp_button(ui, "Reset to Default").clicked() {
+                    let _ = cmd_tx.send(UiToWorkerCommand::RenameArtist {
+                        band_id: modal.band_id,
+                        custom_name: None,
+                    });
+                    keep_open = false;
+                }
+                if sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
+
+    if keep_open {
+        state.rename_artist_modal = Some(modal);
     }
 }
