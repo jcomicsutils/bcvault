@@ -70,21 +70,39 @@ pub fn run_scan_and_match(
         band_id: Some(band_id),
         ..Default::default()
     };
-    let releases = rel_repo::query_releases(conn, &query)?;
+    let all_releases = rel_repo::query_releases(conn, &query)?;
     let ignored = lib_repo::get_ignored_local(conn, band_id)?;
+
+    let active_linked_keys: std::collections::HashSet<String> = all_releases
+        .iter()
+        .filter(|r| r.downloaded && r.local_status != Some(crate::types::LocalStatus::Archived))
+        .filter_map(|r| r.local_path.as_ref())
+        .map(|p| lib_repo::normalize_path_key(p))
+        .collect();
+
+    let adoptable: Vec<_> = all_releases
+        .into_iter()
+        .filter(|r| !r.downloaded || r.local_status == Some(crate::types::LocalStatus::Archived))
+        .collect();
+
+    let unlinked_candidates: Vec<_> = scan_report
+        .candidates
+        .into_iter()
+        .filter(|c| !active_linked_keys.contains(&lib_repo::normalize_path_key(&c.path)))
+        .collect();
 
     if let Some(f) = progress_fn {
         f(
             LibraryPhase::Matching,
             0,
-            scan_report.candidates.len() as u32,
+            unlinked_candidates.len() as u32,
             None,
         );
     }
 
     let assignment = assign_matches(
-        &scan_report.candidates,
-        &releases,
+        &unlinked_candidates,
+        &adoptable,
         auto_match_min,
         review_match_min,
         &ignored,

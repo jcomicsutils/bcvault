@@ -1220,16 +1220,22 @@ impl LibraryService {
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
+                let active_linked_keys: std::collections::HashSet<String> = rels
+                    .iter()
+                    .filter(|r| r.downloaded && r.local_status != Some(LocalStatus::Archived))
+                    .filter_map(|r| r.local_path.as_ref())
+                    .map(|p| lib_repo::normalize_path_key(p))
+                    .collect();
                 let adoptable: Vec<ReleaseRow> = rels
                     .into_iter()
                     .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
                     .collect();
-                Ok::<_, DbError>((adoptable, ign))
+                Ok::<_, DbError>((adoptable, ign, active_linked_keys))
             })
             .await;
 
-        let (releases, ignored) = match rel_res {
-            Ok(pair) => pair,
+        let (releases, ignored, active_linked_keys) = match rel_res {
+            Ok(tuple) => tuple,
             Err(e) => {
                 bridge.log(
                     LogLevel::Error,
@@ -1241,15 +1247,21 @@ impl LibraryService {
             }
         };
 
+        let unlinked_candidates: Vec<crate::library::AlbumCandidate> = scan_report
+            .candidates
+            .into_iter()
+            .filter(|c| !active_linked_keys.contains(&lib_repo::normalize_path_key(&c.path)))
+            .collect();
+
         bridge.emit(WorkerToUiEvent::LibraryProgress {
             phase: LibraryPhase::Matching,
             done: 0,
-            total: scan_report.candidates.len() as u32,
+            total: unlinked_candidates.len() as u32,
             current: None,
         });
 
         let assignment = assign_matches(
-            &scan_report.candidates,
+            &unlinked_candidates,
             &releases,
             st.auto_match_min,
             st.review_match_min,
@@ -1281,19 +1293,24 @@ impl LibraryService {
 
         let review_count = assignment.review.len() as u32;
 
-        let report = ReconcileReport {
-            batch_id: 0,
-            band_id,
-            matched: assignment.matched,
-            review: assignment.review,
-            page_only: assignment.page_only,
-            local_only: assignment.local_only,
-            conflicts: assignment.conflicts,
-            restorable: assignment.restorable,
-        };
-        bridge.emit(WorkerToUiEvent::ReconcileReport {
-            report: Box::new(report),
-        });
+        if !assignment.review.is_empty()
+            || !assignment.conflicts.is_empty()
+            || !assignment.restorable.is_empty()
+        {
+            let report = ReconcileReport {
+                batch_id: 0,
+                band_id,
+                matched: assignment.matched,
+                review: assignment.review,
+                page_only: assignment.page_only,
+                local_only: assignment.local_only,
+                conflicts: assignment.conflicts,
+                restorable: assignment.restorable,
+            };
+            bridge.emit(WorkerToUiEvent::ReconcileReport {
+                report: Box::new(report),
+            });
+        }
 
         RescanOutcome {
             adopted: adopted_count,
@@ -1419,16 +1436,22 @@ impl LibraryService {
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
+                let active_linked_keys: std::collections::HashSet<String> = rels
+                    .iter()
+                    .filter(|r| r.downloaded && r.local_status != Some(LocalStatus::Archived))
+                    .filter_map(|r| r.local_path.as_ref())
+                    .map(|p| lib_repo::normalize_path_key(p))
+                    .collect();
                 let adoptable: Vec<ReleaseRow> = rels
                     .into_iter()
                     .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
                     .collect();
-                Ok::<_, DbError>((adoptable, ign))
+                Ok::<_, DbError>((adoptable, ign, active_linked_keys))
             })
             .await;
 
-        let (releases, ignored) = match rel_res {
-            Ok(pair) => pair,
+        let (releases, ignored, active_linked_keys) = match rel_res {
+            Ok(tuple) => tuple,
             Err(e) => {
                 bridge.log(
                     LogLevel::Error,
@@ -1440,15 +1463,21 @@ impl LibraryService {
             }
         };
 
+        let unlinked_candidates: Vec<crate::library::AlbumCandidate> = scan_report
+            .candidates
+            .into_iter()
+            .filter(|c| !active_linked_keys.contains(&lib_repo::normalize_path_key(&c.path)))
+            .collect();
+
         bridge.emit(WorkerToUiEvent::LibraryProgress {
             phase: LibraryPhase::Matching,
             done: 0,
-            total: scan_report.candidates.len() as u32,
+            total: unlinked_candidates.len() as u32,
             current: None,
         });
 
         let assignment = assign_matches(
-            &scan_report.candidates,
+            &unlinked_candidates,
             &releases,
             st.auto_match_min,
             st.review_match_min,
@@ -3515,6 +3544,112 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let outcome = svc.rescan_and_adopt_on_sync(999, cancel).await;
+        assert_eq!(outcome.adopted, 0);
+        assert_eq!(outcome.review_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_already_linked_candidates_are_not_reported_as_local_only() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("already_linked_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 888;
+        let artist_dir = dir.path().join("Artist 888");
+        let album_dir = artist_dir.join("Album One [FLAC]");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.flac"), b"dummy audio").unwrap();
+
+        let out_dir = dir.path().join("downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let key = ItemKey {
+            kind: ItemType::Album,
+            id: 8881,
+        };
+
+        // Insert artist and release already downloaded and linked to album_dir
+        let a_dir = artist_dir.clone();
+        let alb_dir = album_dir.clone();
+        let o_dir = out_dir.clone();
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-888",
+                        name: "Artist 888",
+                        url: "https://artist888.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key,
+                        band_id,
+                        title: "Album One",
+                        artist_name: "Artist 888",
+                        url: "https://artist888.bandcamp.com/album/album-one",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+
+                // Mark release downloaded at alb_dir
+                let batch_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &alb_dir,
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::Imported,
+                    None,
+                    batch_id,
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+
+        // 1. Calling match_artist_folder should find 0 unlinked candidates, so local_only is 0
+        svc.match_artist_folder(band_id, false, cancel.clone())
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        let report = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ReconcileReport { report } => Some(report),
+                _ => None,
+            })
+            .expect("should emit ReconcileReport");
+
+        // The candidate at album_dir is already linked, so local_only MUST be 0!
+        assert_eq!(report.local_only.len(), 0);
+        assert_eq!(report.matched.len(), 0);
+        assert_eq!(report.review.len(), 0);
+        assert_eq!(report.page_only.len(), 0);
+
+        // 2. Calling rescan_and_adopt_on_sync should also produce 0 review and 0 adopted
+        let outcome = svc.rescan_and_adopt_on_sync(band_id, cancel).await;
         assert_eq!(outcome.adopted, 0);
         assert_eq!(outcome.review_count, 0);
     }
