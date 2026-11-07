@@ -77,3 +77,34 @@ pub enum DownloadError {
     #[error("Download cancelled")]
     Cancelled,
 }
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LinkFolderError {
+    #[error("Path does not exist: {0}")]
+    NotFound(std::path::PathBuf),
+    #[error("Path is not a directory: {0}")]
+    NotADirectory(std::path::PathBuf),
+    #[error("Path is not readable: {0}")]
+    Unreadable(std::path::PathBuf),
+    #[error("Folder overlaps with output directory: {0}")]
+    OverlapsOutDir(std::path::PathBuf),
+    #[error("Folder overlaps with existing linked folder for artist {band_id}: {path}")]
+    OverlapsExisting {
+        band_id: i64,
+        path: std::path::PathBuf,
+    },
+    #[error("Database error: {0}")]
+    Db(String),
+}
+
+impl From<rusqlite::Error> for LinkFolderError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Db(e.to_string())
+    }
+}
+
+impl From<DbError> for LinkFolderError {
+    fn from(e: DbError) -> Self {
+        Self::Db(e.to_string())
+    }
+}
