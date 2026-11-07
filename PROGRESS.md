@@ -1,11 +1,11 @@
 # bcvault Progress
 
 ## Current Task
-- **Phase 1**: Database and core types (Tasks 1.1 - 1.7)
+- **Phase 2**: Scraper and API client (Tasks 2.1 - 2.8)
 
 ## Milestones
 - [x] Phase 0: Scaffold
-- [ ] Phase 1: Database and core types
+- [x] Phase 1: Database and core types
 - [ ] Phase 2: Scraper and API client
 - [ ] Phase 3: Async download engine
 - [ ] Phase 4: Zero-radius `egui` table and state wiring
