@@ -6,7 +6,7 @@ use crate::{
     state::{FxState, paint_cover_slot},
     views::wall::class_color,
 };
-use bcvault_core::worker::messages::UiToWorkerCommand;
+use bcvault_core::{types::Classification, worker::messages::UiToWorkerCommand};
 use egui::{Color32, CornerRadius, Order, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -71,36 +71,6 @@ pub fn show_drawer(
                     .corner_radius(CornerRadius::ZERO)
                     .inner_margin(12.0_f32)
                     .show(ui, |ui| {
-                        // Palette-tinted mesh gradient header
-                        let hdr_rect = Rect::from_min_size(
-                            ui.max_rect().min,
-                            Vec2::new(ui.available_width(), 44.0),
-                        );
-                        let (c_tl, c_tr) = if let Some(aid) = row.art_id
-                            && let Some(pal) = state.palettes.get(&aid)
-                        {
-                            (
-                                Color32::from_rgb(
-                                    pal.swatches[0][0],
-                                    pal.swatches[0][1],
-                                    pal.swatches[0][2],
-                                )
-                                .gamma_multiply(0.32),
-                                Color32::from_rgb(
-                                    pal.swatches[1][0],
-                                    pal.swatches[1][1],
-                                    pal.swatches[1][2],
-                                )
-                                .gamma_multiply(0.24),
-                            )
-                        } else {
-                            (
-                                th.accent.gamma_multiply(0.25),
-                                th.accent2.gamma_multiply(0.18),
-                            )
-                        };
-                        paint::glow_rect(ui.painter(), hdr_rect, c_tl, c_tr, th.bg1, th.bg1);
-
                         ui.horizontal(|ui| {
                             if paint::sharp_button(ui, "◀ Prev")
                                 .on_hover_text("Previous release (Left)")
@@ -208,7 +178,9 @@ pub fn show_drawer(
                                     if paint::sharp_button(ui, "Open in Browser").clicked() {
                                         pending_actions.push(FxAction::OpenInBrowser(key));
                                     }
-                                    if paint::sharp_button(ui, "Redeem URL...").clicked() {
+                                    if row.rel.classification == Classification::EmailRequired
+                                        && paint::sharp_button(ui, "Redeem URL...").clicked()
+                                    {
                                         pending_actions.push(FxAction::RedeemDialog(key));
                                     }
                                     if row.rel.downloaded {

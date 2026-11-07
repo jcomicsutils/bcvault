@@ -37,6 +37,7 @@ pub fn validate_atmosphere_shader(glsl_source: &str) -> Result<(), String> {
 
 /// Paints the 48x27 quantised square-cell ambient aurora backdrop behind the wall header,
 /// tinted by the hovered/open cover's two primary swatches (`SOFT` springs).
+#[allow(dead_code)]
 pub fn paint_ambient_backdrop(
     painter: &egui::Painter,
     rect: Rect,

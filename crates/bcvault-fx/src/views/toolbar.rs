@@ -1,12 +1,12 @@
 use crate::{
-    actions::{FxAction, GroupBy, ViewMode},
+    actions::{FxAction, FxSortKey, GroupBy, ViewMode},
     motion::SpringCfg,
     paint,
     services::messages::FxCommand,
     state::{CARD_SIZE_LABELS, FxState},
 };
 use bcvault_core::{
-    types::{AudioFormat, ReleaseFilter},
+    types::{AudioFormat, ReleaseFilter, SortDir},
     worker::messages::UiToWorkerCommand,
 };
 use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
@@ -107,7 +107,7 @@ pub fn show(
 
             egui::ComboBox::from_id_salt("fx_group_by")
                 .selected_text(state.query.group.label())
-                .width(120.0)
+                .width(110.0)
                 .show_ui(ui, |ui| {
                     for g in GroupBy::ALL {
                         let mut curr = state.query.group;
@@ -116,6 +116,35 @@ pub fn show(
                         }
                     }
                 });
+
+            egui::ComboBox::from_id_salt("fx_wall_sort")
+                .selected_text(format!("Sort: {}", state.query.fx_sort.label()))
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for sk in FxSortKey::ALL {
+                        let mut curr = state.query.fx_sort;
+                        if ui.selectable_value(&mut curr, sk, sk.label()).clicked() {
+                            pending_actions.push(FxAction::SetSort(sk, state.query.base.dir));
+                        }
+                    }
+                });
+
+            let dir_icon = match state.query.base.dir {
+                SortDir::Asc => "↑",
+                SortDir::Desc => "↓",
+            };
+            if paint::sharp_button(ui, dir_icon)
+                .on_hover_text(match state.query.base.dir {
+                    SortDir::Asc => "Ascending (click for Descending)",
+                    SortDir::Desc => "Descending (click for Ascending)",
+                })
+                .clicked()
+            {
+                pending_actions.push(FxAction::SetSort(
+                    state.query.fx_sort,
+                    state.query.base.dir.toggle(),
+                ));
+            }
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

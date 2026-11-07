@@ -4,7 +4,6 @@ use crate::{
     motion::{EffectsLevel, SpringCfg, stagger_delay_s},
     paint,
     services::messages::{FxCommand, Tier},
-    shader::paint_ambient_backdrop,
     state::{FxState, paint_cover_slot},
 };
 use bcvault_core::{
@@ -168,10 +167,6 @@ pub fn show(
 ) {
     let th = state.active_theme;
     let avail = ui.available_rect_before_wrap();
-
-    // Ambient aurora header backdrop (Full effects level)
-    let amb_rect = Rect::from_min_size(avail.min, Vec2::new(avail.width(), 120.0));
-    paint_ambient_backdrop(ui.painter(), amb_rect, state, now_s);
 
     let card_w = state
         .motion

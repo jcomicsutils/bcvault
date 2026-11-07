@@ -68,28 +68,35 @@ pub fn show(
 
     // 1. Add Artist input bar
     ui.horizontal(|ui| {
+        let (collapse_clicked, add_clicked) = ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let collapse = paint::sharp_button(ui, "«")
+                    .on_hover_text("Collapse sidebar (Ctrl+B)")
+                    .clicked();
+                let add = ui
+                    .add_enabled(
+                        !state.add_artist_pending && !state.add_artist_input.trim().is_empty(),
+                        egui::Button::new("Add").corner_radius(CornerRadius::ZERO),
+                    )
+                    .clicked();
+                (collapse, add)
+            })
+            .inner;
+
+        if collapse_clicked {
+            pending_actions.push(FxAction::ToggleSidebar);
+        }
+
         let te = egui::TextEdit::singleline(&mut state.add_artist_input)
             .hint_text("Add Artist (URL or Slug)")
-            .desired_width((ui.available_width() - 78.0).max(60.0));
+            .desired_width((ui.available_width() - 4.0).max(40.0));
         let resp = ui.add_enabled(!state.add_artist_pending, te);
         let enter_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let add_clicked = ui
-            .add_enabled(
-                !state.add_artist_pending && !state.add_artist_input.trim().is_empty(),
-                egui::Button::new("Add").corner_radius(CornerRadius::ZERO),
-            )
-            .clicked();
         if (enter_pressed || add_clicked) && !state.add_artist_input.trim().is_empty() {
             let input = state.add_artist_input.trim().to_string();
             state.add_artist_input.clear();
             state.add_artist_pending = true;
             let _ = core_tx.send(UiToWorkerCommand::AddArtist { input });
-        }
-        if paint::sharp_button(ui, "«")
-            .on_hover_text("Collapse sidebar (Ctrl+B)")
-            .clicked()
-        {
-            pending_actions.push(FxAction::ToggleSidebar);
         }
     });
 
@@ -372,19 +379,27 @@ fn draw_artist_row(
             Pos2::new(mos_rect.max.x + 6.0, rect.min.y + 2.0),
             Pos2::new(rect.max.x - 6.0, rect.max.y - 2.0),
         );
+
+        let badge_galley =
+            ui.painter()
+                .layout_no_wrap(badge_str, FontId::monospace(11.0), th.text_dim);
+        let badge_w = badge_galley.size().x;
+        let badge_pos = Pos2::new(
+            inner.max.x - badge_w,
+            inner.center().y - badge_galley.size().y * 0.5,
+        );
+        ui.painter().galley(badge_pos, badge_galley, th.text_dim);
+
+        let name_rect = Rect::from_min_max(
+            inner.min,
+            Pos2::new((inner.max.x - badge_w - 6.0).max(inner.min.x), inner.max.y),
+        );
         let mut child = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(inner)
+                .max_rect(name_rect)
                 .layout(Layout::left_to_right(Align::Center)),
         );
         child.add(egui::Label::new(RichText::new(name).color(th.text)).truncate());
-        child.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(badge_str)
-                    .font(FontId::monospace(11.0))
-                    .color(th.text_dim),
-            );
-        });
     }
 
     resp.on_hover_text(format!(

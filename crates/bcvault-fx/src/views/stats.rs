@@ -222,7 +222,15 @@ pub fn show(
                 .stats
                 .artist_cells
                 .iter()
-                .map(|(bid, name, cl, cnt)| ((*bid, name.clone(), *cl), *cnt as f32))
+                .map(|(bid, name, cl, cnt)| {
+                    let display_name = state
+                        .artists
+                        .iter()
+                        .find(|a| a.band_id == *bid)
+                        .map(|a| a.display_name().to_string())
+                        .unwrap_or_else(|| name.clone());
+                    ((*bid, display_name, *cl), *cnt as f32)
+                })
                 .collect();
             let cells = squarified_treemap(&items, tm_rect.shrink(2.0));
             for cell in cells {

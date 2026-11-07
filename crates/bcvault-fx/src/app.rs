@@ -329,22 +329,20 @@ impl eframe::App for FxApp {
                 views::dock::show(ui, &mut self.state, &self.core_tx, now_s);
             });
 
-        // 3. Left Sidebar (width springs between 240px and 56px collapsed rail)
-        let target_sb_w = if self.state.sidebar_collapsed {
-            56.0
+        // 3. Left Sidebar (resizable when expanded, 56px fixed rail when collapsed)
+        let sb_panel = egui::SidePanel::left("fx_left_sidebar");
+        let sb_panel = if self.state.sidebar_collapsed {
+            sb_panel.exact_width(56.0).resizable(false)
         } else {
-            248.0
+            sb_panel
+                .default_width(280.0)
+                .min_width(220.0)
+                .max_width(500.0)
+                .resizable(true)
         };
-        let sb_w = self
-            .state
-            .motion
-            .val("sidebar_width", target_sb_w, SpringCfg::SMOOTH);
-        egui::SidePanel::left("fx_left_sidebar")
-            .exact_width(sb_w)
-            .resizable(false)
-            .show(ctx, |ui| {
-                views::sidebar::show(ui, &mut self.state, &self.core_tx, &self.fx_tx, now_s);
-            });
+        sb_panel.show(ctx, |ui| {
+            views::sidebar::show(ui, &mut self.state, &self.core_tx, &self.fx_tx, now_s);
+        });
 
         // 4. Central View with hard wipe transition
         egui::CentralPanel::default().show(ctx, |ui| {

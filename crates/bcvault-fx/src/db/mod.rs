@@ -820,7 +820,7 @@ pub fn query_stats(conn: &Connection) -> Result<Stats, DbError> {
 
     {
         let mut stmt = conn.prepare(
-            "SELECT r.band_id, COALESCE(a.name, r.artist_name), r.classification, COUNT(*)
+            "SELECT r.band_id, COALESCE(NULLIF(TRIM(a.custom_name), ''), a.name, r.artist_name), r.classification, COUNT(*)
              FROM m.releases r
              LEFT JOIN m.artists a ON a.band_id = r.band_id
              GROUP BY r.band_id, r.classification",
