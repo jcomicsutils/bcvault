@@ -1,86 +1,23 @@
-# Bandcamp HTML & API Endpoint Contract (`bcvault`)
+# Bandcamp CDN & Page Endpoints (`bcvault-fx`)
 
-This document records the HTML selectors, embedded JSON attributes, and mobile API payloads isolated inside `src/bandcamp/`.
+## 1. Artwork CDN (`https://f4.bcbits.com/img/a{art_id:010}_{N}.jpg`)
 
-## 1. Discography Discovery (`GET {base}/music`)
+Confirmed from live Bandcamp release pages (e.g. `a0236863520_16.jpg`):
 
-- **Single-release redirect**: When an artist has only one release, Bandcamp may redirect `/music` to `/album/{slug}` or `/track/{slug}`. `discography::parse_discography_html` inspects the final URL and falls back to `parse_release_html`.
-- **`band_id` resolution order**:
-  1. `li.music-grid-item[data-band-id]`
-  2. `meta[name="bc-page-properties"]` (`content` JSON -> `page_id`)
-  3. `script[data-band]` (`data-band` JSON -> `id`)
-- **Grid items**: `li.music-grid-item`
-  - `data-item-id`: `"album-{id}"` or `"track-{id}"`
-  - `a[href]`: relative or absolute release URL
-  - `p.title`: release title (nested `.artist-override` holds per-release artist on label pages)
-  - `img[data-original]` or `img[src]`: cover image URL (ignoring `/img/0.gif` placeholders)
-- **Overflow items**: `ol#music-grid[data-client-items]`
-  - JSON array of objects: `{ id, type, title, page_url, art_id, artist, band_id }`.
-  - Merged and deduplicated by `ItemKey(kind, id)`.
+| Variant `_{N}` | Dimensions | Format | Usage in `bcvault-fx` |
+| --- | --- | --- | --- |
+| `_0` (`.jpg` / `.png`) | Original uploaded resolution (unscaled) | Original (`JPEG`/`PNG`) | Full-resolution archival / original source |
+| `_10.jpg` | 1200 × 1200 px | JPEG | High-res square source; base cover fetch used to derive local `T384` (384 px), `T192` (192 px), and `T64` (64 px) tiers in a single CDN request |
+| `_16.jpg` | 700 × 700 px (square) | JPEG | Primary `Hero` tier (700 px) |
+| `_2.jpg` | 350 × 350 px (square) | JPEG | Medium square variant on Bandcamp discography grids |
+| `_7.jpg` | 150 × 150 px (square) | JPEG | Small square variant; not fetched directly (`T64` and `T192` are derived locally from the single base fetch) |
 
-## 2. Mobile Discography Fallback (`POST /api/mobile/24/band_details`)
+### Politeness & Caching Contract
+- Every cover fetch passes through `BandcampGate` (`GateClass::Cdn`).
+- Exactly **one** network request is made per `art_id` for standard tiers (`T64`, `T192`, `T384`), saved under `{cache_dir}/covers/{art_id % 256:02x}/{art_id}.{tier}.jpg`.
+- Failures are recorded in `fx.sqlite` (`cover_meta.failed_at`, `fail_count`) and negatively cached for 24 hours.
 
-- **Request**: `{"band_id": 440011}`
-- **Response**:
-  ```json
-  {
-    "band_id": 440011,
-    "name": "Artist Name",
-    "discography": [
-      {
-        "item_id": 1001,
-        "item_type": "album",
-        "title": "Release Title",
-        "band_name": "Artist Name",
-        "art_id": 11223344
-      }
-    ]
-  }
-  ```
-
-## 3. Release Metadata (`GET /album/{slug}` or `/track/{slug}`)
-
-- **Selector**: `script[data-tralbum]`
-- **JSON payload (`Tralbum`)**:
-  - `id`: integer or string
-  - `item_type`: `"album"` or `"track"`
-  - `freeDownloadPage`: nullable URL string (non-empty indicates direct free download page)
-  - `art_id`: integer
-  - `artist`: release artist string
-  - `trackinfo`: array of track objects
-  - `current`:
-    - `band_id`: integer
-    - `minimum_price`: float or string (`0.0` for Free/NYP/EmailRequired, `> 0.0` for Paid)
-    - `set_price`: float or string
-    - `is_set_price`: boolean/integer/string flag (`0`/`1`/`true`/`false`/`null`)
-    - `require_email`: boolean/integer/string flag
-    - `publish_date` / `mod_date`: RFC 2822 timestamp (`"20 Aug 2021 00:00:00 GMT"`)
-    - `is_preorder`: boolean/integer/string flag
-
-## 4. Direct Free / NYP Download (`POST /api/mobile/22/buy_for_nothing`)
-
-- **Request**: `{"item_type": "album", "item_id": "1001"}`
-- **Success Response**:
-  ```json
-  {
-    "ok": true,
-    "downloads": {
-      "flac": { "url": "https://popplers5.bandcamp.com/download/album?..." },
-      "mp3-320": { "url": "https://popplers5.bandcamp.com/download/album?..." }
-    }
-  }
-  ```
-- **Error Response**:
-  ```json
-  {
-    "ok": false,
-    "error_message": "An email address is required to download this release."
-  }
-  ```
-- **Statdownload Handshake**: If the download URL returns `text/html` or `application/json`, `resolve_download_url` replaces `/download/` with `/statdownload/`, appends `.vrs=1`, and reads `download_url` (or polls `retry_url`).
-
-## 5. Email Redeem Page (`GET https://*.bandcamp.com/download?...`)
-
-- **Selector**: `#pagedata[data-blob]`
-- **JSON payload**:
-  - `download_items`: array of `{ item_id, item_type, title, artist, art_id, downloads: { "<format>": { url, size_mb, description } } }`.
+## 2. Lazy Release Details (`script[data-tralbum]`)
+- Triggered only when the detail drawer remains open on a single release for at least **400 ms**.
+- Uses `BandcampClient::fetch_release_raw` through `GateClass::Page`.
+- Extracts `trackinfo` (track number, title, duration in seconds, optional `file["mp3-128"]` stream preview URL), `current.about` / `.tralbum-about`, `current.credits` / `.tralbum-credits`, and `.tag` elements, persisting them to `fx.sqlite` (`release_detail`) so a release is never fetched twice.

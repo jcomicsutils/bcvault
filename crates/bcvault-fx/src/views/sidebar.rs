@@ -1,0 +1,400 @@
+use crate::{
+    actions::{FxAction, SmartView},
+    motion::SpringCfg,
+    paint,
+    services::messages::FxCommand,
+    state::FxState,
+};
+use bcvault_core::{
+    types::{ArtistStats, SyncMode, SyncScope},
+    worker::messages::UiToWorkerCommand,
+};
+use egui::{Align, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use tokio::sync::mpsc::UnboundedSender;
+
+pub fn show(
+    ui: &mut Ui,
+    state: &mut FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+    fx_tx: &UnboundedSender<FxCommand>,
+    now_s: f64,
+) {
+    let th = state.active_theme;
+    let mut pending_actions: Vec<FxAction> = Vec::new();
+
+    if state.sidebar_collapsed {
+        ui.vertical_centered(|ui| {
+            if paint::sharp_button(ui, "»")
+                .on_hover_text("Expand sidebar (Ctrl+B)")
+                .clicked()
+            {
+                pending_actions.push(FxAction::ToggleSidebar);
+            }
+            ui.separator();
+            if paint::sharp_button(ui, "ALL")
+                .on_hover_text("All artists")
+                .clicked()
+            {
+                pending_actions.push(FxAction::SelectArtist(None));
+            }
+            for a in state.artists.iter().take(16) {
+                let initials: String = a
+                    .display_name()
+                    .chars()
+                    .take(2)
+                    .collect::<String>()
+                    .to_uppercase();
+                let is_sel = state.query.base.band_id == Some(a.band_id);
+                let btn = egui::Button::new(RichText::new(initials).monospace().color(if is_sel {
+                    th.accent
+                } else {
+                    th.text
+                }))
+                .corner_radius(CornerRadius::ZERO);
+                if ui
+                    .add_sized([40.0, 28.0], btn)
+                    .on_hover_text(a.display_name())
+                    .clicked()
+                {
+                    pending_actions.push(FxAction::SelectArtist(Some(a.band_id)));
+                }
+            }
+        });
+        for act in pending_actions {
+            state.dispatch(act, core_tx, fx_tx, now_s);
+        }
+        return;
+    }
+
+    // 1. Add Artist input bar
+    ui.horizontal(|ui| {
+        let te = egui::TextEdit::singleline(&mut state.add_artist_input)
+            .hint_text("Add Artist (URL or Slug)")
+            .desired_width((ui.available_width() - 78.0).max(60.0));
+        let resp = ui.add_enabled(!state.add_artist_pending, te);
+        let enter_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let add_clicked = ui
+            .add_enabled(
+                !state.add_artist_pending && !state.add_artist_input.trim().is_empty(),
+                egui::Button::new("Add").corner_radius(CornerRadius::ZERO),
+            )
+            .clicked();
+        if (enter_pressed || add_clicked) && !state.add_artist_input.trim().is_empty() {
+            let input = state.add_artist_input.trim().to_string();
+            state.add_artist_input.clear();
+            state.add_artist_pending = true;
+            let _ = core_tx.send(UiToWorkerCommand::AddArtist { input });
+        }
+        if paint::sharp_button(ui, "«")
+            .on_hover_text("Collapse sidebar (Ctrl+B)")
+            .clicked()
+        {
+            pending_actions.push(FxAction::ToggleSidebar);
+        }
+    });
+
+    // 2. Smart Views & Saved Views
+    ui.collapsing(
+        RichText::new("SMART VIEWS").size(11.0).color(th.text_dim),
+        |ui| {
+            for sv in SmartView::ALL {
+                let active = state.query.smart == Some(sv);
+                let resp = ui.selectable_label(
+                    active,
+                    RichText::new(sv.label()).size(12.0).color(if active {
+                        th.accent
+                    } else {
+                        th.text
+                    }),
+                );
+                if resp.clicked() {
+                    let next = if active { None } else { Some(sv) };
+                    pending_actions.push(FxAction::SelectSmartView(next));
+                }
+            }
+        },
+    );
+
+    ui.collapsing(
+        RichText::new("SAVED VIEWS").size(11.0).color(th.text_dim),
+        |ui| {
+            let views = state.saved_views.clone();
+            for v in views {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(false, RichText::new(&v.name).size(12.0).color(th.text))
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::ApplySavedView(v.id));
+                    }
+                    if paint::sharp_button(ui, "×")
+                        .on_hover_text("Delete saved view")
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::DeleteSavedView(v.id));
+                    }
+                });
+            }
+            if paint::sharp_button(ui, "+ Save Current View...").clicked() {
+                state.save_view_modal = Some(String::new());
+            }
+        },
+    );
+
+    // 3. Artist filter
+    ui.add(
+        egui::TextEdit::singleline(&mut state.artist_filter)
+            .hint_text("Filter artists...")
+            .desired_width(f32::INFINITY),
+    );
+
+    ui.separator();
+
+    let list_height = (ui.available_height() - 78.0).max(80.0);
+    let filter_lower = state.artist_filter.trim().to_lowercase();
+    let filtered_indices: Vec<usize> = state
+        .artists
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| {
+            filter_lower.is_empty()
+                || a.display_name().to_lowercase().contains(&filter_lower)
+                || a.name.to_lowercase().contains(&filter_lower)
+                || a.slug.to_lowercase().contains(&filter_lower)
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut total_stats = ArtistStats::default();
+    for a in &state.artists {
+        total_stats.downloaded += a.stats.downloaded;
+        total_stats.eligible += a.stats.eligible;
+        total_stats.total += a.stats.total;
+        total_stats.email_required += a.stats.email_required;
+        total_stats.unknown += a.stats.unknown;
+        total_stats.quota_used_30d += a.stats.quota_used_30d;
+    }
+
+    let total_rows = 1 + filtered_indices.len();
+
+    egui::ScrollArea::vertical()
+        .max_height(list_height)
+        .auto_shrink([false, false])
+        .show_rows(ui, 28.0, total_rows, |ui, row_range| {
+            for row_idx in row_range {
+                if row_idx == 0 {
+                    let is_selected = state.query.base.band_id.is_none();
+                    let resp = draw_artist_row(
+                        ui,
+                        state,
+                        0,
+                        "All artists",
+                        total_stats,
+                        is_selected,
+                        None,
+                        now_s,
+                    );
+                    if resp.clicked() {
+                        pending_actions.push(FxAction::SelectArtist(None));
+                    }
+                } else {
+                    let artist_idx = filtered_indices[row_idx - 1];
+                    let artist = state.artists[artist_idx].clone();
+                    let is_selected = state.query.base.band_id == Some(artist.band_id);
+                    let sync_frac = state.active_syncs.get(&artist.band_id).map(|p| {
+                        if p.total == 0 {
+                            0.15_f32
+                        } else {
+                            (p.done as f32 / p.total as f32).clamp(0.05, 1.0)
+                        }
+                    });
+
+                    let resp = draw_artist_row(
+                        ui,
+                        state,
+                        artist.band_id,
+                        artist.display_name(),
+                        artist.stats,
+                        is_selected,
+                        sync_frac,
+                        now_s,
+                    );
+
+                    if resp.clicked() {
+                        pending_actions.push(FxAction::SelectArtist(Some(artist.band_id)));
+                    }
+
+                    resp.context_menu(|ui| {
+                        if paint::sharp_button(ui, "Sync Artist").clicked() {
+                            let _ = core_tx.send(UiToWorkerCommand::Sync {
+                                scope: SyncScope::Selected(vec![artist.band_id]),
+                                mode: state.sync_mode,
+                            });
+                            ui.close();
+                        }
+                        if paint::sharp_button(ui, "Rename Artist...").clicked() {
+                            state.rename_artist_modal = Some((
+                                artist.band_id,
+                                artist.name.clone(),
+                                artist.display_name().to_string(),
+                            ));
+                            ui.close();
+                        }
+                        if paint::sharp_button(ui, "Open in Browser").clicked() {
+                            let _ = open::that_detached(&artist.url);
+                            ui.close();
+                        }
+                        if paint::sharp_button(ui, "Remove Artist...").clicked() {
+                            state.confirm_remove_artist =
+                                Some((artist.band_id, artist.display_name().to_string()));
+                            ui.close();
+                        }
+                    });
+                }
+            }
+        });
+
+    ui.separator();
+
+    // 4. Footer: Sync controls
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Mode:").color(th.text_dim));
+        egui::ComboBox::from_id_salt("fx_sync_mode")
+            .selected_text(state.sync_mode.label())
+            .width(135.0)
+            .show_ui(ui, |ui| {
+                for mode in SyncMode::ALL {
+                    ui.selectable_value(&mut state.sync_mode, mode, mode.label());
+                }
+            });
+    });
+
+    ui.horizontal(|ui| {
+        let has_sel = state.query.base.band_id.is_some();
+        if ui
+            .add_enabled(
+                has_sel,
+                egui::Button::new("Sync Selected").corner_radius(CornerRadius::ZERO),
+            )
+            .clicked()
+        {
+            pending_actions.push(FxAction::SyncSelected(state.sync_mode));
+        }
+        if paint::sharp_button(ui, "Sync All").clicked() {
+            pending_actions.push(FxAction::SyncAll(state.sync_mode));
+        }
+        if !state.active_syncs.is_empty() && paint::sharp_button(ui, "Stop").clicked() {
+            let _ = core_tx.send(UiToWorkerCommand::CancelSync);
+        }
+    });
+
+    for act in pending_actions {
+        state.dispatch(act, core_tx, fx_tx, now_s);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_artist_row(
+    ui: &mut Ui,
+    state: &mut FxState,
+    band_id: i64,
+    name: &str,
+    stats: ArtistStats,
+    selected: bool,
+    sync_frac: Option<f32>,
+    now_s: f64,
+) -> egui::Response {
+    let th = state.active_theme;
+    let desired = Vec2::new(ui.available_width(), 26.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let bg = if selected || resp.hovered() {
+            th.bg2
+        } else {
+            th.bg1
+        };
+        paint::rect(painter, rect, bg, Stroke::new(1.0_f32, th.border));
+
+        if selected {
+            let bar = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + 3.0, rect.max.y));
+            paint::rect_filled(painter, bar, th.accent);
+        }
+
+        // 2x2 miniature mosaic square on the left
+        let mos_rect = Rect::from_min_size(
+            Pos2::new(rect.min.x + 6.0, rect.center().y - 8.0),
+            Vec2::splat(16.0),
+        );
+        paint::geometric_placeholder(painter, mos_rect, band_id, th.bg0, th.accent, th.accent2);
+
+        if let Some(frac) = sync_frac {
+            let prog_h = 2.0;
+            let fill_w = (rect.width() * frac).min(rect.width());
+            let fill_r = Rect::from_min_max(
+                Pos2::new(rect.min.x, rect.max.y - prog_h),
+                Pos2::new(rect.min.x + fill_w, rect.max.y),
+            );
+            paint::rect_filled(painter, fill_r, th.accent);
+            let sweep_x = rect.min.x + ((now_s as f32 * 1.4).rem_euclid(1.0) * fill_w);
+            let sweep_r = Rect::from_min_max(
+                Pos2::new(sweep_x, rect.max.y - prog_h),
+                Pos2::new((sweep_x + 18.0).min(rect.max.x), rect.max.y),
+            );
+            paint::rect_filled(painter, sweep_r, th.accent2);
+            ui.ctx().request_repaint();
+        }
+
+        let dl_tween = state
+            .motion
+            .val(
+                ("art_dl", band_id),
+                stats.downloaded as f32,
+                SpringCfg::SMOOTH,
+            )
+            .round() as u32;
+        let el_tween = state
+            .motion
+            .val(
+                ("art_el", band_id),
+                stats.eligible as f32,
+                SpringCfg::SMOOTH,
+            )
+            .round() as u32;
+        let tot_tween = state
+            .motion
+            .val(("art_tot", band_id), stats.total as f32, SpringCfg::SMOOTH)
+            .round() as u32;
+        let badge_str = format!("{dl_tween}/{el_tween}/{tot_tween}");
+
+        let inner = Rect::from_min_max(
+            Pos2::new(mos_rect.max.x + 6.0, rect.min.y + 2.0),
+            Pos2::new(rect.max.x - 6.0, rect.max.y - 2.0),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        child.add(egui::Label::new(RichText::new(name).color(th.text)).truncate());
+        child.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(badge_str)
+                    .font(FontId::monospace(11.0))
+                    .color(th.text_dim),
+            );
+        });
+    }
+
+    resp.on_hover_text(format!(
+        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}",
+        stats.downloaded,
+        stats.eligible,
+        stats.total,
+        stats.email_required,
+        stats.unknown,
+        stats.quota_used_30d,
+        state.settings.quota_hard
+    ))
+}

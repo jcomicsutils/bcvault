@@ -1,0 +1,1044 @@
+use crate::{
+    actions::{FxAction, FxQuery, ViewMode},
+    db::{Facets, Palette, Prefs, ReleaseDetail, Stats, WallRow},
+    motion::{Motion, SpringCfg},
+    nav::{NavHistory, SavedView, ViewState},
+    services::{
+        messages::{FxCommand, FxEvent, SearchHit, SearchScope, Tier, Toast, ToastKind},
+        thumbs::TextureCache,
+    },
+    theme::FxTheme,
+};
+use bcvault_core::{
+    types::{
+        ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry, RateLimitStatus,
+        Settings, SyncMode, SyncProgress, SyncScope,
+    },
+    worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
+};
+use egui::{Rect, Vec2};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::{Duration, Instant},
+};
+use tokio::sync::mpsc::UnboundedSender;
+
+pub const CARD_SIZES: [f32; 4] = [120.0, 168.0, 232.0, 320.0];
+pub const CARD_SIZE_LABELS: [&str; 4] = ["S", "M", "L", "XL"];
+
+#[derive(Clone, Debug)]
+pub struct FxJob {
+    pub view: JobView,
+    pub bytes_done: u64,
+    pub bytes_total: Option<u64>,
+    pub speed_bps: f64,
+}
+
+pub struct FxState {
+    pub booted: bool,
+    pub schema_error: Option<String>,
+    pub artists: Vec<ArtistView>,
+    pub settings: Settings,
+    pub prefs: Prefs,
+    pub active_theme: FxTheme,
+    pub motion: Motion,
+    pub tex_cache: TextureCache,
+    pub palettes: HashMap<i64, Palette>,
+    pub cover_cache_bytes: u64,
+
+    // Navigation & View
+    pub view_mode: ViewMode,
+    pub prev_view_mode: ViewMode,
+    pub view_switch_seq: u64,
+    pub query: FxQuery,
+    pub nav: NavHistory,
+    pub saved_views: Vec<SavedView>,
+    pub recents: Vec<(String, String)>,
+    pub sidebar_collapsed: bool,
+    pub scroll_y: f32,
+    pub pending_scroll_to_y: Option<f32>,
+
+    // Query & Streaming rows
+    pub next_request_id: u64,
+    pub active_wall_req_id: u64,
+    pub active_facets_req_id: u64,
+    pub active_stats_req_id: u64,
+    pub active_search_req_id: u64,
+    pub query_dirty_at: Option<Instant>,
+    pub rows: Vec<WallRow>,
+    pub facets: Facets,
+    pub stats: Stats,
+    pub thumb_generation: u64,
+    pub last_thumb_req_at: Instant,
+
+    // Selection, Focus, Hover & FLIP
+    pub selected_keys: BTreeSet<ItemKey>,
+    pub last_clicked_key: Option<ItemKey>,
+    pub focused_key: Option<ItemKey>,
+    pub hovered_key: Option<ItemKey>,
+    pub hovered_art_id: Option<i64>,
+    pub marquee_start: Option<egui::Pos2>,
+    pub marquee_current: Option<egui::Pos2>,
+    pub last_card_rects: HashMap<ItemKey, Rect>,
+    pub flip_origins: HashMap<ItemKey, Rect>,
+    pub flip_ghosts: Vec<(ItemKey, Option<i64>, Rect, f64)>,
+    pub row_flashes: HashMap<ItemKey, f64>,
+    pub artist_dive_banner: Option<(i64, Rect)>,
+
+    // Detail Drawer
+    pub drawer_key: Option<ItemKey>,
+    pub drawer_opened_at: Option<Instant>,
+    pub drawer_detail_requested: bool,
+    pub details_cache: HashMap<ItemKey, ReleaseDetail>,
+    pub drawer_slide_dir: f32,
+
+    // Command Palette
+    pub palette_open: bool,
+    pub palette_query: String,
+    pub palette_scope: SearchScope,
+    pub palette_hits: Vec<SearchHit>,
+    pub palette_sel: usize,
+    pub focus_search_next_frame: bool,
+    pub focus_palette_next_frame: bool,
+
+    // Sidebar / Sync / Modals
+    pub add_artist_input: String,
+    pub add_artist_pending: bool,
+    pub artist_filter: String,
+    pub sync_mode: SyncMode,
+    pub active_syncs: HashMap<i64, SyncProgress>,
+    pub redeem_modal: Option<(ItemKey, String, String)>,
+    pub save_view_modal: Option<String>,
+    pub settings_modal_open: bool,
+    pub settings_draft: Option<Settings>,
+    pub filename_pattern_input: String,
+    pub confirm_remove_artist: Option<(i64, String)>,
+    pub rename_artist_modal: Option<(i64, String, String)>,
+
+    // Jobs, Speed Sparkline, Rate limit, Toasts & Logs
+    pub jobs: Vec<FxJob>,
+    pub speed_samples: std::collections::VecDeque<f64>,
+    pub last_speed_sample_at: Instant,
+    pub completed_jobs_at: HashMap<JobId, f64>,
+    pub rate_limit: RateLimitStatus,
+    pub toasts: Vec<Toast>,
+    pub next_toast_id: u64,
+    pub logs: std::collections::VecDeque<LogEntry>,
+    pub dock_tab: usize,
+
+    // Diagnostics
+    pub show_debug_overlay: bool,
+    pub last_frame_ms: f32,
+    pub last_event_backlog: usize,
+    pub window_focused: bool,
+    pub shader_disabled_reason: Option<String>,
+}
+
+impl Default for FxState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FxState {
+    pub fn new() -> Self {
+        let prefs = Prefs::default();
+        let active_theme = FxTheme::for_id(prefs.theme);
+        let now = Instant::now();
+        Self {
+            booted: false,
+            schema_error: None,
+            artists: Vec::new(),
+            settings: Settings::default(),
+            tex_cache: TextureCache::new(prefs.tex_budget_mb),
+            prefs,
+            active_theme,
+            motion: Motion::new(),
+            palettes: HashMap::new(),
+            cover_cache_bytes: 0,
+            view_mode: ViewMode::Wall,
+            prev_view_mode: ViewMode::Wall,
+            view_switch_seq: 0,
+            query: FxQuery::default(),
+            nav: NavHistory::new(64),
+            saved_views: Vec::new(),
+            recents: Vec::new(),
+            sidebar_collapsed: false,
+            scroll_y: 0.0,
+            pending_scroll_to_y: None,
+            next_request_id: 1,
+            active_wall_req_id: 0,
+            active_facets_req_id: 0,
+            active_stats_req_id: 0,
+            active_search_req_id: 0,
+            query_dirty_at: None,
+            rows: Vec::new(),
+            facets: Facets::default(),
+            stats: Stats::default(),
+            thumb_generation: 1,
+            last_thumb_req_at: now,
+            selected_keys: BTreeSet::new(),
+            last_clicked_key: None,
+            focused_key: None,
+            hovered_key: None,
+            hovered_art_id: None,
+            marquee_start: None,
+            marquee_current: None,
+            last_card_rects: HashMap::new(),
+            flip_origins: HashMap::new(),
+            flip_ghosts: Vec::new(),
+            row_flashes: HashMap::new(),
+            artist_dive_banner: None,
+            drawer_key: None,
+            drawer_opened_at: None,
+            drawer_detail_requested: false,
+            details_cache: HashMap::new(),
+            drawer_slide_dir: 1.0,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_scope: SearchScope::All,
+            palette_hits: Vec::new(),
+            palette_sel: 0,
+            focus_search_next_frame: false,
+            focus_palette_next_frame: false,
+            add_artist_input: String::new(),
+            add_artist_pending: false,
+            artist_filter: String::new(),
+            sync_mode: SyncMode::Incremental,
+            active_syncs: HashMap::new(),
+            redeem_modal: None,
+            save_view_modal: None,
+            settings_modal_open: false,
+            settings_draft: None,
+            filename_pattern_input: String::new(),
+            confirm_remove_artist: None,
+            rename_artist_modal: None,
+            jobs: Vec::new(),
+            speed_samples: std::collections::VecDeque::from(vec![0.0; 30]),
+            last_speed_sample_at: now,
+            completed_jobs_at: HashMap::new(),
+            rate_limit: RateLimitStatus::Idle,
+            toasts: Vec::new(),
+            next_toast_id: 1,
+            logs: std::collections::VecDeque::with_capacity(500),
+            dock_tab: 0,
+            show_debug_overlay: false,
+            last_frame_ms: 0.0,
+            last_event_backlog: 0,
+            window_focused: true,
+            shader_disabled_reason: None,
+        }
+    }
+
+    pub fn card_size(&self) -> f32 {
+        CARD_SIZES[self.prefs.card_size_idx.min(CARD_SIZES.len() - 1)]
+    }
+
+    pub fn current_view_state(&self) -> ViewState {
+        ViewState {
+            view: self.view_mode,
+            query: self.query.clone(),
+            scroll_y: self.scroll_y,
+            focus: self.focused_key,
+        }
+    }
+
+    pub fn push_toast(&mut self, kind: ToastKind, message: impl Into<String>, now_s: f64) {
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        self.toasts.push(Toast {
+            id,
+            kind,
+            message: message.into(),
+            created_s: now_s,
+        });
+        while self.toasts.len() > 4 {
+            self.toasts.remove(0);
+        }
+    }
+
+    pub fn snapshot_for_flip(&mut self, now_s: f64) {
+        self.flip_origins.clear();
+        for (k, r) in &self.last_card_rects {
+            if self.flip_origins.len() < 200 {
+                self.flip_origins.insert(*k, *r);
+            }
+        }
+        self.flip_ghosts.clear();
+        for row in &self.rows {
+            if self.flip_ghosts.len() >= 40 {
+                break;
+            }
+            if let Some(&r) = self.last_card_rects.get(&row.rel.key) {
+                self.flip_ghosts.push((row.rel.key, row.art_id, r, now_s));
+            }
+        }
+    }
+
+    pub fn mark_query_immediate(&mut self) {
+        self.query_dirty_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
+        );
+    }
+
+    pub fn mark_search_debounced(&mut self) {
+        self.query_dirty_at = Some(Instant::now());
+    }
+
+    pub fn flush_debounced_queries(&mut self, fx_tx: &UnboundedSender<FxCommand>) {
+        if let Some(dirty_at) = self.query_dirty_at
+            && dirty_at.elapsed() >= Duration::from_millis(120)
+        {
+            self.query_dirty_at = None;
+            self.issue_wall_and_facets_query(fx_tx);
+        }
+    }
+
+    pub fn issue_wall_and_facets_query(&mut self, fx_tx: &UnboundedSender<FxCommand>) {
+        let wall_req = self.next_request_id;
+        self.next_request_id += 1;
+        self.active_wall_req_id = wall_req;
+        self.thumb_generation = self.thumb_generation.wrapping_add(1);
+
+        let facets_req = self.next_request_id;
+        self.next_request_id += 1;
+        self.active_facets_req_id = facets_req;
+
+        let _ = fx_tx.send(FxCommand::QueryWall {
+            request_id: wall_req,
+            query: self.query.clone(),
+        });
+        let _ = fx_tx.send(FxCommand::QueryFacets {
+            request_id: facets_req,
+            query: self.query.clone(),
+        });
+
+        if self.view_mode == ViewMode::Stats {
+            let stats_req = self.next_request_id;
+            self.next_request_id += 1;
+            self.active_stats_req_id = stats_req;
+            let _ = fx_tx.send(FxCommand::QueryStats {
+                request_id: stats_req,
+            });
+        }
+    }
+
+    pub fn check_lazy_drawer_detail(&mut self, fx_tx: &UnboundedSender<FxCommand>) {
+        if let (Some(key), Some(opened_at)) = (self.drawer_key, self.drawer_opened_at)
+            && !self.drawer_detail_requested
+            && opened_at.elapsed() >= Duration::from_millis(400)
+        {
+            self.drawer_detail_requested = true;
+            if !self.details_cache.contains_key(&key) {
+                let _ = fx_tx.send(FxCommand::EnsureDetail { key });
+            }
+        }
+    }
+
+    pub fn sample_download_speed(&mut self) {
+        if self.last_speed_sample_at.elapsed() >= Duration::from_millis(950) {
+            self.last_speed_sample_at = Instant::now();
+            let total_bps: f64 = self.jobs.iter().map(|j| j.speed_bps).sum();
+            if self.speed_samples.len() >= 30 {
+                self.speed_samples.pop_front();
+            }
+            self.speed_samples.push_back(total_bps);
+        }
+    }
+
+    pub fn apply_core_event(
+        &mut self,
+        ev: WorkerToUiEvent,
+        fx_tx: &UnboundedSender<FxCommand>,
+        now_s: f64,
+    ) {
+        match ev {
+            WorkerToUiEvent::Ready { artists, settings } => {
+                self.artists = artists;
+                self.settings = settings;
+                self.booted = true;
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            WorkerToUiEvent::ArtistUpserted(av) => {
+                self.add_artist_pending = false;
+                if let Some(slot) = self.artists.iter_mut().find(|a| a.band_id == av.band_id) {
+                    *slot = av;
+                } else {
+                    self.artists.push(av);
+                    self.artists.sort_by(|a, b| {
+                        a.display_name()
+                            .to_lowercase()
+                            .cmp(&b.display_name().to_lowercase())
+                    });
+                }
+            }
+            WorkerToUiEvent::ArtistRemoved { band_id } => {
+                self.artists.retain(|a| a.band_id != band_id);
+                if self.query.base.band_id == Some(band_id) {
+                    self.query.base.band_id = None;
+                }
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            WorkerToUiEvent::ArtistStats { band_id, stats } => {
+                if let Some(a) = self.artists.iter_mut().find(|a| a.band_id == band_id) {
+                    a.stats = stats;
+                }
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            WorkerToUiEvent::SyncProgress(prog) => {
+                self.active_syncs.insert(prog.band_id, prog);
+            }
+            WorkerToUiEvent::SyncFinished {
+                band_id,
+                new_items,
+                updated,
+                error,
+            } => {
+                self.add_artist_pending = false;
+                self.active_syncs.remove(&band_id);
+                if let Some(err) = error {
+                    self.push_toast(ToastKind::Error, format!("Sync failed: {err}"), now_s);
+                } else if new_items > 0 || updated > 0 {
+                    self.push_toast(
+                        ToastKind::Success,
+                        format!("Synced +{new_items} new, {updated} updated"),
+                        now_s,
+                    );
+                }
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            WorkerToUiEvent::ReleasesLoaded { .. }
+            | WorkerToUiEvent::ThumbReady { .. }
+            | WorkerToUiEvent::QuotaStatus { .. }
+            | WorkerToUiEvent::QuotaWarning { .. } => {}
+            WorkerToUiEvent::ReleaseUpdated(rel) => {
+                let key = rel.key;
+                let was_dl = self
+                    .rows
+                    .iter()
+                    .find(|w| w.rel.key == key)
+                    .is_some_and(|w| w.rel.downloaded);
+                for w in &mut self.rows {
+                    if w.rel.key == key {
+                        w.rel = (*rel).clone();
+                    }
+                }
+                self.row_flashes.insert(key, now_s + 0.6);
+                if !was_dl && rel.downloaded {
+                    let _ = self
+                        .motion
+                        .val_from(("dl_check", key), 0.0, 1.0, SpringCfg::POP);
+                }
+                let facets_req = self.next_request_id;
+                self.next_request_id += 1;
+                self.active_facets_req_id = facets_req;
+                let _ = fx_tx.send(FxCommand::QueryFacets {
+                    request_id: facets_req,
+                    query: self.query.clone(),
+                });
+            }
+            WorkerToUiEvent::JobQueued(jv) => {
+                if let Some(slot) = self.jobs.iter_mut().find(|j| j.view.id == jv.id) {
+                    slot.view = jv;
+                } else {
+                    self.jobs.push(FxJob {
+                        view: jv,
+                        bytes_done: 0,
+                        bytes_total: None,
+                        speed_bps: 0.0,
+                    });
+                }
+            }
+            WorkerToUiEvent::JobState { job_id, state } => {
+                if matches!(state, JobState::Done { .. })
+                    && !self.completed_jobs_at.contains_key(&job_id)
+                {
+                    self.completed_jobs_at.insert(job_id, now_s);
+                }
+                if let Some(slot) = self.jobs.iter_mut().find(|j| j.view.id == job_id) {
+                    if !matches!(state, JobState::Downloading) {
+                        slot.speed_bps = 0.0;
+                    }
+                    slot.view.state = state;
+                }
+            }
+            WorkerToUiEvent::DownloadByteProgress {
+                job_id,
+                bytes,
+                total,
+                bytes_per_sec,
+            } => {
+                if let Some(slot) = self.jobs.iter_mut().find(|j| j.view.id == job_id) {
+                    slot.bytes_done = bytes;
+                    slot.bytes_total = total;
+                    slot.speed_bps = bytes_per_sec;
+                }
+            }
+            WorkerToUiEvent::RateLimit(st) => {
+                self.rate_limit = st;
+            }
+            WorkerToUiEvent::SettingsUpdated(st) => {
+                self.settings = st;
+                self.push_toast(ToastKind::Info, "Settings saved", now_s);
+            }
+            WorkerToUiEvent::Log(entry) => {
+                if entry.level == bcvault_core::types::LogLevel::Error {
+                    self.push_toast(ToastKind::Error, entry.message.clone(), now_s);
+                }
+                if self.logs.len() >= 500 {
+                    self.logs.pop_front();
+                }
+                self.logs.push_back(entry);
+            }
+        }
+    }
+
+    pub fn apply_fx_event(&mut self, ev: FxEvent, now_s: f64) {
+        match ev {
+            FxEvent::Ready {
+                prefs,
+                saved_views,
+                palettes,
+                recents,
+                schema_error,
+                cover_cache_bytes,
+            } => {
+                self.motion.level = prefs.effects;
+                self.motion.reduced_motion = prefs.reduced_motion;
+                self.view_mode = prefs.view;
+                self.prev_view_mode = prefs.view;
+                self.tex_cache.set_budget_mb(prefs.tex_budget_mb);
+                self.prefs = prefs;
+                self.saved_views = saved_views;
+                self.recents = recents;
+                self.schema_error = schema_error;
+                self.cover_cache_bytes = cover_cache_bytes;
+                for p in palettes {
+                    self.palettes.insert(p.art_id, p);
+                }
+            }
+            FxEvent::WallLoaded {
+                request_id,
+                chunk,
+                last: _,
+                rows,
+            } => {
+                if request_id != self.active_wall_req_id {
+                    return;
+                }
+                if chunk == 0 {
+                    self.rows = rows;
+                } else {
+                    self.rows.extend(rows);
+                }
+                if self.focused_key.is_none() {
+                    self.focused_key = self.rows.first().map(|r| r.rel.key);
+                }
+            }
+            FxEvent::FacetsLoaded { request_id, facets } => {
+                if request_id == self.active_facets_req_id {
+                    self.facets = facets;
+                }
+            }
+            FxEvent::StatsLoaded { request_id, stats } => {
+                if request_id == self.active_stats_req_id {
+                    self.stats = stats;
+                }
+            }
+            FxEvent::SearchResults { request_id, hits } => {
+                if request_id == self.active_search_req_id {
+                    self.palette_hits = hits;
+                    self.palette_sel = 0;
+                }
+            }
+            FxEvent::ThumbReady {
+                art_id,
+                tier,
+                image,
+            } => {
+                self.tex_cache.enqueue_upload(art_id, tier, image);
+            }
+            FxEvent::PaletteReady { art_id, palette } => {
+                for w in &mut self.rows {
+                    if w.art_id == Some(art_id) {
+                        w.hue = palette.hue;
+                        w.accent = Some(palette.accent);
+                    }
+                }
+                self.palettes.insert(art_id, palette);
+            }
+            FxEvent::DetailLoaded { key, detail } => {
+                self.details_cache.insert(key, *detail);
+            }
+            FxEvent::SavedViewsUpdated(views) => {
+                self.saved_views = views;
+            }
+            FxEvent::CoverCachePurged => {
+                self.tex_cache.clear();
+                self.cover_cache_bytes = 0;
+            }
+            FxEvent::ThumbFailed { .. } => {}
+            FxEvent::Notice { kind, message } => {
+                self.push_toast(kind, message, now_s);
+            }
+        }
+    }
+
+    pub fn dispatch(
+        &mut self,
+        action: FxAction,
+        core_tx: &UnboundedSender<UiToWorkerCommand>,
+        fx_tx: &UnboundedSender<FxCommand>,
+        now_s: f64,
+    ) {
+        match action {
+            FxAction::SetView(vm) => {
+                if self.view_mode != vm {
+                    self.nav.push(self.current_view_state());
+                    self.prev_view_mode = self.view_mode;
+                    self.view_mode = vm;
+                    self.view_switch_seq = self.view_switch_seq.wrapping_add(1);
+                    let _ = fx_tx.send(FxCommand::SetPref {
+                        key: "view".to_string(),
+                        value: vm.as_str().to_string(),
+                    });
+                    if vm == ViewMode::Stats {
+                        let req = self.next_request_id;
+                        self.next_request_id += 1;
+                        self.active_stats_req_id = req;
+                        let _ = fx_tx.send(FxCommand::QueryStats { request_id: req });
+                    }
+                }
+            }
+            FxAction::OpenPalette => {
+                self.palette_open = true;
+                self.palette_query.clear();
+                self.palette_scope = SearchScope::All;
+                self.focus_palette_next_frame = true;
+                let req = self.next_request_id;
+                self.next_request_id += 1;
+                self.active_search_req_id = req;
+                let _ = fx_tx.send(FxCommand::Search {
+                    request_id: req,
+                    text: String::new(),
+                    scope: SearchScope::All,
+                });
+            }
+            FxAction::ClosePalette => {
+                self.palette_open = false;
+            }
+            FxAction::FocusSearch => {
+                self.focus_search_next_frame = true;
+            }
+            FxAction::SetFilter(f) => {
+                if self.query.base.filter != f || self.query.smart.is_some() {
+                    self.nav.push(self.current_view_state());
+                    self.snapshot_for_flip(now_s);
+                    self.query.smart = None;
+                    self.query.base.filter = f;
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
+            }
+            FxAction::SetSort(sort, dir) => {
+                self.nav.push(self.current_view_state());
+                self.snapshot_for_flip(now_s);
+                self.query.fx_sort = sort;
+                self.query.base.dir = dir;
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            FxAction::SetGroup(g) => {
+                if self.query.group != g {
+                    self.nav.push(self.current_view_state());
+                    self.snapshot_for_flip(now_s);
+                    self.query.group = g;
+                }
+            }
+            FxAction::SetHue(hue) => {
+                if self.query.hue != hue {
+                    self.nav.push(self.current_view_state());
+                    self.snapshot_for_flip(now_s);
+                    self.query.hue = hue;
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
+            }
+            FxAction::SelectSmartView(sv) => {
+                self.nav.push(self.current_view_state());
+                self.snapshot_for_flip(now_s);
+                self.query.smart = sv;
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            FxAction::SelectArtist(band_id) => {
+                if self.query.base.band_id != band_id {
+                    self.nav.push(self.current_view_state());
+                    self.snapshot_for_flip(now_s);
+                    self.query.base.band_id = band_id;
+                    if let Some(bid) = band_id {
+                        let _ = fx_tx.send(FxCommand::TouchRecent {
+                            kind: "artist".to_string(),
+                            r#ref: bid.to_string(),
+                        });
+                    }
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
+            }
+            FxAction::OpenDrawer(key) => {
+                self.drawer_key = Some(key);
+                self.drawer_opened_at = Some(Instant::now());
+                self.drawer_detail_requested = false;
+                if let Some(w) = self.rows.iter().find(|r| r.rel.key == key)
+                    && let Some(art_id) = w.art_id
+                {
+                    let _ = fx_tx.send(FxCommand::EnsureHero { art_id });
+                }
+            }
+            FxAction::CloseDrawer => {
+                self.drawer_key = None;
+                self.drawer_opened_at = None;
+                self.drawer_detail_requested = false;
+            }
+            FxAction::DrawerStep(delta) => {
+                if let Some(curr) = self.drawer_key
+                    && let Some(pos) = self.rows.iter().position(|r| r.rel.key == curr)
+                {
+                    let len = self.rows.len() as isize;
+                    let next_idx =
+                        (pos as isize + delta as isize).clamp(0, (len - 1).max(0)) as usize;
+                    if let Some(next_row) = self.rows.get(next_idx) {
+                        let next_key = next_row.rel.key;
+                        if next_key != curr {
+                            self.drawer_slide_dir = if delta >= 0 { 1.0 } else { -1.0 };
+                            self.focused_key = Some(next_key);
+                            self.dispatch(FxAction::OpenDrawer(next_key), core_tx, fx_tx, now_s);
+                        }
+                    }
+                }
+            }
+            FxAction::ToggleSelect(key) => {
+                if !self.selected_keys.remove(&key) {
+                    self.selected_keys.insert(key);
+                    let _ = self
+                        .motion
+                        .val_from(("sel_pop", key), 0.5, 1.0, SpringCfg::POP);
+                }
+                self.last_clicked_key = Some(key);
+                self.focused_key = Some(key);
+            }
+            FxAction::SelectRange(key) => {
+                let anchor = self.last_clicked_key.or(self.focused_key).unwrap_or(key);
+                let pos_a = self.rows.iter().position(|r| r.rel.key == anchor);
+                let pos_b = self.rows.iter().position(|r| r.rel.key == key);
+                if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    for r in &self.rows[lo..=hi] {
+                        self.selected_keys.insert(r.rel.key);
+                    }
+                }
+                self.focused_key = Some(key);
+            }
+            FxAction::ClearSelection => {
+                self.selected_keys.clear();
+            }
+            FxAction::DownloadSelected => {
+                let mut keys: Vec<ItemKey> = self.selected_keys.iter().copied().collect();
+                if keys.is_empty()
+                    && let Some(fk) = self.focused_key
+                {
+                    keys.push(fk);
+                }
+                if !keys.is_empty() {
+                    let opts = DownloadOpts {
+                        out_dir: self.settings.out_dir.clone(),
+                        format: self.settings.format,
+                        batch_limit: self.settings.batch_limit,
+                    };
+                    let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
+                        items: keys,
+                        opts,
+                        ack_soft_quota: true,
+                    });
+                }
+            }
+            FxAction::DownloadKey(key) => {
+                let opts = DownloadOpts {
+                    out_dir: self.settings.out_dir.clone(),
+                    format: self.settings.format,
+                    batch_limit: self.settings.batch_limit,
+                };
+                let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
+                    items: vec![key],
+                    opts,
+                    ack_soft_quota: true,
+                });
+            }
+            FxAction::OpenInBrowser(key) => {
+                if let Some(w) = self.rows.iter().find(|r| r.rel.key == key) {
+                    let _ = open::that_detached(&w.rel.url);
+                }
+            }
+            FxAction::OpenFolder(key) => {
+                if let Some(w) = self.rows.iter().find(|r| r.rel.key == key)
+                    && let Some(p) = &w.rel.local_path
+                {
+                    let target = if p.is_file() {
+                        p.parent().unwrap_or(p)
+                    } else {
+                        p
+                    };
+                    let _ = open::that_detached(target);
+                }
+            }
+            FxAction::RedeemDialog(key) => {
+                if let Some(w) = self.rows.iter().find(|r| r.rel.key == key) {
+                    self.redeem_modal = Some((key, w.rel.title.clone(), String::new()));
+                }
+            }
+            FxAction::SetReleaseDownloaded(key, downloaded) => {
+                let _ = core_tx.send(UiToWorkerCommand::SetReleaseDownloaded { key, downloaded });
+            }
+            FxAction::SyncSelected(mode) => {
+                if let Some(bid) = self.query.base.band_id {
+                    let _ = core_tx.send(UiToWorkerCommand::Sync {
+                        scope: SyncScope::Selected(vec![bid]),
+                        mode,
+                    });
+                }
+            }
+            FxAction::SyncAll(mode) => {
+                let _ = core_tx.send(UiToWorkerCommand::Sync {
+                    scope: SyncScope::All,
+                    mode,
+                });
+            }
+            FxAction::CardSize(delta) => {
+                let new_idx = (self.prefs.card_size_idx as isize + delta as isize)
+                    .clamp(0, (CARD_SIZES.len() - 1) as isize)
+                    as usize;
+                if new_idx != self.prefs.card_size_idx {
+                    self.snapshot_for_flip(now_s);
+                    self.prefs.card_size_idx = new_idx;
+                    let _ = fx_tx.send(FxCommand::SetPref {
+                        key: "card_size_idx".to_string(),
+                        value: new_idx.to_string(),
+                    });
+                }
+            }
+            FxAction::ToggleSidebar => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+            }
+            FxAction::SetTheme(theme) => {
+                self.prefs.theme = theme;
+                let _ = fx_tx.send(FxCommand::SetPref {
+                    key: "theme".to_string(),
+                    value: theme.as_str().to_string(),
+                });
+            }
+            FxAction::SetAdaptiveAccent(enabled) => {
+                self.prefs.adaptive_accent = enabled;
+                let _ = fx_tx.send(FxCommand::SetPref {
+                    key: "adaptive_accent".to_string(),
+                    value: if enabled { "1" } else { "0" }.to_string(),
+                });
+            }
+            FxAction::SetEffects(level) => {
+                self.prefs.effects = level;
+                self.motion.level = level;
+                let _ = fx_tx.send(FxCommand::SetPref {
+                    key: "effects".to_string(),
+                    value: level.as_str().to_string(),
+                });
+            }
+            FxAction::SetReducedMotion(rm) => {
+                self.prefs.reduced_motion = rm;
+                self.motion.reduced_motion = rm;
+                let _ = fx_tx.send(FxCommand::SetPref {
+                    key: "reduced_motion".to_string(),
+                    value: if rm { "1" } else { "0" }.to_string(),
+                });
+            }
+            FxAction::NavBack => {
+                let curr = self.current_view_state();
+                if let Some(prev) = self.nav.go_back(curr) {
+                    self.snapshot_for_flip(now_s);
+                    self.view_mode = prev.view;
+                    self.query = prev.query;
+                    self.pending_scroll_to_y = Some(prev.scroll_y);
+                    self.focused_key = prev.focus;
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
+            }
+            FxAction::NavForward => {
+                let curr = self.current_view_state();
+                if let Some(next) = self.nav.go_forward(curr) {
+                    self.snapshot_for_flip(now_s);
+                    self.view_mode = next.view;
+                    self.query = next.query;
+                    self.pending_scroll_to_y = Some(next.scroll_y);
+                    self.focused_key = next.focus;
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
+            }
+            FxAction::SaveCurrentView(name) => {
+                let st = self.current_view_state();
+                let _ = fx_tx.send(FxCommand::SaveView { name, state: st });
+            }
+            FxAction::ApplySavedView(id) => {
+                if let Some(sv) = self.saved_views.iter().find(|v| v.id == id).cloned() {
+                    self.nav.push(self.current_view_state());
+                    self.snapshot_for_flip(now_s);
+                    self.view_mode = sv.state.view;
+                    self.query = sv.state.query;
+                    self.pending_scroll_to_y = Some(sv.state.scroll_y);
+                    self.focused_key = sv.state.focus;
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
+            }
+            FxAction::DeleteSavedView(id) => {
+                let _ = fx_tx.send(FxCommand::DeleteView(id));
+            }
+            FxAction::PurgeCovers => {
+                let _ = fx_tx.send(FxCommand::PurgeCovers);
+            }
+            FxAction::ToggleDebug => {
+                self.show_debug_overlay = !self.show_debug_overlay;
+            }
+        }
+    }
+}
+
+/// Paints a cover image at `rect` with `tiny8` 8x8 blocky blur-up or geometric placeholder,
+/// cross-fading smoothly once the texture is uploaded, and optional UV parallax/zoom.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_cover_slot(
+    painter: &egui::Painter,
+    state: &mut FxState,
+    art_id: Option<i64>,
+    seed_id: i64,
+    rect: Rect,
+    tier: Tier,
+    zoom: f32,
+    uv_shift: Vec2,
+) {
+    let th = state.active_theme;
+    let tex_ready = art_id.is_some_and(|id| state.tex_cache.contains((id, tier)));
+    let alpha_target = if tex_ready { 1.0 } else { 0.0 };
+    let img_alpha = state.motion.val(
+        ("cov_fade", art_id.unwrap_or(seed_id), tier),
+        alpha_target,
+        SpringCfg::SMOOTH,
+    );
+
+    if img_alpha < 0.999 {
+        if let Some(id) = art_id
+            && let Some(pal) = state.palettes.get(&id)
+        {
+            crate::paint::tiny8_mosaic(painter, rect, &pal.tiny8, 1.0);
+        } else {
+            crate::paint::geometric_placeholder(
+                painter,
+                rect,
+                art_id.unwrap_or(seed_id),
+                th.bg2,
+                th.accent,
+                th.accent2,
+            );
+        }
+    }
+
+    if let Some(id) = art_id {
+        let tex_id_opt = state
+            .tex_cache
+            .get((id, tier))
+            .map(|h| h.id())
+            .or_else(|| state.tex_cache.get((id, Tier::T192)).map(|h| h.id()))
+            .or_else(|| state.tex_cache.get((id, Tier::T64)).map(|h| h.id()));
+
+        if let Some(tex_id) = tex_id_opt {
+            let z = zoom.max(1.0);
+            let span = 1.0 / z;
+            let base = (1.0 - span) * 0.5;
+            let u0 = (base + uv_shift.x).clamp(0.0, 1.0 - span);
+            let v0 = (base + uv_shift.y).clamp(0.0, 1.0 - span);
+            let uv = Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u0 + span, v0 + span));
+            let tint = egui::Color32::WHITE.gamma_multiply(img_alpha);
+            painter.image(tex_id, rect, uv, tint);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bcvault_core::types::{Classification, ItemType, ReleaseFilter, ReleaseRow};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn discards_stale_wall_query_chunks_and_dispatches_actions() {
+        let mut state = FxState::new();
+        let (core_tx, _core_rx) = mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = mpsc::unbounded_channel();
+
+        state.dispatch(
+            FxAction::SetFilter(ReleaseFilter::Free),
+            &core_tx,
+            &fx_tx,
+            0.0,
+        );
+        let newest_req = state.active_wall_req_id;
+
+        let dummy_row = WallRow {
+            rel: ReleaseRow {
+                key: ItemKey {
+                    kind: ItemType::Album,
+                    id: 1,
+                },
+                band_id: 1,
+                title: "A".to_string(),
+                artist_name: "B".to_string(),
+                url: "https://b.bandcamp.com/album/a".to_string(),
+                cover_url: None,
+                art_id: Some(10),
+                classification: Classification::Free,
+                is_preorder: false,
+                track_count: Some(4),
+                published_at: None,
+                modified_at: None,
+                downloaded: false,
+                downloaded_at: None,
+                downloaded_format: None,
+                local_path: None,
+                has_remote_update: false,
+                remote_update_reason: None,
+            },
+            art_id: Some(10),
+            hue: Some(180),
+            accent: Some([0, 200, 180]),
+            added_at: 100,
+        };
+
+        // Stale request id is ignored
+        state.apply_fx_event(
+            FxEvent::WallLoaded {
+                request_id: newest_req.saturating_sub(1),
+                chunk: 0,
+                last: true,
+                rows: vec![dummy_row.clone()],
+            },
+            0.0,
+        );
+        assert!(state.rows.is_empty());
+
+        // Matching request id is applied
+        state.apply_fx_event(
+            FxEvent::WallLoaded {
+                request_id: newest_req,
+                chunk: 0,
+                last: true,
+                rows: vec![dummy_row],
+            },
+            0.0,
+        );
+        assert_eq!(state.rows.len(), 1);
+    }
+}

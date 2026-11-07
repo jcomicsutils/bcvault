@@ -14,27 +14,45 @@ A desktop application for tracking and downloading free and Name-Your-Price (NYP
 - **Email-Gated Redeem Flow**: Never attempts to bypass email gates or paid releases. Provides one-click browser launch and a Redeem URL modal for `https://*.bandcamp.com/download` links.
 - **Zero-Radius UI**: Strict square-cornered (`CornerRadius::ZERO`) dark interface with virtualized scrolling for 100k+ release rows and painter-drawn glyphs.
 
+## Workspace Crates
+
+- `crates/bcvault-core`: Shared sync, classification, download, `BandcampGate`, and SQLite WAL engine.
+- `crates/bcvault`: Classic zero-radius table UI.
+- `crates/bcvault-fx`: Eye-Candy Edition (`bcvault-fx`) — virtualized Cover Wall, FLIP animations, spring physics (`1/240s` fixed sub-steps), OKLab palette extraction & adaptive themes (`Carbon`, `Paper`, `Terminal`, `Vapor`), lazy slide-over Detail Drawer, fuzzy Command Palette (`Ctrl+K`), Artists banners, and Stats visualizations (squarified treemap, 53×7 heat-calendar, rolling odometer counters), backed by a read-only attached sidecar database (`fx.sqlite`).
+
 ## Usage
 
 ```bash
-# Run the desktop GUI
-cargo run --release
+# Run the classic desktop GUI
+cargo run --release -p bcvault
+
+# Run the bcvault-fx Eye-Candy Edition GUI
+cargo run --release -p bcvault-fx
 
 # Run the headless CLI smoke harness
-cargo run --example headless -- add <artist_slug_or_url>
-cargo run --example headless -- download <band_id> [flac|mp3-320|...] [out_dir]
+cargo run -p bcvault-core --example headless -- add <artist_slug_or_url>
+cargo run -p bcvault-core --example headless -- download <band_id> [flac|mp3-320|...] [out_dir]
+
+# Run the 100k-row headless wall scroll benchmark
+cargo run --release -p bcvault-fx --example fx_bench -- --check
 
 # Run formatting, clippy, unit/integration tests, and zero-radius UI checks
 ./scripts/check.sh
 ```
 
-## Keyboard Shortcuts
+## Keyboard Shortcuts (`bcvault-fx`)
 
-- `Ctrl+F`: Focus the release table search box
-- `Space`: Toggle selection on the last clicked eligible row
-- `Enter`: Enqueue selected releases for download
-- `Esc`: Close any open modal window
-- `F3`: Toggle the frame-time and event-backlog debug overlay
+- `Ctrl+K` / `Ctrl+P`: Open Command Palette (`@` artists, `#` filters, `>` commands)
+- `/` or `Ctrl+F`: Focus toolbar search box
+- `1` / `2` / `3` / `4`: Switch view (`Wall`, `Table`, `Artists`, `Stats`)
+- `[` / `]`: Decrease / increase Cover Wall card size (`S`, `M`, `L`, `XL`)
+- `Ctrl+B`: Collapse / expand left sidebar
+- `Alt+Left` / `Alt+Right`: Navigate view history back / forward
+- `Arrow Keys`: Move focus on the Cover Wall (or step prev/next in Detail Drawer)
+- `Space`: Toggle selection on focused release
+- `Enter`: Open/close Detail Drawer (`Ctrl+Enter`: enqueue selected for download)
+- `Esc`: Close Command Palette, Detail Drawer, or clear selection
+- `F3`: Toggle diagnostics overlay (frame time, active springs, texture LRU RAM, event drain)
 
 ## License
 

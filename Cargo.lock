@@ -301,6 +301,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcvault-fx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bcvault-core",
+ "chrono",
+ "directories",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "image",
+ "open",
+ "pretty_assertions",
+ "rfd",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

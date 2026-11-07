@@ -265,7 +265,7 @@ pub struct ReleaseRow {
     pub remote_update_reason: Option<UpdateReason>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseQuery {
     pub band_id: Option<i64>,
     pub filter: ReleaseFilter,
@@ -286,7 +286,7 @@ impl Default for ReleaseQuery {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReleaseFilter {
     All,
     Free,
@@ -321,7 +321,7 @@ impl ReleaseFilter {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortKey {
     Artist,
     Title,
@@ -333,7 +333,7 @@ pub enum SortKey {
     Status,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortDir {
     Asc,
     Desc,
@@ -359,6 +359,18 @@ pub enum OutputLayout {
     Flat,
     ByArtist,
     ByPageArtist,
+}
+
+impl OutputLayout {
+    pub const ALL: [Self; 3] = [Self::Flat, Self::ByArtist, Self::ByPageArtist];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Flat => "Flat",
+            Self::ByArtist => "By Album Artist",
+            Self::ByPageArtist => "By Page Artist",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
