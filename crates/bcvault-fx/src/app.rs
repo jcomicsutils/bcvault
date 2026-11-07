@@ -125,9 +125,11 @@ impl FxApp {
             actions.push(FxAction::NavForward);
         }
 
-        // Esc layering: Toast -> Palette -> Drawer -> Artist Dive -> Selection
+        // Esc layering: Modal -> Toast -> Palette -> Drawer -> Artist Dive -> Selection
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if !self.state.toasts.is_empty() {
+            if self.state.close_top_modal() {
+                // Top modal closed
+            } else if !self.state.toasts.is_empty() {
                 self.state.toasts.pop();
             } else if self.state.palette_open {
                 actions.push(FxAction::ClosePalette);
@@ -140,12 +142,7 @@ impl FxApp {
             }
         }
 
-        let any_modal = self.state.palette_open
-            || self.state.settings_modal_open
-            || self.state.redeem_modal.is_some()
-            || self.state.save_view_modal.is_some()
-            || self.state.rename_artist_modal.is_some()
-            || self.state.confirm_remove_artist.is_some();
+        let any_modal = self.state.has_open_modal() || self.state.palette_open;
 
         if !any_modal && !ctx.wants_keyboard_input() {
             if ctx.input(|i| {

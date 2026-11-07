@@ -408,6 +408,48 @@ impl FxState {
         CARD_SIZES[self.prefs.card_size_idx.min(CARD_SIZES.len() - 1)]
     }
 
+    pub fn has_open_modal(&self) -> bool {
+        self.confirm_remove_artist.is_some()
+            || self.rename_artist_modal.is_some()
+            || self.save_view_modal.is_some()
+            || self.redeem_modal.is_some()
+            || self.reconcile_report_modal.is_some()
+            || (self.show_resolve_missing_window && self.resolve_missing_modal.is_some())
+            || self.link_folder_modal.is_some()
+            || self.settings_modal_open
+    }
+
+    pub fn close_top_modal(&mut self) -> bool {
+        if self.confirm_remove_artist.take().is_some() {
+            return true;
+        }
+        if self.rename_artist_modal.take().is_some() {
+            return true;
+        }
+        if self.save_view_modal.take().is_some() {
+            return true;
+        }
+        if self.redeem_modal.take().is_some() {
+            return true;
+        }
+        if self.reconcile_report_modal.take().is_some() {
+            return true;
+        }
+        if self.show_resolve_missing_window && self.resolve_missing_modal.is_some() {
+            self.show_resolve_missing_window = false;
+            return true;
+        }
+        if self.link_folder_modal.take().is_some() {
+            return true;
+        }
+        if self.settings_modal_open {
+            self.settings_modal_open = false;
+            self.settings_draft = None;
+            return true;
+        }
+        false
+    }
+
     pub fn current_view_state(&self) -> ViewState {
         ViewState {
             view: self.view_mode,
@@ -1514,5 +1556,50 @@ mod tests {
             cmd,
             Some(UiToWorkerCommand::UndoBatch { batch_id: 55 })
         ));
+    }
+
+    #[test]
+    fn test_escape_key_closes_top_modal_in_priority_order() {
+        let mut state = FxState::new();
+        assert!(!state.has_open_modal());
+        assert!(!state.close_top_modal());
+
+        state.settings_modal_open = true;
+        assert!(state.has_open_modal());
+
+        state.link_folder_modal = Some(FxLinkFolderModalState::new_empty(Some(1)));
+        assert!(state.has_open_modal());
+
+        state.reconcile_report_modal = Some(FxReconcileReportModalState::new(Box::new(
+            bcvault_core::library::service::ReconcileReport {
+                batch_id: 1,
+                band_id: 1,
+                matched: vec![],
+                review: vec![],
+                page_only: vec![],
+                local_only: vec![],
+                conflicts: vec![],
+                restorable: vec![],
+                linked: vec![],
+            },
+        )));
+        assert!(state.has_open_modal());
+
+        // Closes reconcile report modal first
+        assert!(state.close_top_modal());
+        assert!(state.reconcile_report_modal.is_none());
+        assert!(state.has_open_modal());
+
+        // Closes link folder modal second
+        assert!(state.close_top_modal());
+        assert!(state.link_folder_modal.is_none());
+        assert!(state.has_open_modal());
+
+        // Closes settings modal third
+        assert!(state.close_top_modal());
+        assert!(!state.settings_modal_open);
+        assert!(!state.has_open_modal());
+
+        assert!(!state.close_top_modal());
     }
 }

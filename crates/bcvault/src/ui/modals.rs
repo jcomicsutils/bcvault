@@ -599,13 +599,18 @@ fn show_link_folder_modal(
         modal.folder_path = p.display().to_string();
     }
 
+    let screen = ctx.content_rect();
+    let max_w = (screen.width() - 48.0).clamp(420.0, 620.0);
+
     egui::Window::new("Link Artist Folder")
         .order(Order::Foreground)
         .collapsible(false)
         .resizable(false)
+        .max_size([max_w, (screen.height() - 48.0).max(300.0)])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(460.0);
+            ui.set_max_width(ui.available_width());
+            ui.set_min_width(ui.available_width().min(460.0));
 
             ui.label(
                 RichText::new("Link a local music folder to a Bandcamp artist:")
@@ -809,14 +814,20 @@ fn show_reconcile_report_modal(
         .map(|a| a.display_name().to_string())
         .unwrap_or_else(|| format!("Artist {}", modal.report.band_id));
 
+    let screen = ctx.content_rect();
+    let max_w = (screen.width() - 48.0).clamp(480.0, 860.0);
+    let max_h = (screen.height() - 48.0).clamp(360.0, 720.0);
+
     egui::Window::new(format!("Match Report - {artist_name}"))
         .order(Order::Foreground)
         .collapsible(false)
         .resizable(true)
         .default_size([700.0, 520.0])
+        .max_size([max_w, max_h])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(580.0);
+            ui.set_max_width(ui.available_width());
+            ui.set_min_width(ui.available_width().min(580.0));
 
             // Subtitle
             let folder_path = state
@@ -883,9 +894,11 @@ fn show_reconcile_report_modal(
 
             // Tab contents inside ScrollArea
             egui::ScrollArea::vertical()
-                .max_height(360.0)
+                .max_height((max_h - 160.0).max(200.0))
                 .auto_shrink([false, false])
-                .show(ui, |ui| match modal.active_tab {
+                .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    match modal.active_tab {
                     ReportTab::Matched => {
                         if !modal.report.matched.is_empty() {
                             ui.horizontal(|ui| {
@@ -934,69 +947,77 @@ fn show_reconcile_report_modal(
                                             }
                                         }
 
-                                        ui.label(RichText::new(&m.release_title).strong());
+                                            ui.add(egui::Label::new(RichText::new(&m.release_title).strong()).truncate())
+                                                .on_hover_text(&m.release_title);
 
-                                        let fmt_str = m
-                                            .format_guess
-                                            .map(|f| format!("[{}]", f.label()))
-                                            .unwrap_or_default();
-                                        ui.label(
-                                            RichText::new(format!("{} {fmt_str}", m.candidate_name))
-                                                .color(pal::TEXT_DIM)
-                                                .monospace(),
-                                        )
-                                        .on_hover_text(m.candidate_path.display().to_string());
+                                            let fmt_str = m
+                                                .format_guess
+                                                .map(|f| format!("[{}]", f.label()))
+                                                .unwrap_or_default();
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!("{} {fmt_str}", m.candidate_name))
+                                                        .color(pal::TEXT_DIM)
+                                                        .monospace(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(m.candidate_path.display().to_string());
 
-                                        let tip = format!(
-                                            "Score: {:.2}\nSignals:\n{}",
-                                            m.score.value,
-                                            format_signals(&m.score.signals)
-                                        );
-                                        ui.label(
-                                            RichText::new(format!("{:.0}%", m.score.value * 100.0))
-                                                .color(pal::OK)
-                                                .monospace(),
-                                        )
-                                        .on_hover_text(tip);
+                                            let tip = format!(
+                                                "Score: {:.2}\nSignals:\n{}",
+                                                m.score.value,
+                                                format_signals(&m.score.signals)
+                                            );
+                                            ui.label(
+                                                RichText::new(format!("{:.0}%", m.score.value * 100.0))
+                                                    .color(pal::OK)
+                                                    .monospace(),
+                                            )
+                                            .on_hover_text(tip);
 
-                                        ui.end_row();
-                                    }
-                                });
-                        } else if modal.report.linked.is_empty() {
-                            ui.label(RichText::new("No matched releases.").color(pal::TEXT_DIM));
+                                            ui.end_row();
+                                        }
+                                    });
+                            } else if modal.report.linked.is_empty() {
+                                ui.label(RichText::new("No matched releases.").color(pal::TEXT_DIM));
+                            }
+
+                            if !modal.report.linked.is_empty() {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Already linked ({})",
+                                        modal.report.linked.len()
+                                    ))
+                                    .strong()
+                                    .color(pal::TEXT_DIM),
+                                );
+                                ui.add_space(4.0);
+                                egui::Grid::new("linked_tab_grid")
+                                    .num_columns(2)
+                                    .spacing([8.0, 6.0])
+                                    .show(ui, |ui| {
+                                        for l in &modal.report.linked {
+                                            ui.add(egui::Label::new(RichText::new(&l.release_title).strong()).truncate())
+                                                .on_hover_text(&l.release_title);
+                                            let name = l
+                                                .path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| l.path.display().to_string());
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(name).color(pal::TEXT_DIM).monospace(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(l.path.display().to_string());
+                                            ui.end_row();
+                                        }
+                                    });
+                            }
                         }
-
-                        if !modal.report.linked.is_empty() {
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "Already linked ({})",
-                                    modal.report.linked.len()
-                                ))
-                                .strong()
-                                .color(pal::TEXT_DIM),
-                            );
-                            ui.add_space(4.0);
-                            egui::Grid::new("linked_tab_grid")
-                                .num_columns(2)
-                                .spacing([8.0, 6.0])
-                                .show(ui, |ui| {
-                                    for l in &modal.report.linked {
-                                        ui.label(RichText::new(&l.release_title).strong());
-                                        let name = l
-                                            .path
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| l.path.display().to_string());
-                                        ui.label(
-                                            RichText::new(name).color(pal::TEXT_DIM).monospace(),
-                                        )
-                                        .on_hover_text(l.path.display().to_string());
-                                        ui.end_row();
-                                    }
-                                });
-                        }
-                    }
                     ReportTab::Review => {
                         if modal.report.review.is_empty() {
                             ui.label(
@@ -1005,7 +1026,8 @@ fn show_reconcile_report_modal(
                         } else {
                             for r in &modal.report.review {
                                 ui.group(|ui| {
-                                    ui.label(RichText::new(&r.release_title).strong());
+                                    ui.add(egui::Label::new(RichText::new(&r.release_title).strong()).truncate())
+                                        .on_hover_text(&r.release_title);
                                     let chosen = modal.selected_review.get(&r.release_key).copied();
 
                                     for (c_idx, c) in r.candidates.iter().enumerate() {
@@ -1023,12 +1045,15 @@ fn show_reconcile_report_modal(
                                             if ui.radio(is_chosen, "").clicked() {
                                                 modal.selected_review.insert(r.release_key, c_idx);
                                             }
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{} {fmt_str}",
-                                                    c.candidate_name
-                                                ))
-                                                .monospace(),
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "{} {fmt_str}",
+                                                        c.candidate_name
+                                                    ))
+                                                    .monospace(),
+                                                )
+                                                .truncate(),
                                             )
                                             .on_hover_text(
                                                 c.candidate_path.display().to_string(),
@@ -1077,7 +1102,8 @@ fn show_reconcile_report_modal(
                                     .unwrap_or_else(|| format!("Release #{}", key.id));
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("-").color(pal::TEXT_DIM));
-                                    ui.label(RichText::new(title).strong());
+                                    ui.add(egui::Label::new(RichText::new(&title).strong()).truncate())
+                                        .on_hover_text(&title);
                                 });
                             }
                         }
@@ -1101,18 +1127,25 @@ fn show_reconcile_report_modal(
                                         .format_guess
                                         .map(|f| format!("[{}]", f.label()))
                                         .unwrap_or_default();
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} ({} tracks) {fmt_str}",
-                                            orphan.name, orphan.track_count
-                                        ))
-                                        .strong(),
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "{} ({} tracks) {fmt_str}",
+                                                orphan.name, orphan.track_count
+                                            ))
+                                            .strong(),
+                                        )
+                                        .truncate(),
                                     );
-                                    ui.label(
-                                        RichText::new(orphan.path.display().to_string())
-                                            .color(pal::TEXT_DIM)
-                                            .size(11.0),
-                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(orphan.path.display().to_string())
+                                                .color(pal::TEXT_DIM)
+                                                .size(11.0),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(orphan.path.display().to_string());
 
                                     let current_decision = modal
                                         .local_decisions
@@ -1213,11 +1246,16 @@ fn show_reconcile_report_modal(
                         } else {
                             for c in &modal.report.conflicts {
                                 ui.group(|ui| {
-                                    ui.label(
-                                        RichText::new(&c.description)
-                                            .strong()
-                                            .color(pal::WARN),
-                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&c.description)
+                                                .strong()
+                                                .color(pal::WARN),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(&c.description);
+
                                     if !c.candidate_paths.is_empty() {
                                         ui.label(
                                             RichText::new("Paths involved:")
@@ -1225,11 +1263,19 @@ fn show_reconcile_report_modal(
                                                 .size(11.0),
                                         );
                                         for p in &c.candidate_paths {
-                                            ui.label(
-                                                RichText::new(format!("  - {}", p.display()))
-                                                    .monospace()
-                                                    .size(11.0),
-                                            );
+                                            let name = p
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| p.display().to_string());
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!("  - {name}"))
+                                                        .monospace()
+                                                        .size(11.0),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(p.display().to_string());
                                         }
                                     }
                                 });
@@ -1292,18 +1338,28 @@ fn show_reconcile_report_modal(
                                                 modal.selected_restorable.remove(&m.release_key);
                                             }
                                         }
-                                        ui.label(RichText::new(&m.release_title).strong());
-                                        ui.label(
-                                            RichText::new(m.candidate_path.display().to_string())
-                                                .color(pal::TEXT_DIM)
-                                                .monospace(),
-                                        );
+                                        ui.add(egui::Label::new(RichText::new(&m.release_title).strong()).truncate())
+                                            .on_hover_text(&m.release_title);
+                                        let fmt_str = m
+                                            .format_guess
+                                            .map(|f| format!("[{}]", f.label()))
+                                            .unwrap_or_default();
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(format!("{} {fmt_str}", m.candidate_name))
+                                                    .color(pal::TEXT_DIM)
+                                                    .monospace(),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(m.candidate_path.display().to_string());
                                         ui.end_row();
                                     }
                                 });
                         }
                     }
-                });
+                }
+            });
 
             ui.separator();
 
@@ -1485,15 +1541,21 @@ fn show_resolve_missing_modal(
     let mut applied = false;
     let mut close_requested = false;
 
+    let screen = ctx.content_rect();
+    let max_w = (screen.width() - 48.0).clamp(480.0, 860.0);
+    let max_h = (screen.height() - 48.0).clamp(360.0, 720.0);
+
     egui::Window::new("Resolve Missing Files")
         .order(Order::Foreground)
         .collapsible(true)
         .resizable(true)
         .default_size([720.0, 500.0])
+        .max_size([max_w, max_h])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.set_min_width(650.0);
+            ui.set_max_width(ui.available_width());
+            ui.set_min_width(ui.available_width().min(600.0));
 
             // Mass-missing safeguard banner
             if modal.mass_missing {
@@ -1631,28 +1693,38 @@ fn show_resolve_missing_modal(
                             .inner_margin(6.0)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.strong(format!("{} - {}", item.artist_name, item.title));
+                                    let label_text = format!("{} - {}", item.artist_name, item.title);
+                                    ui.add(egui::Label::new(RichText::new(&label_text).strong()).truncate())
+                                        .on_hover_text(&label_text);
                                 });
                                 if let Some(last) = &item.last_known_path {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "Last known: {}",
-                                            last.display()
-                                        ))
-                                        .size(11.0)
-                                        .color(pal::TEXT_DIM),
-                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "Last known: {}",
+                                                last.display()
+                                            ))
+                                            .size(11.0)
+                                            .color(pal::TEXT_DIM),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(last.display().to_string());
                                 }
                                 if let Some(cand) = &item.best_candidate {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "Candidate in artist folder ({}%): {}",
-                                            (cand.score * 100.0) as u32,
-                                            cand.path.display()
-                                        ))
-                                        .color(pal::ACCENT)
-                                        .size(11.0),
-                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "Candidate in artist folder ({}%): {}",
+                                                (cand.score * 100.0) as u32,
+                                                cand.path.display()
+                                            ))
+                                            .color(pal::ACCENT)
+                                            .size(11.0),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(cand.path.display().to_string());
                                 }
 
                                 // Decision radios
