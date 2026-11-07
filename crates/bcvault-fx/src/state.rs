@@ -81,6 +81,7 @@ pub struct FxState {
     pub marquee_current: Option<egui::Pos2>,
     pub last_card_rects: HashMap<ItemKey, Rect>,
     pub flip_origins: HashMap<ItemKey, Rect>,
+    pub flip_seed_pending: bool,
     pub flip_ghosts: Vec<(ItemKey, Option<i64>, Rect, f64)>,
     pub row_flashes: HashMap<ItemKey, f64>,
     pub artist_dive_banner: Option<(i64, Rect)>,
@@ -186,6 +187,7 @@ impl FxState {
             marquee_current: None,
             last_card_rects: HashMap::new(),
             flip_origins: HashMap::new(),
+            flip_seed_pending: false,
             flip_ghosts: Vec::new(),
             row_flashes: HashMap::new(),
             artist_dive_banner: None,
@@ -260,10 +262,11 @@ impl FxState {
     pub fn snapshot_for_flip(&mut self, now_s: f64) {
         self.flip_origins.clear();
         for (k, r) in &self.last_card_rects {
-            if self.flip_origins.len() < 200 {
+            if self.flip_origins.len() < 500 {
                 self.flip_origins.insert(*k, *r);
             }
         }
+        self.flip_seed_pending = !self.last_card_rects.is_empty();
         self.flip_ghosts.clear();
         for row in &self.rows {
             if self.flip_ghosts.len() >= 40 {
@@ -529,6 +532,9 @@ impl FxState {
                     return;
                 }
                 if chunk == 0 {
+                    if !self.rows.is_empty() {
+                        self.snapshot_for_flip(now_s);
+                    }
                     self.rows = rows;
                 } else {
                     self.rows.extend(rows);
@@ -635,7 +641,6 @@ impl FxState {
             FxAction::SetFilter(f) => {
                 if self.query.base.filter != f || self.query.smart.is_some() {
                     self.nav.push(self.current_view_state());
-                    self.snapshot_for_flip(now_s);
                     self.query.smart = None;
                     self.query.base.filter = f;
                     self.issue_wall_and_facets_query(fx_tx);
@@ -643,7 +648,6 @@ impl FxState {
             }
             FxAction::SetSort(sort, dir) => {
                 self.nav.push(self.current_view_state());
-                self.snapshot_for_flip(now_s);
                 self.query.fx_sort = sort;
                 self.query.base.dir = dir;
                 self.issue_wall_and_facets_query(fx_tx);
@@ -658,21 +662,18 @@ impl FxState {
             FxAction::SetHue(hue) => {
                 if self.query.hue != hue {
                     self.nav.push(self.current_view_state());
-                    self.snapshot_for_flip(now_s);
                     self.query.hue = hue;
                     self.issue_wall_and_facets_query(fx_tx);
                 }
             }
             FxAction::SelectSmartView(sv) => {
                 self.nav.push(self.current_view_state());
-                self.snapshot_for_flip(now_s);
                 self.query.smart = sv;
                 self.issue_wall_and_facets_query(fx_tx);
             }
             FxAction::SelectArtist(band_id) => {
                 if self.query.base.band_id != band_id {
                     self.nav.push(self.current_view_state());
-                    self.snapshot_for_flip(now_s);
                     self.query.base.band_id = band_id;
                     if let Some(bid) = band_id {
                         let _ = fx_tx.send(FxCommand::TouchRecent {
@@ -860,7 +861,6 @@ impl FxState {
             FxAction::NavBack => {
                 let curr = self.current_view_state();
                 if let Some(prev) = self.nav.go_back(curr) {
-                    self.snapshot_for_flip(now_s);
                     self.view_mode = prev.view;
                     self.query = prev.query;
                     self.pending_scroll_to_y = Some(prev.scroll_y);
@@ -871,7 +871,6 @@ impl FxState {
             FxAction::NavForward => {
                 let curr = self.current_view_state();
                 if let Some(next) = self.nav.go_forward(curr) {
-                    self.snapshot_for_flip(now_s);
                     self.view_mode = next.view;
                     self.query = next.query;
                     self.pending_scroll_to_y = Some(next.scroll_y);
@@ -886,7 +885,6 @@ impl FxState {
             FxAction::ApplySavedView(id) => {
                 if let Some(sv) = self.saved_views.iter().find(|v| v.id == id).cloned() {
                     self.nav.push(self.current_view_state());
-                    self.snapshot_for_flip(now_s);
                     self.view_mode = sv.state.view;
                     self.query = sv.state.query;
                     self.pending_scroll_to_y = Some(sv.state.scroll_y);

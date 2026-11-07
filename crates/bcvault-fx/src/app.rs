@@ -262,6 +262,10 @@ impl FxApp {
 }
 
 impl eframe::App for FxApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        self.state.active_theme.bg1.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let t_start = Instant::now();
         let now_s = self.boot_instant.elapsed().as_secs_f64();
@@ -330,17 +334,19 @@ impl eframe::App for FxApp {
             });
 
         // 3. Left Sidebar (resizable when expanded, 56px fixed rail when collapsed)
-        let sb_panel = egui::SidePanel::left("fx_left_sidebar");
         let sb_panel = if self.state.sidebar_collapsed {
-            sb_panel.exact_width(56.0).resizable(false)
+            egui::SidePanel::left("fx_sidebar_collapsed")
+                .exact_width(56.0)
+                .resizable(false)
         } else {
-            sb_panel
+            egui::SidePanel::left("fx_sidebar_expanded")
                 .default_width(280.0)
-                .min_width(220.0)
+                .min_width(240.0)
                 .max_width(500.0)
                 .resizable(true)
         };
         sb_panel.show(ctx, |ui| {
+            ui.set_max_width(ui.available_width());
             views::sidebar::show(ui, &mut self.state, &self.core_tx, &self.fx_tx, now_s);
         });
 

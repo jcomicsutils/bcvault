@@ -284,6 +284,18 @@ impl Motion {
         }
     }
 
+    pub fn set_vec2(&mut self, id: impl Hash, value: Vec2) {
+        let key = Id::new(id);
+        let frame = self.frame;
+        self.entries.insert(
+            key,
+            Entry {
+                kind: EntryKind::Vec2([Spring::new(value.x), Spring::new(value.y)]),
+                last_touched_frame: frame,
+            },
+        );
+    }
+
     pub fn color(&mut self, id: impl Hash, target: Color32, cfg: SpringCfg) -> Color32 {
         let key = Id::new(id);
         let instant = self.is_instant();

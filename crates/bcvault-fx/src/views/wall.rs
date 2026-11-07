@@ -302,6 +302,7 @@ pub fn show(
             }
         }
 
+        let seed_flip = std::mem::take(&mut state.flip_seed_pending);
         state.last_card_rects.clear();
         let pointer_pos = ui.input(|i| i.pointer.hover_pos());
 
@@ -312,25 +313,47 @@ pub fn show(
                 continue;
             };
 
+            if seed_flip {
+                let start_min = if let Some(old_r) = state.flip_origins.get(&key).copied() {
+                    let delta = old_r.min - target_rect.min;
+                    let dist = delta.length();
+                    if dist < 1.0 {
+                        state.flip_origins.remove(&key);
+                        target_rect.min
+                    } else {
+                        let clamped = if dist > 420.0 {
+                            delta * (420.0 / dist)
+                        } else {
+                            delta
+                        };
+                        target_rect.min + clamped
+                    }
+                } else {
+                    let fallback = target_rect.min + Vec2::new(0.0, 56.0);
+                    state
+                        .flip_origins
+                        .insert(key, Rect::from_min_size(fallback, target_rect.size()));
+                    fallback
+                };
+                state
+                    .motion
+                    .set_vec2(("flip_pos", key), start_min.to_vec2());
+            }
+
             // FLIP position spring if card moved from a prior layout
-            let animated_min = if let Some(old_r) = state.flip_origins.get(&key).copied() {
+            let animated_min = if state.flip_origins.contains_key(&key) {
                 let v = state.motion.vec2(
                     ("flip_pos", key),
                     target_rect.min.to_vec2(),
                     SpringCfg::SMOOTH,
                 );
-                if (v - target_rect.min.to_vec2()).length_sq() < 1.0 {
+                if (v - target_rect.min.to_vec2()).length_sq() < 0.25 {
                     state.flip_origins.remove(&key);
+                    target_rect.min
                 } else {
-                    let _ = old_r;
+                    Pos2::new(v.x, v.y)
                 }
-                Pos2::new(v.x, v.y)
             } else {
-                let _ = state.motion.vec2(
-                    ("flip_pos", key),
-                    target_rect.min.to_vec2(),
-                    SpringCfg::SMOOTH,
-                );
                 target_rect.min
             };
 
@@ -542,6 +565,15 @@ pub fn show(
             });
         }
 
+        for idx in 0..state.rows.len().min(500) {
+            let key = state.rows[idx].rel.key;
+            if !state.last_card_rects.contains_key(&key)
+                && let Some(r) = layout.card_rect(idx, origin)
+            {
+                state.last_card_rects.insert(key, r);
+            }
+        }
+
         // Marquee rectangle overlay
         if let (Some(p0), Some(p1)) = (state.marquee_start, state.marquee_current) {
             let mr = Rect::from_two_pos(p0, p1);
@@ -697,5 +729,75 @@ mod tests {
         let (lo, hi) = layout.visible_range(0.0, 250.0);
         assert_eq!(lo, 0);
         assert!(hi >= layout.cols);
+    }
+
+    #[test]
+    fn wall_sort_change_triggers_flip_spring_animation() {
+        use crate::{actions::FxSortKey, services::messages::FxEvent};
+        use bcvault_core::types::SortDir;
+
+        let ctx = egui::Context::default();
+        let mut state = FxState::new();
+        state.prefs.card_size_idx = 3; // XL cards
+        state.rows = make_rows(28);
+
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Frame 1: initial layout
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw.clone(), |ctx| {
+            state.motion.begin_frame_dt(1.0 / 60.0);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &core_tx, &fx_tx, 0.0);
+            });
+            state.motion.end_frame(ctx);
+        });
+        assert_eq!(state.last_card_rects.len(), 28);
+
+        // User dispatches SetSort in toolbar during Frame 2 before WallLoaded arrives
+        let _ = ctx.run(raw.clone(), |ctx| {
+            state.motion.begin_frame_dt(1.0 / 60.0);
+            state.dispatch(
+                FxAction::SetSort(FxSortKey::Title, SortDir::Asc),
+                &core_tx,
+                &fx_tx,
+                0.016,
+            );
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &core_tx, &fx_tx, 0.016);
+            });
+            state.motion.end_frame(ctx);
+        });
+
+        // Async WallLoaded arrives with reversed rows on Frame 3
+        let mut reversed = make_rows(28);
+        reversed.reverse();
+        let req_id = state.active_wall_req_id;
+        state.apply_fx_event(
+            FxEvent::WallLoaded {
+                request_id: req_id,
+                chunk: 0,
+                last: true,
+                rows: reversed,
+            },
+            0.032,
+        );
+        assert!(state.flip_seed_pending);
+
+        let _ = ctx.run(raw, |ctx| {
+            state.motion.begin_frame_dt(1.0 / 60.0);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &core_tx, &fx_tx, 0.032);
+            });
+            state.motion.end_frame(ctx);
+        });
+
+        // Cards must be actively animating via FLIP springs, not teleporting
+        assert!(!state.flip_origins.is_empty());
+        assert!(state.motion.active_springs() > 0);
     }
 }

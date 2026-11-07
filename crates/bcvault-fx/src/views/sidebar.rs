@@ -67,9 +67,12 @@ pub fn show(
     }
 
     // 1. Add Artist input bar
-    ui.horizontal(|ui| {
-        let (collapse_clicked, add_clicked) = ui
-            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+    let top_row_w = ui.available_width();
+    let (collapse_clicked, add_clicked, enter_pressed) = ui
+        .allocate_ui_with_layout(
+            Vec2::new(top_row_w, 28.0),
+            Layout::right_to_left(Align::Center),
+            |ui| {
                 let collapse = paint::sharp_button(ui, "«")
                     .on_hover_text("Collapse sidebar (Ctrl+B)")
                     .clicked();
@@ -79,26 +82,25 @@ pub fn show(
                         egui::Button::new("Add").corner_radius(CornerRadius::ZERO),
                     )
                     .clicked();
-                (collapse, add)
-            })
-            .inner;
+                let te = egui::TextEdit::singleline(&mut state.add_artist_input)
+                    .hint_text("Add Artist (URL or Slug)")
+                    .desired_width(ui.available_width());
+                let resp = ui.add_enabled(!state.add_artist_pending, te);
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                (collapse, add, enter)
+            },
+        )
+        .inner;
 
-        if collapse_clicked {
-            pending_actions.push(FxAction::ToggleSidebar);
-        }
-
-        let te = egui::TextEdit::singleline(&mut state.add_artist_input)
-            .hint_text("Add Artist (URL or Slug)")
-            .desired_width((ui.available_width() - 4.0).max(40.0));
-        let resp = ui.add_enabled(!state.add_artist_pending, te);
-        let enter_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (enter_pressed || add_clicked) && !state.add_artist_input.trim().is_empty() {
-            let input = state.add_artist_input.trim().to_string();
-            state.add_artist_input.clear();
-            state.add_artist_pending = true;
-            let _ = core_tx.send(UiToWorkerCommand::AddArtist { input });
-        }
-    });
+    if collapse_clicked {
+        pending_actions.push(FxAction::ToggleSidebar);
+    }
+    if (enter_pressed || add_clicked) && !state.add_artist_input.trim().is_empty() {
+        let input = state.add_artist_input.trim().to_string();
+        state.add_artist_input.clear();
+        state.add_artist_pending = true;
+        let _ = core_tx.send(UiToWorkerCommand::AddArtist { input });
+    }
 
     // 2. Smart Views & Saved Views
     ui.collapsing(
@@ -412,4 +414,111 @@ fn draw_artist_row(
         stats.quota_used_30d,
         state.settings.quota_hard
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::theme::{FxTheme, apply_theme};
+    use bcvault_core::types::ArtistView;
+
+    #[test]
+    fn sidebar_does_not_overflow_or_leave_gap_before_central_panel() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &FxTheme::PAPER);
+        let mut state = FxState::new();
+        state.artists = vec![
+            ArtistView {
+                band_id: 1,
+                slug: "areyoudoneyet".to_string(),
+                name: "areyoudoneyet".to_string(),
+                custom_name: None,
+                url: "https://areyoudoneyet.bandcamp.com".to_string(),
+                last_synced_at: None,
+                stats: ArtistStats {
+                    downloaded: 17,
+                    eligible: 17,
+                    total: 17,
+                    email_required: 1,
+                    unknown: 0,
+                    quota_used_30d: 0,
+                },
+            },
+            ArtistView {
+                band_id: 2,
+                slug: "deafballerina".to_string(),
+                name: "Deaf Ballerina".to_string(),
+                custom_name: None,
+                url: "https://deafballerina.bandcamp.com".to_string(),
+                last_synced_at: None,
+                stats: ArtistStats {
+                    downloaded: 11,
+                    eligible: 11,
+                    total: 11,
+                    email_required: 0,
+                    unknown: 0,
+                    quota_used_30d: 0,
+                },
+            },
+        ];
+
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        for frame_idx in 0..5 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 860.0))),
+                ..Default::default()
+            };
+            let mut sb_rect = Rect::NOTHING;
+            let mut sb_clip = Rect::NOTHING;
+            let mut sb_inner_min = Rect::NOTHING;
+            let mut central_rect = Rect::NOTHING;
+            let _ = ctx.run(raw, |ctx| {
+                state.motion.begin_frame_dt(1.0 / 60.0);
+                let sb = egui::SidePanel::left("fx_sidebar_expanded")
+                    .default_width(280.0)
+                    .min_width(240.0)
+                    .max_width(500.0)
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        sb_clip = ui.clip_rect();
+                        ui.set_max_width(ui.available_width());
+                        show(ui, &mut state, &core_tx, &fx_tx, frame_idx as f64 * 0.016);
+                        sb_inner_min = ui.min_rect();
+                    });
+                sb_rect = sb.response.rect;
+                let cp = egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label("central");
+                });
+                central_rect = cp.response.rect;
+                state.motion.end_frame(ctx);
+            });
+
+            assert!(
+                sb_inner_min.max.x <= sb_clip.max.x,
+                "sidebar inner content max.x ({}) exceeded clip_rect max.x ({}) on frame {frame_idx}",
+                sb_inner_min.max.x,
+                sb_clip.max.x
+            );
+            assert!(
+                (sb_rect.max.x - sb_clip.max.x).abs() <= 1.0,
+                "sidebar response rect max.x ({}) != clip_rect max.x ({}) on frame {frame_idx}",
+                sb_rect.max.x,
+                sb_clip.max.x
+            );
+            assert!(
+                (sb_rect.width() - 280.0).abs() <= 1.0,
+                "sidebar width drifted to {} on frame {frame_idx}",
+                sb_rect.width()
+            );
+            assert!(
+                (central_rect.min.x - sb_rect.max.x).abs() <= 1.0,
+                "gap between sidebar ({}) and central panel ({}) on frame {frame_idx}",
+                sb_rect.max.x,
+                central_rect.min.x
+            );
+        }
+    }
 }
