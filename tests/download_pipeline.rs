@@ -13,7 +13,7 @@ use bcvault::{
     error::DownloadError,
     types::{
         AudioFormat, Classification, DownloadOpts, DownloadSource, HistoryStatus, ItemKey,
-        ItemType, JobError, JobState, Settings,
+        ItemType, JobError, JobState, OutputLayout, Settings,
     },
     worker::{
         bridge::UiBridge,
@@ -391,6 +391,68 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
     assert!(folder2.join("TrackArtist - SongTwo.flac").exists());
     assert!(!folder2.join("cover.jpg").exists());
     assert!(warn_logged);
+
+    // Verify OutputLayout::ByPageArtist creates folder using the page artist name (artists.name)
+    // rather than the release artist override (releases.artist_name)
+    let k3 = ItemKey::new(ItemType::Track, 201);
+    pool.writer
+        .call(move |c| {
+            artists::upsert(
+                c,
+                &UpsertArtist {
+                    band_id: 20,
+                    slug: "labelpage",
+                    name: "Label Page Artist",
+                    url: "https://labelpage.bandcamp.com",
+                    cover_url: None,
+                },
+            )?;
+            releases::upsert_discovered(
+                c,
+                &DiscoveredRelease {
+                    key: k3,
+                    band_id: 20,
+                    title: "SongOne",
+                    artist_name: "Sub Release Artist",
+                    url: "https://labelpage.bandcamp.com/track/song-one",
+                    cover_url: None,
+                    art_id: Some(777),
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+    let mut page_layout_settings = Settings::default_with_dir(out_dir.clone());
+    page_layout_settings.layout = OutputLayout::ByPageArtist;
+    mgr.update_settings(page_layout_settings);
+
+    mgr.enqueue_downloads(
+        vec![k3],
+        DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: out_dir.clone(),
+            batch_limit: 150,
+        },
+        false,
+    )
+    .await;
+
+    while let Some(ev) = ev_rx.recv().await {
+        if let WorkerToUiEvent::JobState {
+            state: JobState::Done { path, .. },
+            ..
+        } = ev
+        {
+            assert_eq!(
+                path,
+                out_dir
+                    .join("Label Page Artist")
+                    .join("Sub Release Artist - SongOne")
+            );
+            break;
+        }
+    }
 
     root_cancel.cancel();
 }

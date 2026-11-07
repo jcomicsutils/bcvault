@@ -203,7 +203,12 @@ fn show_settings_modal(
                         ui.selectable_value(
                             &mut draft.layout,
                             OutputLayout::ByArtist,
-                            "By Artist Folder",
+                            "By Release Artist",
+                        );
+                        ui.selectable_value(
+                            &mut draft.layout,
+                            OutputLayout::ByPageArtist,
+                            "By Page Artist",
                         );
                     });
                     ui.end_row();

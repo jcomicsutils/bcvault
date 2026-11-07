@@ -348,6 +348,7 @@ pub enum FormatFallback {
 pub enum OutputLayout {
     Flat,
     ByArtist,
+    ByPageArtist,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

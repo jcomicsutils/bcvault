@@ -41,6 +41,7 @@ pub fn upsert_discovered(conn: &Connection, item: &DiscoveredRelease<'_>) -> Res
          ON CONFLICT(item_type, item_id) DO UPDATE SET
              last_seen_at = unixepoch(),
              title = excluded.title,
+             artist_name = excluded.artist_name,
              url = excluded.url,
              cover_url = COALESCE(excluded.cover_url, releases.cover_url),
              art_id    = COALESCE(excluded.art_id, releases.art_id)",

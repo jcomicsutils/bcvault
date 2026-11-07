@@ -787,6 +787,19 @@ impl DownloadManager {
         let base_out = match settings.layout {
             OutputLayout::Flat => spec.opts.out_dir.clone(),
             OutputLayout::ByArtist => spec.opts.out_dir.join(sanitize_stem(&row.artist_name)),
+            OutputLayout::ByPageArtist => {
+                let band_id = row.band_id;
+                let page_artist = self
+                    .pool
+                    .reader
+                    .call(move |c| artists::get_view(c, band_id))
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|v| v.name)
+                    .unwrap_or_else(|| row.artist_name.clone());
+                spec.opts.out_dir.join(sanitize_stem(&page_artist))
+            }
         };
 
         let dest_dir = if row.key.kind == ItemType::Track {
