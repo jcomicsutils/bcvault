@@ -46,7 +46,12 @@ fn main() -> anyhow::Result<()> {
                 core_worker.client.clone(),
                 Some(repaint_hook),
             )?;
-            Ok(Box::new(FxApp::new(cc, core_worker, fx_worker)))
+            Ok(Box::new(FxApp::new(
+                cc,
+                core_worker,
+                fx_worker,
+                handle.clone(),
+            )))
         }),
     );
 

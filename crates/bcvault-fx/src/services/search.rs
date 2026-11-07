@@ -183,6 +183,18 @@ pub fn run_palette_search(
                 FxAction::ToggleDebug,
                 "F3",
             ),
+            (
+                "Link Folder to Artist...",
+                "Link a local music folder to a Bandcamp artist",
+                FxAction::OpenLinkFolderModal(None),
+                "",
+            ),
+            (
+                "Verify Local Library Files",
+                "Check that all adopted local files are present on disk",
+                FxAction::VerifyFiles,
+                "",
+            ),
         ];
 
         for (title, sub, act, hint) in commands {

@@ -66,6 +66,16 @@ pub fn show(
             // Gate chip: OK / PACING / COOLDOWN 00:41
             draw_gate_chip(ui, state, now_s);
 
+            if let Some(modal) = &state.resolve_missing_modal {
+                let count = modal.items.len();
+                if count > 0 {
+                    let label = format!("MISSING {count}");
+                    if paint::sharp_button(ui, RichText::new(label).color(th.warn)).clicked() {
+                        state.show_resolve_missing_window = true;
+                    }
+                }
+            }
+
             ui.separator();
 
             // 30s stepped square speed sparkline

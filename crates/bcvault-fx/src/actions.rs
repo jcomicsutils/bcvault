@@ -211,4 +211,7 @@ pub enum FxAction {
     DeleteSavedView(i64),
     PurgeCovers,
     ToggleDebug,
+    OpenLinkFolderModal(Option<i64>),
+    VerifyFiles,
+    UndoBatch(u64),
 }

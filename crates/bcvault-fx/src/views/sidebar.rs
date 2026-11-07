@@ -3,10 +3,10 @@ use crate::{
     motion::SpringCfg,
     paint,
     services::messages::FxCommand,
-    state::FxState,
+    state::{FxLinkFolderModalState, FxState},
 };
 use bcvault_core::{
-    types::{ArtistStats, SyncMode, SyncScope},
+    types::{ArtistStats, FolderState, SyncMode, SyncScope},
     worker::messages::UiToWorkerCommand,
 };
 use egui::{Align, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
@@ -241,6 +241,40 @@ pub fn show(
                             });
                             ui.close();
                         }
+                        if let Some(folder) = state.folders.get(&artist.band_id) {
+                            if paint::sharp_button(ui, "Change Folder...").clicked() {
+                                state.link_folder_modal = Some(FxLinkFolderModalState::new(
+                                    Some(artist.band_id),
+                                    folder.path.display().to_string(),
+                                ));
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Match Folder").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::MatchArtistFolder {
+                                    band_id: artist.band_id,
+                                    auto_apply_confident: true,
+                                });
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Verify Files").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                });
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Unlink Folder").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                    band_id: artist.band_id,
+                                });
+                                ui.close();
+                            }
+                        } else {
+                            if paint::sharp_button(ui, "Link Folder...").clicked() {
+                                state.link_folder_modal =
+                                    Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
+                                ui.close();
+                            }
+                        }
                         if paint::sharp_button(ui, "Rename Artist...").clicked() {
                             state.rename_artist_modal = Some((
                                 artist.band_id,
@@ -316,6 +350,11 @@ fn draw_artist_row(
     let th = state.active_theme;
     let desired = Vec2::new(ui.available_width(), 26.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let linked_folder = if band_id > 0 {
+        state.folders.get(&band_id).cloned()
+    } else {
+        None
+    };
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -401,18 +440,44 @@ fn draw_artist_row(
                 .max_rect(name_rect)
                 .layout(Layout::left_to_right(Align::Center)),
         );
+        if let Some(folder) = &linked_folder {
+            let dot_color = match folder.state {
+                FolderState::Ok => th.accent,
+                FolderState::Missing => th.err,
+                FolderState::Unreadable => th.warn,
+            };
+            let (glyph_rect, _) = child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
+            let p = child.painter();
+            paint::icons::paint_icon(p, glyph_rect, paint::icons::IconKind::Folder, th.text_dim);
+            let dot = Rect::from_min_max(
+                Pos2::new(glyph_rect.max.x - 4.0, glyph_rect.max.y - 4.0),
+                glyph_rect.max,
+            );
+            paint::rect_filled(p, dot, dot_color);
+            child.add_space(3.0);
+        }
         child.add(egui::Label::new(RichText::new(name).color(th.text)).truncate());
     }
 
+    let folder_tooltip = match &linked_folder {
+        Some(f) => format!(
+            "\nLinked folder: {}\nFolder status: {:?}",
+            f.path.display(),
+            f.state
+        ),
+        None => String::new(),
+    };
+
     resp.on_hover_text(format!(
-        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}",
+        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}{}",
         stats.downloaded,
         stats.eligible,
         stats.total,
         stats.email_required,
         stats.unknown,
         stats.quota_used_30d,
-        state.settings.quota_hard
+        state.settings.quota_hard,
+        folder_tooltip,
     ))
 }
 

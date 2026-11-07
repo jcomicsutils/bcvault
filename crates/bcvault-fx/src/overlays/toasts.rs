@@ -1,7 +1,14 @@
 use crate::{motion::SpringCfg, paint, services::messages::ToastKind, state::FxState};
+use bcvault_core::worker::messages::UiToWorkerCommand;
 use egui::{Align2, CornerRadius, Order, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use tokio::sync::mpsc::UnboundedSender;
 
-pub fn show_toasts(ctx: &egui::Context, state: &mut FxState, now_s: f64) {
+pub fn show_toasts(
+    ctx: &egui::Context,
+    state: &mut FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+    now_s: f64,
+) {
     // Auto-expire non-error toasts after 4.0 seconds
     state
         .toasts
@@ -37,7 +44,7 @@ pub fn show_toasts(ctx: &egui::Context, state: &mut FxState, now_s: f64) {
                         .corner_radius(CornerRadius::ZERO)
                         .inner_margin(8.0_f32)
                         .show(ui, |ui| {
-                            ui.set_width(300.0 * slide.clamp(0.2, 1.0));
+                            ui.set_width(320.0 * slide.clamp(0.2, 1.0));
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::Label::new(
@@ -45,6 +52,12 @@ pub fn show_toasts(ctx: &egui::Context, state: &mut FxState, now_s: f64) {
                                     )
                                     .wrap(),
                                 );
+                                if let Some(batch_id) = t.undo_batch_id
+                                    && paint::sharp_button(ui, "Undo").clicked()
+                                {
+                                    let _ = core_tx.send(UiToWorkerCommand::UndoBatch { batch_id });
+                                    dismiss_id = Some(t.id);
+                                }
                                 if paint::sharp_button(ui, "×").clicked() {
                                     dismiss_id = Some(t.id);
                                 }

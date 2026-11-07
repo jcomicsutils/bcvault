@@ -31,6 +31,7 @@ pub struct FxApp {
     pub fx_tx: UnboundedSender<FxCommand>,
     pub fx_rx: UnboundedReceiver<FxEvent>,
     pub boot_instant: Instant,
+    pub rt_handle: tokio::runtime::Handle,
     last_applied_theme: FxTheme,
 }
 
@@ -39,6 +40,7 @@ impl FxApp {
         cc: &eframe::CreationContext<'_>,
         core_worker: WorkerHandle,
         fx_worker: FxWorkerHandle,
+        rt_handle: tokio::runtime::Handle,
     ) -> Self {
         install_fonts(&cc.egui_ctx);
         let mut state = FxState::new();
@@ -55,6 +57,7 @@ impl FxApp {
             fx_tx: fx_worker.cmd_tx,
             fx_rx: fx_worker.ev_rx,
             boot_instant: Instant::now(),
+            rt_handle,
         }
     }
 
@@ -418,8 +421,15 @@ impl eframe::App for FxApp {
         // 5. Overlays: Detail Drawer, Command Palette, Modals, Toasts, Atmosphere, F3 Debug
         show_drawer(ctx, &mut self.state, &self.core_tx, &self.fx_tx, now_s);
         show_command_palette(ctx, &mut self.state, &self.core_tx, &self.fx_tx, now_s);
-        show_modals(ctx, &mut self.state, &self.core_tx, &self.fx_tx, now_s);
-        show_toasts(ctx, &mut self.state, now_s);
+        show_modals(
+            ctx,
+            &mut self.state,
+            &self.core_tx,
+            &self.fx_tx,
+            &self.rt_handle,
+            now_s,
+        );
+        show_toasts(ctx, &mut self.state, &self.core_tx, now_s);
         show_atmosphere_overlay(ctx, &mut self.state, now_s);
         show_debug_overlay(ctx, &self.state);
 

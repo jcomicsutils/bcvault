@@ -1,12 +1,20 @@
 use crate::{
-    actions::FxAction, motion::EffectsLevel, paint, services::messages::FxCommand, state::FxState,
+    actions::FxAction,
+    motion::EffectsLevel,
+    paint,
+    services::messages::{FxCommand, Tier},
+    state::{FxLocalAction, FxMissingItemChoice, FxReportTab, FxState, paint_cover_slot},
     theme::ThemeId,
 };
 use bcvault_core::{
-    types::{AudioFormat, DownloadOpts, OutputLayout},
+    library::matcher::Signal,
+    types::{
+        AudioFormat, DeletedPolicy, DownloadOpts, FolderState, MatchDecision, MissingAction,
+        MissingDecision, OnMissing, OutputLayout, RememberChoice,
+    },
     worker::messages::UiToWorkerCommand,
 };
-use egui::{CornerRadius, RichText};
+use egui::{CornerRadius, RichText, Stroke, Vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub fn show_modals(
@@ -14,6 +22,7 @@ pub fn show_modals(
     state: &mut FxState,
     core_tx: &UnboundedSender<UiToWorkerCommand>,
     fx_tx: &UnboundedSender<FxCommand>,
+    rt_handle: &tokio::runtime::Handle,
     now_s: f64,
 ) {
     let th = state.active_theme;
@@ -211,6 +220,104 @@ pub fn show_modals(
                             ui.end_row();
                         });
 
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("LIBRARY BEHAVIOUR")
+                            .monospace()
+                            .strong()
+                            .color(th.accent),
+                    );
+
+                    let mut vo = draft.verify_on_sync;
+                    if ui
+                        .checkbox(&mut vo, "Verify files after every sync")
+                        .changed()
+                    {
+                        draft.verify_on_sync = vo;
+                    }
+
+                    let mut ro = draft.rescan_linked_on_sync;
+                    if ui
+                        .checkbox(
+                            &mut ro,
+                            "Re-read linked folders on sync (auto-adopt certain matches)",
+                        )
+                        .changed()
+                    {
+                        draft.rescan_linked_on_sync = ro;
+                    }
+
+                    let mut fm = draft.auto_relink;
+                    if ui
+                        .checkbox(&mut fm, "Try to find moved albums automatically")
+                        .changed()
+                    {
+                        draft.auto_relink = fm;
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label("When files are missing:");
+                        for om in [OnMissing::Ask, OnMissing::Auto] {
+                            let active = draft.on_missing == om;
+                            let lbl = match om {
+                                OnMissing::Ask => "Ask",
+                                OnMissing::Auto => "Handle automatically",
+                            };
+                            if ui.selectable_label(active, lbl).clicked() {
+                                draft.on_missing = om;
+                            }
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("If deleted:");
+                        for dp in [DeletedPolicy::KeepMarked, DeletedPolicy::MarkNotDownloaded] {
+                            let active = draft.deleted_policy == dp;
+                            let lbl = match dp {
+                                DeletedPolicy::KeepMarked => "Keep marked as downloaded (archived)",
+                                DeletedPolicy::MarkNotDownloaded => "Mark as not downloaded",
+                            };
+                            if ui.selectable_label(active, lbl).clicked() {
+                                draft.deleted_policy = dp;
+                            }
+                        }
+                    });
+
+                    if !state.folders.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Linked Folders:").monospace().color(th.text_dim));
+                        let mut to_unlink = None;
+                        for (band_id, folder) in &state.folders {
+                            let artist_name = state
+                                .artists
+                                .iter()
+                                .find(|a| a.band_id == *band_id)
+                                .map(|a| a.display_name().to_string())
+                                .unwrap_or_else(|| format!("Artist {band_id}"));
+                            ui.horizontal(|ui| {
+                                let dot_color = match folder.state {
+                                    FolderState::Ok => th.accent,
+                                    FolderState::Missing => th.err,
+                                    FolderState::Unreadable => th.warn,
+                                };
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                                paint::rect_filled(ui.painter(), r, dot_color);
+                                ui.label(RichText::new(&artist_name).strong());
+                                ui.label(
+                                    RichText::new(folder.path.display().to_string())
+                                        .color(th.text_dim)
+                                        .monospace(),
+                                );
+                                if paint::sharp_button(ui, "Unlink").clicked() {
+                                    to_unlink = Some(*band_id);
+                                }
+                            });
+                        }
+                        if let Some(bid) = to_unlink {
+                            let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder { band_id: bid });
+                        }
+                    }
+
                     ui.separator();
 
                     ui.horizontal(|ui| {
@@ -400,7 +507,1254 @@ pub fn show_modals(
         }
     }
 
+    show_link_folder_modal(ctx, state, core_tx, rt_handle);
+    show_reconcile_report_modal(ctx, state, core_tx);
+    show_resolve_missing_modal(ctx, state, core_tx, rt_handle);
+
     for act in pending_actions {
         state.dispatch(act, core_tx, fx_tx, now_s);
+    }
+}
+
+fn format_signals(signals: &[Signal]) -> String {
+    if signals.is_empty() {
+        return "No signals recorded".to_string();
+    }
+    signals
+        .iter()
+        .map(|s| match s {
+            Signal::UrlTag => "URL tag match (exact)",
+            Signal::AlbumTag => "Album tag match",
+            Signal::FolderName => "Folder name match",
+            Signal::TrackCount => "Track count match",
+            Signal::Year => "Year tag match",
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn show_link_folder_modal(
+    ctx: &egui::Context,
+    state: &mut FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+) {
+    let Some(mut modal) = state.link_folder_modal.take() else {
+        return;
+    };
+    let mut keep_open = true;
+
+    if let Ok(mut lock) = modal.picked_folder.lock()
+        && let Some(p) = lock.take()
+    {
+        modal.folder_path = p.display().to_string();
+    }
+
+    let th = state.active_theme;
+
+    egui::Window::new("Link Artist Folder")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(460.0);
+
+            ui.label(
+                RichText::new("Link a local music folder to a Bandcamp artist:").color(th.text_dim),
+            );
+            ui.add_space(4.0);
+
+            egui::Grid::new("fx_link_folder_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Artist Page:");
+                    if let Some(band_id) = modal.band_id {
+                        let artist_name = state
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == band_id)
+                            .map(|a| a.display_name().to_string())
+                            .unwrap_or_else(|| format!("Artist {band_id}"));
+                        ui.label(RichText::new(artist_name).strong());
+                    } else {
+                        ui.vertical(|ui| {
+                            let mut selected_text = "Select tracked artist...".to_string();
+                            if let Some(band_id) = modal.band_id
+                                && let Some(a) = state.artists.iter().find(|a| a.band_id == band_id)
+                            {
+                                selected_text = a.display_name().to_string();
+                            }
+                            egui::ComboBox::from_id_salt("fx_link_modal_artist_combo")
+                                .selected_text(&selected_text)
+                                .width(280.0)
+                                .show_ui(ui, |ui| {
+                                    for a in &state.artists {
+                                        if ui
+                                            .selectable_label(
+                                                modal.band_id == Some(a.band_id),
+                                                a.display_name(),
+                                            )
+                                            .clicked()
+                                        {
+                                            modal.band_id = Some(a.band_id);
+                                            modal.artist_input = a.url.clone();
+                                        }
+                                    }
+                                });
+
+                            ui.add(
+                                egui::TextEdit::singleline(&mut modal.artist_input)
+                                    .hint_text("or paste Bandcamp URL / slug")
+                                    .desired_width(280.0),
+                            );
+                        });
+                    }
+                    ui.end_row();
+
+                    ui.label("Folder:");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut modal.folder_path)
+                                .hint_text("/path/to/artist/folder")
+                                .desired_width(240.0),
+                        );
+                        if paint::sharp_button(ui, "Browse...").clicked() {
+                            let slot = modal.picked_folder.clone();
+                            let start_dir = if !modal.folder_path.trim().is_empty() {
+                                Some(std::path::PathBuf::from(modal.folder_path.trim()))
+                            } else {
+                                None
+                            };
+                            rt_handle.spawn(async move {
+                                let mut dialog = rfd::AsyncFileDialog::new();
+                                if let Some(ref d) = start_dir {
+                                    dialog = dialog.set_directory(d);
+                                }
+                                if let Some(handle) = dialog.pick_folder().await
+                                    && let Ok(mut l) = slot.lock()
+                                {
+                                    *l = Some(handle.path().to_path_buf());
+                                }
+                            });
+                        }
+                    });
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut modal.auto_apply_confident,
+                "Adopt confident matches automatically",
+            );
+
+            if let Some(ref err) = modal.error {
+                ui.add_space(4.0);
+                ui.label(RichText::new(err).color(th.err));
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if paint::sharp_button(ui, "Link Folder").clicked() {
+                    let path_str = modal.folder_path.trim();
+                    if path_str.is_empty() {
+                        modal.error = Some("Folder path cannot be empty.".to_string());
+                    } else {
+                        let path = std::path::PathBuf::from(path_str);
+                        if !path.exists() {
+                            modal.error =
+                                Some("Selected folder path does not exist on disk.".to_string());
+                        } else if !path.is_dir() {
+                            modal.error =
+                                Some("Selected path is a file, not a directory.".to_string());
+                        } else {
+                            let target_band_id = modal.band_id.or_else(|| {
+                                let input = modal.artist_input.trim();
+                                if input.is_empty() {
+                                    None
+                                } else {
+                                    let lower = input.to_lowercase();
+                                    state
+                                        .artists
+                                        .iter()
+                                        .find(|a| {
+                                            a.url.to_lowercase().contains(&lower)
+                                                || a.slug.to_lowercase() == lower
+                                                || a.name.to_lowercase() == lower
+                                                || a.display_name().to_lowercase() == lower
+                                        })
+                                        .map(|a| a.band_id)
+                                }
+                            });
+
+                            if let Some(band_id) = target_band_id {
+                                let _ = core_tx.send(UiToWorkerCommand::LinkArtistFolder {
+                                    band_id,
+                                    path,
+                                    auto_apply_confident: modal.auto_apply_confident,
+                                });
+                                keep_open = false;
+                            } else {
+                                modal.error = Some(
+                                    "Please select or specify a valid tracked artist.".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                if paint::sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
+
+    if keep_open {
+        state.link_folder_modal = Some(modal);
+    }
+}
+
+fn show_reconcile_report_modal(
+    ctx: &egui::Context,
+    state: &mut FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+) {
+    let Some(mut modal) = state.reconcile_report_modal.take() else {
+        return;
+    };
+    let mut keep_open = true;
+    let th = state.active_theme;
+
+    let artist_name = state
+        .artists
+        .iter()
+        .find(|a| a.band_id == modal.report.band_id)
+        .map(|a| a.display_name().to_string())
+        .unwrap_or_else(|| format!("Artist {}", modal.report.band_id));
+
+    egui::Window::new(format!("Match Report - {artist_name}"))
+        .collapsible(false)
+        .resizable(true)
+        .default_size([720.0, 520.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(620.0);
+
+            let folder_path = state
+                .folders
+                .get(&modal.report.band_id)
+                .map(|f| f.path.display().to_string())
+                .unwrap_or_else(|| "Unknown folder".to_string());
+            ui.label(
+                RichText::new(format!(
+                    "Batch #{}  ·  Linked: {}",
+                    modal.report.batch_id, folder_path
+                ))
+                .size(11.5)
+                .color(th.text_dim),
+            );
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                let tabs = [
+                    (
+                        FxReportTab::Matched,
+                        format!("Matched ({})", modal.report.matched.len()),
+                    ),
+                    (
+                        FxReportTab::Review,
+                        format!("Review ({})", modal.report.review.len()),
+                    ),
+                    (
+                        FxReportTab::PageOnly,
+                        format!("On page only ({})", modal.report.page_only.len()),
+                    ),
+                    (
+                        FxReportTab::LocalOnly,
+                        format!("Local only ({})", modal.report.local_only.len()),
+                    ),
+                    (
+                        FxReportTab::Conflicts,
+                        format!("Conflicts ({})", modal.report.conflicts.len()),
+                    ),
+                    (
+                        FxReportTab::Restorable,
+                        format!("Found again ({})", modal.report.restorable.len()),
+                    ),
+                ];
+
+                for (tab, label) in tabs {
+                    let is_active = modal.active_tab == tab;
+                    let text = if is_active {
+                        RichText::new(&label).strong().color(th.accent)
+                    } else {
+                        RichText::new(&label).color(th.text)
+                    };
+                    if paint::sharp_button(ui, text).clicked() {
+                        modal.active_tab = tab;
+                    }
+                }
+            });
+
+            ui.separator();
+
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| match modal.active_tab {
+                    FxReportTab::Matched => {
+                        ui.horizontal(|ui| {
+                            let all_selected = !modal.report.matched.is_empty()
+                                && modal.selected_matched.len() == modal.report.matched.len();
+                            if paint::sharp_button(
+                                ui,
+                                if all_selected {
+                                    "Deselect All"
+                                } else {
+                                    "Select All"
+                                },
+                            )
+                            .clicked()
+                            {
+                                if all_selected {
+                                    modal.selected_matched.clear();
+                                } else {
+                                    modal.selected_matched =
+                                        modal.report.matched.iter().map(|m| m.release_key).collect();
+                                }
+                            }
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} of {} proposals selected for adoption",
+                                    modal.selected_matched.len(),
+                                    modal.report.matched.len()
+                                ))
+                                .color(th.text_dim),
+                            );
+                        });
+                        ui.add_space(4.0);
+
+                        egui::Grid::new("fx_matched_tab_grid")
+                            .num_columns(5)
+                            .spacing([8.0, 6.0])
+                            .show(ui, |ui| {
+                                for m in &modal.report.matched {
+                                    let mut is_checked =
+                                        modal.selected_matched.contains(&m.release_key);
+                                    if ui.checkbox(&mut is_checked, "").changed() {
+                                        if is_checked {
+                                            modal.selected_matched.insert(m.release_key);
+                                        } else {
+                                            modal.selected_matched.remove(&m.release_key);
+                                        }
+                                    }
+
+                                    let art_id = state
+                                        .rows
+                                        .iter()
+                                        .find(|r| r.rel.key == m.release_key)
+                                        .and_then(|r| r.art_id);
+                                    let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
+                                    paint_cover_slot(
+                                        ui.painter(),
+                                        state,
+                                        art_id,
+                                        m.release_key.id,
+                                        cov_r,
+                                        Tier::T64,
+                                        1.0,
+                                        Vec2::ZERO,
+                                    );
+
+                                    ui.label(RichText::new(&m.release_title).strong());
+
+                                    let fmt_str = m
+                                        .format_guess
+                                        .map(|f| format!("[{}]", f.label()))
+                                        .unwrap_or_default();
+                                    ui.label(
+                                        RichText::new(format!("{} {fmt_str}", m.candidate_name))
+                                            .color(th.text_dim)
+                                            .monospace(),
+                                    )
+                                    .on_hover_text(m.candidate_path.display().to_string());
+
+                                    let tip = format!(
+                                        "Score: {:.2}\nSignals:\n{}",
+                                        m.score.value,
+                                        format_signals(&m.score.signals)
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{:.0}%", m.score.value * 100.0))
+                                            .color(th.accent)
+                                            .monospace(),
+                                    )
+                                    .on_hover_text(tip);
+
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                    FxReportTab::Review => {
+                        if modal.report.review.is_empty() {
+                            ui.label(
+                                RichText::new("No items requiring review.").color(th.text_dim),
+                            );
+                        } else {
+                            for r in &modal.report.review {
+                                egui::Frame::NONE
+                                    .corner_radius(CornerRadius::ZERO)
+                                    .fill(th.bg1)
+                                    .stroke(Stroke::new(1.0_f32, th.border))
+                                    .inner_margin(6.0)
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let art_id = state
+                                                .rows
+                                                .iter()
+                                                .find(|row| row.rel.key == r.release_key)
+                                                .and_then(|row| row.art_id);
+                                            let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
+                                            paint_cover_slot(
+                                                ui.painter(),
+                                                state,
+                                                art_id,
+                                                r.release_key.id,
+                                                cov_r,
+                                                Tier::T64,
+                                                1.0,
+                                                Vec2::ZERO,
+                                            );
+                                            ui.label(RichText::new(&r.release_title).strong());
+                                        });
+
+                                        let chosen = modal.selected_review.get(&r.release_key).copied();
+
+                                        for (c_idx, c) in r.candidates.iter().enumerate() {
+                                            let is_chosen = chosen == Some(c_idx);
+                                            let fmt_str = c
+                                                .format_guess
+                                                .map(|f| format!("[{}]", f.label()))
+                                                .unwrap_or_default();
+                                            let tip = format!(
+                                                "Score: {:.2}\nSignals:\n{}",
+                                                c.score.value,
+                                                format_signals(&c.score.signals)
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui.radio(is_chosen, "").clicked() {
+                                                    modal.selected_review.insert(r.release_key, c_idx);
+                                                }
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} {fmt_str}",
+                                                        c.candidate_name
+                                                    ))
+                                                    .monospace(),
+                                                )
+                                                .on_hover_text(
+                                                    c.candidate_path.display().to_string(),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "({:.0}%)",
+                                                        c.score.value * 100.0
+                                                    ))
+                                                    .color(th.warn)
+                                                    .size(11.0),
+                                                )
+                                                .on_hover_text(tip);
+                                            });
+                                        }
+
+                                        let is_skipped = chosen.is_none();
+                                        if ui.radio(is_skipped, "Skip for now").clicked() {
+                                            modal.selected_review.remove(&r.release_key);
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    }
+                    FxReportTab::PageOnly => {
+                        if modal.report.page_only.is_empty() {
+                            ui.label(
+                                RichText::new("All releases have corresponding local files.")
+                                    .color(th.text_dim),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(
+                                    "These releases exist on Bandcamp but have no local audio files in the linked folder:",
+                                )
+                                .color(th.text_dim),
+                            );
+                            ui.add_space(4.0);
+                            for key in &modal.report.page_only {
+                                let art_id = state
+                                    .rows
+                                    .iter()
+                                    .find(|r| r.rel.key == *key)
+                                    .and_then(|r| r.art_id);
+                                let title = state
+                                    .rows
+                                    .iter()
+                                    .find(|r| r.rel.key == *key)
+                                    .map(|r| r.rel.title.clone())
+                                    .unwrap_or_else(|| format!("Release #{}", key.id));
+                                ui.horizontal(|ui| {
+                                    let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
+                                    paint_cover_slot(
+                                        ui.painter(),
+                                        state,
+                                        art_id,
+                                        key.id,
+                                        cov_r,
+                                        Tier::T64,
+                                        1.0,
+                                        Vec2::ZERO,
+                                    );
+                                    ui.label(RichText::new(title).strong());
+                                });
+                            }
+                        }
+                    }
+                    FxReportTab::LocalOnly => {
+                        if modal.report.local_only.is_empty() {
+                            ui.label(
+                                RichText::new("No unassigned local files found.")
+                                    .color(th.text_dim),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(
+                                    "These local audio folders could not be matched to any release on the Bandcamp page:",
+                                )
+                                .color(th.text_dim),
+                            );
+                            ui.add_space(4.0);
+
+                            for orphan in &modal.report.local_only {
+                                egui::Frame::NONE
+                                    .corner_radius(CornerRadius::ZERO)
+                                    .fill(th.bg1)
+                                    .stroke(Stroke::new(1.0_f32, th.border))
+                                    .inner_margin(6.0)
+                                    .show(ui, |ui| {
+                                        let fmt_str = orphan
+                                            .format_guess
+                                            .map(|f| format!("[{}]", f.label()))
+                                            .unwrap_or_default();
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} {fmt_str}",
+                                                orphan.path.display()
+                                            ))
+                                            .strong()
+                                            .monospace(),
+                                        );
+
+                                        let current_action = modal
+                                            .local_decisions
+                                            .get(&orphan.path)
+                                            .cloned()
+                                            .unwrap_or(FxLocalAction::Leave);
+
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .radio(
+                                                    matches!(current_action, FxLocalAction::Leave),
+                                                    "Leave unmatched",
+                                                )
+                                                .clicked()
+                                            {
+                                                modal
+                                                    .local_decisions
+                                                    .insert(orphan.path.clone(), FxLocalAction::Leave);
+                                            }
+                                            if ui
+                                                .radio(
+                                                    matches!(current_action, FxLocalAction::Ignore),
+                                                    "Ignore forever",
+                                                )
+                                                .clicked()
+                                            {
+                                                modal
+                                                    .local_decisions
+                                                    .insert(orphan.path.clone(), FxLocalAction::Ignore);
+                                            }
+                                            let is_attach =
+                                                matches!(current_action, FxLocalAction::Attach(_));
+                                            if ui.radio(is_attach, "Attach to release...").clicked()
+                                                && !is_attach
+                                                && let Some(first_rel) = state
+                                                    .rows
+                                                    .iter()
+                                                    .find(|r| r.rel.band_id == modal.report.band_id)
+                                            {
+                                                modal.local_decisions.insert(
+                                                    orphan.path.clone(),
+                                                    FxLocalAction::Attach(first_rel.rel.key),
+                                                );
+                                            }
+                                        });
+
+                                        if let FxLocalAction::Attach(ref current_key) = current_action {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Attach to:");
+                                                let current_title = state
+                                                    .rows
+                                                    .iter()
+                                                    .find(|r| r.rel.key == *current_key)
+                                                    .map(|r| r.rel.title.clone())
+                                                    .unwrap_or_else(|| "Select release".to_string());
+                                                egui::ComboBox::from_id_salt(format!(
+                                                    "fx_attach_combo_{}",
+                                                    orphan.path.display()
+                                                ))
+                                                .selected_text(&current_title)
+                                                .width(280.0)
+                                                .show_ui(ui, |ui| {
+                                                    for r in state
+                                                        .rows
+                                                        .iter()
+                                                        .filter(|r| r.rel.band_id == modal.report.band_id)
+                                                    {
+                                                        if ui
+                                                            .selectable_label(
+                                                                r.rel.key == *current_key,
+                                                                &r.rel.title,
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            modal.local_decisions.insert(
+                                                                orphan.path.clone(),
+                                                                FxLocalAction::Attach(r.rel.key),
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    }
+                    FxReportTab::Conflicts => {
+                        if modal.report.conflicts.is_empty() {
+                            ui.label(
+                                RichText::new("No conflicts or multiple matches found.")
+                                    .color(th.text_dim),
+                            );
+                        } else {
+                            for c in &modal.report.conflicts {
+                                egui::Frame::NONE
+                                    .corner_radius(CornerRadius::ZERO)
+                                    .fill(th.bg1)
+                                    .stroke(Stroke::new(1.0_f32, th.border))
+                                    .inner_margin(6.0)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(&c.description)
+                                                .strong()
+                                                .color(th.warn),
+                                        );
+                                        if !c.candidate_paths.is_empty() {
+                                            ui.label(
+                                                RichText::new("Paths involved:")
+                                                    .color(th.text_dim)
+                                                    .size(11.0),
+                                            );
+                                            for p in &c.candidate_paths {
+                                                ui.label(
+                                                    RichText::new(format!("  - {}", p.display()))
+                                                        .monospace()
+                                                        .size(11.0),
+                                                );
+                                            }
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    }
+                    FxReportTab::Restorable => {
+                        if modal.report.restorable.is_empty() {
+                            ui.label(
+                                RichText::new("No previously archived releases found on disk.")
+                                    .color(th.text_dim),
+                            );
+                        } else {
+                            ui.horizontal(|ui| {
+                                let all_selected = !modal.report.restorable.is_empty()
+                                    && modal.selected_restorable.len()
+                                        == modal.report.restorable.len();
+                                if paint::sharp_button(
+                                    ui,
+                                    if all_selected {
+                                        "Deselect All"
+                                    } else {
+                                        "Select All"
+                                    },
+                                )
+                                .clicked()
+                                {
+                                    if all_selected {
+                                        modal.selected_restorable.clear();
+                                    } else {
+                                        modal.selected_restorable = modal
+                                            .report
+                                            .restorable
+                                            .iter()
+                                            .map(|m| m.release_key)
+                                            .collect();
+                                    }
+                                }
+                                ui.label(
+                                    RichText::new(
+                                        "These releases were previously archived, but their audio files are now available again.",
+                                    )
+                                    .color(th.text_dim),
+                                );
+                            });
+                            ui.add_space(4.0);
+
+                            egui::Grid::new("fx_restorable_tab_grid")
+                                .num_columns(4)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for m in &modal.report.restorable {
+                                        let mut is_checked =
+                                            modal.selected_restorable.contains(&m.release_key);
+                                        if ui.checkbox(&mut is_checked, "").changed() {
+                                            if is_checked {
+                                                modal.selected_restorable.insert(m.release_key);
+                                            } else {
+                                                modal.selected_restorable.remove(&m.release_key);
+                                            }
+                                        }
+                                        let art_id = state
+                                            .rows
+                                            .iter()
+                                            .find(|r| r.rel.key == m.release_key)
+                                            .and_then(|r| r.art_id);
+                                        let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
+                                        paint_cover_slot(
+                                            ui.painter(),
+                                            state,
+                                            art_id,
+                                            m.release_key.id,
+                                            cov_r,
+                                            Tier::T64,
+                                            1.0,
+                                            Vec2::ZERO,
+                                        );
+                                        ui.label(RichText::new(&m.release_title).strong());
+                                        ui.label(
+                                            RichText::new(m.candidate_path.display().to_string())
+                                                .color(th.text_dim)
+                                                .monospace(),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    }
+                });
+
+            ui.separator();
+
+            let selected_total = modal.total_selected_count();
+            ui.horizontal(|ui| {
+                let apply_label = format!("Apply selected ({selected_total})");
+                if ui
+                    .add_enabled(
+                        selected_total > 0,
+                        egui::Button::new(apply_label).corner_radius(CornerRadius::ZERO),
+                    )
+                    .clicked()
+                {
+                    let mut decisions = Vec::new();
+
+                    for m in &modal.report.matched {
+                        if modal.selected_matched.contains(&m.release_key) {
+                            decisions.push(MatchDecision::Adopt {
+                                key: m.release_key,
+                                path: m.candidate_path.clone(),
+                                format: m.format_guess,
+                                folder_mtime: None,
+                            });
+                        }
+                    }
+
+                    for r in &modal.report.review {
+                        if let Some(cand) = modal
+                            .selected_review
+                            .get(&r.release_key)
+                            .and_then(|&cand_idx| r.candidates.get(cand_idx))
+                        {
+                            decisions.push(MatchDecision::Adopt {
+                                key: r.release_key,
+                                path: cand.candidate_path.clone(),
+                                format: cand.format_guess,
+                                folder_mtime: None,
+                            });
+                        }
+                    }
+
+                    for m in &modal.report.restorable {
+                        if modal.selected_restorable.contains(&m.release_key) {
+                            decisions.push(MatchDecision::Restore {
+                                key: m.release_key,
+                                path: m.candidate_path.clone(),
+                            });
+                        }
+                    }
+
+                    for (path, action) in &modal.local_decisions {
+                        match action {
+                            FxLocalAction::Ignore => {
+                                decisions.push(MatchDecision::Ignore {
+                                    band_id: modal.report.band_id,
+                                    path: path.clone(),
+                                });
+                            }
+                            FxLocalAction::Attach(key) => {
+                                let format_guess = modal
+                                    .report
+                                    .local_only
+                                    .iter()
+                                    .find(|o| &o.path == path)
+                                    .and_then(|o| o.format_guess);
+                                decisions.push(MatchDecision::Attach {
+                                    key: *key,
+                                    path: path.clone(),
+                                    format: format_guess,
+                                    folder_mtime: None,
+                                });
+                            }
+                            FxLocalAction::Leave => {}
+                        }
+                    }
+
+                    let _ = core_tx.send(UiToWorkerCommand::ApplyReconcile {
+                        batch_id: modal.report.batch_id,
+                        decisions,
+                    });
+                    keep_open = false;
+                }
+
+                if paint::sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
+
+    if keep_open {
+        state.reconcile_report_modal = Some(modal);
+    }
+}
+
+fn show_resolve_missing_modal(
+    ctx: &egui::Context,
+    state: &mut FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+) {
+    let Some(mut modal) = state.resolve_missing_modal.take() else {
+        return;
+    };
+
+    if let Some((key, path)) = modal
+        .picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        modal
+            .decisions
+            .insert(key, FxMissingItemChoice::Moved(path));
+    }
+    if let Some((band_id, new_path)) = modal
+        .repoint_picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        let _ = core_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        state.show_resolve_missing_window = false;
+        state.resolve_missing_modal = None;
+        return;
+    }
+
+    if !state.show_resolve_missing_window {
+        state.resolve_missing_modal = Some(modal);
+        return;
+    }
+
+    let mut open = state.show_resolve_missing_window;
+    let mut close_requested = false;
+    let th = state.active_theme;
+
+    egui::Window::new("Resolve Missing Files")
+        .collapsible(true)
+        .resizable(true)
+        .default_size([720.0, 500.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_min_width(650.0);
+
+            if modal.mass_missing {
+                egui::Frame::NONE
+                    .corner_radius(CornerRadius::ZERO)
+                    .fill(th.warn.gamma_multiply(0.12))
+                    .stroke(Stroke::new(1.0_f32, th.warn))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Many albums are missing: is a drive disconnected?")
+                                    .color(th.warn)
+                                    .strong(),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(
+                                "Automatic policies were halted to prevent unintended deletions. Please verify that your storage drive is mounted and accessible.",
+                            )
+                            .size(11.0)
+                            .color(th.text_dim),
+                        );
+                    });
+                ui.add_space(8.0);
+            }
+
+            ui.horizontal(|ui| {
+                if paint::sharp_button(ui, "Mark All as Deleted").clicked() {
+                    for it in &modal.items {
+                        modal.decisions.insert(it.key, FxMissingItemChoice::Deleted);
+                    }
+                }
+                if paint::sharp_button(ui, "Skip All").clicked() {
+                    for it in &modal.items {
+                        modal.decisions.insert(it.key, FxMissingItemChoice::Skip);
+                    }
+                }
+
+                ui.separator();
+
+                let mut unique_artists: Vec<i64> = modal
+                    .items
+                    .iter()
+                    .map(|it| it.band_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                unique_artists.sort_unstable();
+
+                if unique_artists.len() == 1 {
+                    let b_id = unique_artists[0];
+                    let artist_label = modal
+                        .items
+                        .first()
+                        .map(|it| it.artist_name.as_str())
+                        .unwrap_or("Artist");
+                    if paint::sharp_button(
+                        ui,
+                        format!("The artist's folder moved ({artist_label})..."),
+                    )
+                    .clicked()
+                    {
+                        let picked = modal.repoint_picked_folder.clone();
+                        rt_handle.spawn(async move {
+                            if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                && let Ok(mut lock) = picked.lock()
+                            {
+                                *lock = Some((b_id, folder.path().to_path_buf()));
+                            }
+                        });
+                    }
+                } else if !unique_artists.is_empty() {
+                    ui.label(
+                        RichText::new("The artist's folder moved:")
+                            .size(11.0)
+                            .color(th.text_dim),
+                    );
+                    let curr_band = modal
+                        .repoint_selected_band_id
+                        .unwrap_or(unique_artists[0]);
+                    let curr_name = modal
+                        .items
+                        .iter()
+                        .find(|it| it.band_id == curr_band)
+                        .map(|it| it.artist_name.as_str())
+                        .unwrap_or("Artist");
+                    egui::ComboBox::from_id_salt("fx_repoint_artist_combo")
+                        .selected_text(curr_name)
+                        .show_ui(ui, |ui| {
+                            for b_id in &unique_artists {
+                                let name = modal
+                                    .items
+                                    .iter()
+                                    .find(|it| it.band_id == *b_id)
+                                    .map(|it| it.artist_name.as_str())
+                                    .unwrap_or("Artist");
+                                ui.selectable_value(
+                                    &mut modal.repoint_selected_band_id,
+                                    Some(*b_id),
+                                    name,
+                                );
+                            }
+                        });
+                    if paint::sharp_button(ui, "Browse New Folder...").clicked() {
+                        let target_band = modal
+                            .repoint_selected_band_id
+                            .unwrap_or(unique_artists[0]);
+                        let picked = modal.repoint_picked_folder.clone();
+                        rt_handle.spawn(async move {
+                            if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                && let Ok(mut lock) = picked.lock()
+                            {
+                                *lock = Some((target_band, folder.path().to_path_buf()));
+                            }
+                        });
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    for item in &modal.items {
+                        egui::Frame::NONE
+                            .corner_radius(CornerRadius::ZERO)
+                            .fill(th.bg1)
+                            .stroke(Stroke::new(1.0_f32, th.border))
+                            .inner_margin(6.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let art_id = state
+                                        .rows
+                                        .iter()
+                                        .find(|r| r.rel.key == item.key)
+                                        .and_then(|r| r.art_id);
+                                    let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
+                                    paint_cover_slot(
+                                        ui.painter(),
+                                        state,
+                                        art_id,
+                                        item.key.id,
+                                        cov_r,
+                                        Tier::T64,
+                                        1.0,
+                                        Vec2::ZERO,
+                                    );
+                                    ui.strong(format!("{} - {}", item.artist_name, item.title));
+                                });
+                                if let Some(last) = &item.last_known_path {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Last known: {}",
+                                            last.display()
+                                        ))
+                                        .size(11.0)
+                                        .color(th.text_dim),
+                                    );
+                                }
+                                if let Some(cand) = &item.best_candidate {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Candidate in artist folder ({:.0}%): {}",
+                                            cand.score * 100.0,
+                                            cand.path.display()
+                                        ))
+                                        .color(th.accent)
+                                        .size(11.0),
+                                    );
+                                }
+
+                                let current_decision = modal
+                                    .decisions
+                                    .get(&item.key)
+                                    .cloned()
+                                    .unwrap_or(FxMissingItemChoice::Skip);
+                                ui.horizontal(|ui| {
+                                    let is_moved =
+                                        matches!(current_decision, FxMissingItemChoice::Moved(_));
+                                    if ui.radio(is_moved, "Moved").clicked() && !is_moved {
+                                        if let Some(cand) = &item.best_candidate {
+                                            modal.decisions.insert(
+                                                item.key,
+                                                FxMissingItemChoice::Moved(cand.path.clone()),
+                                            );
+                                        } else {
+                                            let picked = modal.picked_folder.clone();
+                                            let key = item.key;
+                                            rt_handle.spawn(async move {
+                                                if let Some(folder) =
+                                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                                    && let Ok(mut lock) = picked.lock()
+                                                {
+                                                    *lock =
+                                                        Some((key, folder.path().to_path_buf()));
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    if is_moved {
+                                        let path_str = match &current_decision {
+                                            FxMissingItemChoice::Moved(p) => p.display().to_string(),
+                                            _ => String::new(),
+                                        };
+                                        ui.label(
+                                            RichText::new(path_str)
+                                                .size(11.0)
+                                                .color(th.text_dim),
+                                        );
+                                        if paint::sharp_button(ui, "Browse...").clicked() {
+                                            let picked = modal.picked_folder.clone();
+                                            let key = item.key;
+                                            rt_handle.spawn(async move {
+                                                if let Some(folder) =
+                                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                                    && let Ok(mut lock) = picked.lock()
+                                                {
+                                                    *lock =
+                                                        Some((key, folder.path().to_path_buf()));
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    let is_deleted =
+                                        matches!(current_decision, FxMissingItemChoice::Deleted);
+                                    let del_label = match modal.deleted_policy {
+                                        DeletedPolicy::KeepMarked => {
+                                            "Deleted (Keep marked / Archive)"
+                                        }
+                                        DeletedPolicy::MarkNotDownloaded => "Deleted (Unmark)",
+                                    };
+                                    if ui.radio(is_deleted, del_label).clicked() {
+                                        modal
+                                            .decisions
+                                            .insert(item.key, FxMissingItemChoice::Deleted);
+                                    }
+
+                                    let is_skip = matches!(current_decision, FxMissingItemChoice::Skip);
+                                    if ui.radio(is_skip, "Skip for now").clicked() {
+                                        modal.decisions.insert(item.key, FxMissingItemChoice::Skip);
+                                    }
+                                });
+                            });
+                        ui.add_space(4.0);
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("When deleted:").size(12.0));
+                let curr_text = match modal.deleted_policy {
+                    DeletedPolicy::KeepMarked => "Keep marked as downloaded (archived)",
+                    DeletedPolicy::MarkNotDownloaded => "Mark as not downloaded",
+                };
+                egui::ComboBox::from_id_salt("fx_resolve_deleted_policy_combo")
+                    .selected_text(curr_text)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut modal.deleted_policy,
+                            DeletedPolicy::KeepMarked,
+                            "Keep marked as downloaded (archived)",
+                        );
+                        ui.selectable_value(
+                            &mut modal.deleted_policy,
+                            DeletedPolicy::MarkNotDownloaded,
+                            "Mark as not downloaded",
+                        );
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut modal.make_default, "Make this my default");
+                ui.checkbox(
+                    &mut modal.stop_asking,
+                    "Stop asking (treat missing as deleted automatically)",
+                );
+            });
+
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                let apply_label = format!("Apply Decisions ({})", modal.items.len());
+                if paint::sharp_button(ui, &apply_label).clicked() {
+                    let mut decisions = Vec::new();
+                    for item in &modal.items {
+                        let choice = modal
+                            .decisions
+                            .get(&item.key)
+                            .cloned()
+                            .unwrap_or(FxMissingItemChoice::Skip);
+                        let action = match choice {
+                            FxMissingItemChoice::Moved(p) => MissingAction::Moved(p),
+                            FxMissingItemChoice::Deleted => {
+                                MissingAction::Deleted(modal.deleted_policy)
+                            }
+                            FxMissingItemChoice::Skip => MissingAction::Skip,
+                        };
+                        decisions.push(MissingDecision {
+                            key: item.key,
+                            action,
+                        });
+                    }
+
+                    let remember = if modal.make_default || modal.stop_asking {
+                        Some(RememberChoice {
+                            set_default_deleted_policy: if modal.make_default {
+                                Some(modal.deleted_policy)
+                            } else {
+                                None
+                            },
+                            stop_asking: modal.stop_asking,
+                        })
+                    } else {
+                        None
+                    };
+
+                    let _ = core_tx.send(UiToWorkerCommand::ResolveMissing {
+                        batch_id: modal.batch_id,
+                        decisions,
+                        remember,
+                    });
+
+                    if modal.make_default {
+                        state.settings.deleted_policy = modal.deleted_policy;
+                    }
+                    if modal.stop_asking {
+                        state.settings.on_missing = OnMissing::Auto;
+                    }
+
+                    close_requested = true;
+                }
+
+                if paint::sharp_button(ui, "Close").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+
+    if close_requested {
+        open = false;
+    }
+    state.show_resolve_missing_window = open;
+    if open {
+        state.resolve_missing_modal = Some(modal);
     }
 }

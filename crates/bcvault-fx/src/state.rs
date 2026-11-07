@@ -10,9 +10,10 @@ use crate::{
     theme::FxTheme,
 };
 use bcvault_core::{
+    library::service::ReconcileReport,
     types::{
-        ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry, RateLimitStatus,
-        Settings, SyncMode, SyncProgress, SyncScope,
+        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, ItemKey, JobId, JobState, JobView,
+        LogEntry, MissingItem, RateLimitStatus, Settings, SyncMode, SyncProgress, SyncScope,
     },
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
 };
@@ -32,6 +33,164 @@ pub struct FxJob {
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,
     pub speed_bps: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FxMissingItemChoice {
+    Moved(std::path::PathBuf),
+    Deleted,
+    Skip,
+}
+
+#[derive(Clone)]
+pub struct FxResolveMissingModalState {
+    pub batch_id: u64,
+    pub items: Vec<MissingItem>,
+    pub mass_missing: bool,
+    pub decisions: HashMap<ItemKey, FxMissingItemChoice>,
+    pub deleted_policy: DeletedPolicy,
+    pub make_default: bool,
+    pub stop_asking: bool,
+    pub picked_folder: std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
+    pub repoint_picked_folder: std::sync::Arc<std::sync::Mutex<Option<(i64, std::path::PathBuf)>>>,
+    pub repoint_selected_band_id: Option<i64>,
+}
+
+impl FxResolveMissingModalState {
+    pub fn new(
+        batch_id: u64,
+        items: Vec<MissingItem>,
+        mass_missing: bool,
+        default_policy: DeletedPolicy,
+    ) -> Self {
+        let mut decisions = HashMap::new();
+        for item in &items {
+            if let Some(cand) = &item.best_candidate {
+                decisions.insert(item.key, FxMissingItemChoice::Moved(cand.path.clone()));
+            } else {
+                decisions.insert(item.key, FxMissingItemChoice::Deleted);
+            }
+        }
+        let repoint_selected_band_id = items.first().map(|it| it.band_id);
+        Self {
+            batch_id,
+            items,
+            mass_missing,
+            decisions,
+            deleted_policy: default_policy,
+            make_default: false,
+            stop_asking: false,
+            picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            repoint_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            repoint_selected_band_id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FxReportTab {
+    Matched,
+    Review,
+    PageOnly,
+    LocalOnly,
+    Conflicts,
+    Restorable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FxLocalAction {
+    Leave,
+    Ignore,
+    Attach(ItemKey),
+}
+
+#[derive(Clone)]
+pub struct FxReconcileReportModalState {
+    pub report: Box<ReconcileReport>,
+    pub active_tab: FxReportTab,
+    pub selected_matched: std::collections::HashSet<ItemKey>,
+    pub selected_review: HashMap<ItemKey, usize>,
+    pub selected_restorable: std::collections::HashSet<ItemKey>,
+    pub local_decisions: HashMap<std::path::PathBuf, FxLocalAction>,
+    pub local_attach_search: HashMap<std::path::PathBuf, String>,
+}
+
+impl FxReconcileReportModalState {
+    pub fn new(report: Box<ReconcileReport>) -> Self {
+        let selected_matched = report.matched.iter().map(|m| m.release_key).collect();
+        let selected_restorable = report.restorable.iter().map(|m| m.release_key).collect();
+        let mut selected_review = HashMap::new();
+        for r in &report.review {
+            if !r.candidates.is_empty() {
+                selected_review.insert(r.release_key, 0);
+            }
+        }
+        let local_decisions = HashMap::new();
+        let local_attach_search = HashMap::new();
+
+        let active_tab = if !report.matched.is_empty() {
+            FxReportTab::Matched
+        } else if !report.review.is_empty() {
+            FxReportTab::Review
+        } else if !report.restorable.is_empty() {
+            FxReportTab::Restorable
+        } else if !report.local_only.is_empty() {
+            FxReportTab::LocalOnly
+        } else if !report.conflicts.is_empty() {
+            FxReportTab::Conflicts
+        } else {
+            FxReportTab::PageOnly
+        };
+
+        Self {
+            report,
+            active_tab,
+            selected_matched,
+            selected_review,
+            selected_restorable,
+            local_decisions,
+            local_attach_search,
+        }
+    }
+
+    pub fn total_selected_count(&self) -> usize {
+        let matched_cnt = self.selected_matched.len();
+        let review_cnt = self.selected_review.len();
+        let restorable_cnt = self.selected_restorable.len();
+        let local_cnt = self
+            .local_decisions
+            .values()
+            .filter(|a| !matches!(a, FxLocalAction::Leave))
+            .count();
+        matched_cnt + review_cnt + restorable_cnt + local_cnt
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FxLinkFolderModalState {
+    pub band_id: Option<i64>,
+    pub artist_input: String,
+    pub folder_path: String,
+    pub auto_apply_confident: bool,
+    pub picked_folder: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    pub error: Option<String>,
+}
+
+impl FxLinkFolderModalState {
+    pub fn new(band_id: Option<i64>, folder_path: String) -> Self {
+        Self {
+            band_id,
+            artist_input: String::new(),
+            folder_path,
+            auto_apply_confident: true,
+            picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            error: None,
+        }
+    }
+
+    pub fn new_empty(band_id: Option<i64>) -> Self {
+        Self::new(band_id, String::new())
+    }
 }
 
 pub struct FxState {
@@ -115,6 +274,13 @@ pub struct FxState {
     pub filename_pattern_input: String,
     pub confirm_remove_artist: Option<(i64, String)>,
     pub rename_artist_modal: Option<(i64, String, String)>,
+    pub link_folder_modal: Option<FxLinkFolderModalState>,
+    pub reconcile_report_modal: Option<FxReconcileReportModalState>,
+    pub resolve_missing_modal: Option<FxResolveMissingModalState>,
+    pub show_resolve_missing_window: bool,
+    pub folders: HashMap<i64, ArtistFolder>,
+    pub relink_picked_folder:
+        std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
 
     // Jobs, Speed Sparkline, Rate limit, Toasts & Logs
     pub jobs: Vec<FxJob>,
@@ -215,6 +381,12 @@ impl FxState {
             filename_pattern_input: String::new(),
             confirm_remove_artist: None,
             rename_artist_modal: None,
+            link_folder_modal: None,
+            reconcile_report_modal: None,
+            resolve_missing_modal: None,
+            show_resolve_missing_window: false,
+            folders: HashMap::new(),
+            relink_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             jobs: Vec::new(),
             speed_samples: std::collections::VecDeque::from(vec![0.0; 30]),
             last_speed_sample_at: now,
@@ -246,6 +418,16 @@ impl FxState {
     }
 
     pub fn push_toast(&mut self, kind: ToastKind, message: impl Into<String>, now_s: f64) {
+        self.push_toast_with_undo(kind, message, now_s, None);
+    }
+
+    pub fn push_toast_with_undo(
+        &mut self,
+        kind: ToastKind,
+        message: impl Into<String>,
+        now_s: f64,
+        undo_batch_id: Option<u64>,
+    ) {
         let id = self.next_toast_id;
         self.next_toast_id += 1;
         self.toasts.push(Toast {
@@ -253,6 +435,7 @@ impl FxState {
             kind,
             message: message.into(),
             created_s: now_s,
+            undo_batch_id,
         });
         while self.toasts.len() > 4 {
             self.toasts.remove(0);
@@ -359,10 +542,14 @@ impl FxState {
     ) {
         match ev {
             WorkerToUiEvent::Ready {
-                artists, settings, ..
+                artists,
+                settings,
+                folders,
+                ..
             } => {
                 self.artists = artists;
                 self.settings = settings;
+                self.folders = folders.into_iter().map(|f| (f.band_id, f)).collect();
                 self.booted = true;
                 self.issue_wall_and_facets_query(fx_tx);
             }
@@ -419,11 +606,68 @@ impl FxState {
             | WorkerToUiEvent::ThumbReady { .. }
             | WorkerToUiEvent::QuotaStatus { .. }
             | WorkerToUiEvent::QuotaWarning { .. }
-            | WorkerToUiEvent::LibraryProgress { .. }
-            | WorkerToUiEvent::ReconcileReport { .. }
-            | WorkerToUiEvent::FolderStatus { .. }
-            | WorkerToUiEvent::LibraryApplied { .. }
-            | WorkerToUiEvent::MissingFound { .. } => {}
+            | WorkerToUiEvent::LibraryProgress { .. } => {}
+            WorkerToUiEvent::ReconcileReport { report } => {
+                self.reconcile_report_modal = Some(FxReconcileReportModalState::new(report));
+            }
+            WorkerToUiEvent::FolderStatus { band_id, folder } => {
+                if let Some(f) = folder {
+                    self.folders.insert(band_id, f);
+                } else {
+                    self.folders.remove(&band_id);
+                }
+            }
+            WorkerToUiEvent::LibraryApplied { batch_id, summary } => {
+                let mut parts = Vec::new();
+                if summary.adopted > 0 {
+                    parts.push(format!("{} adopted", summary.adopted));
+                }
+                if summary.relinked > 0 {
+                    parts.push(format!("{} relinked", summary.relinked));
+                }
+                if summary.archived > 0 {
+                    parts.push(format!("{} archived", summary.archived));
+                }
+                if summary.restored > 0 {
+                    parts.push(format!("{} restored", summary.restored));
+                }
+                if summary.ignored > 0 {
+                    parts.push(format!("{} ignored", summary.ignored));
+                }
+                if summary.unmarked > 0 {
+                    parts.push(format!("{} unmarked", summary.unmarked));
+                }
+                let summary_str = if parts.is_empty() {
+                    "Library changes applied".to_string()
+                } else {
+                    parts.join(", ")
+                };
+                self.push_toast_with_undo(
+                    ToastKind::Info,
+                    summary_str,
+                    now_s,
+                    if batch_id > 0 { Some(batch_id) } else { None },
+                );
+                self.issue_wall_and_facets_query(fx_tx);
+            }
+            WorkerToUiEvent::MissingFound {
+                batch_id,
+                items,
+                mass_missing,
+            } => {
+                if !items.is_empty() {
+                    self.resolve_missing_modal = Some(FxResolveMissingModalState::new(
+                        batch_id,
+                        items,
+                        mass_missing,
+                        self.settings.deleted_policy,
+                    ));
+                    self.show_resolve_missing_window = true;
+                } else {
+                    self.resolve_missing_modal = None;
+                    self.show_resolve_missing_window = false;
+                }
+            }
             WorkerToUiEvent::ReleaseUpdated(rel) => {
                 let key = rel.key;
                 let was_dl = self
@@ -909,6 +1153,17 @@ impl FxState {
             FxAction::ToggleDebug => {
                 self.show_debug_overlay = !self.show_debug_overlay;
             }
+            FxAction::OpenLinkFolderModal(band_id) => {
+                self.link_folder_modal = Some(FxLinkFolderModalState::new_empty(band_id));
+            }
+            FxAction::VerifyFiles => {
+                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                    scope: SyncScope::All,
+                });
+            }
+            FxAction::UndoBatch(batch_id) => {
+                let _ = core_tx.send(UiToWorkerCommand::UndoBatch { batch_id });
+            }
         }
     }
 }
@@ -1049,5 +1304,214 @@ mod tests {
             0.0,
         );
         assert_eq!(state.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_link_folder_modal_state() {
+        let modal = FxLinkFolderModalState::new_empty(Some(42));
+        assert_eq!(modal.band_id, Some(42));
+        assert!(modal.folder_path.is_empty());
+        assert!(modal.auto_apply_confident);
+        assert!(modal.error.is_none());
+
+        if let Ok(mut lock) = modal.picked_folder.lock() {
+            *lock = Some(std::path::PathBuf::from("/music/artist42"));
+        }
+        let picked = modal.picked_folder.lock().ok().and_then(|mut l| l.take());
+        assert_eq!(picked, Some(std::path::PathBuf::from("/music/artist42")));
+    }
+
+    #[test]
+    fn test_reconcile_report_modal_state() {
+        use bcvault_core::library::matcher::{MatchProposal, Score, ScoredCandidate};
+        let key1 = ItemKey {
+            kind: ItemType::Album,
+            id: 1,
+        };
+        let key2 = ItemKey {
+            kind: ItemType::Album,
+            id: 2,
+        };
+        let report = Box::new(ReconcileReport {
+            batch_id: 100,
+            band_id: 42,
+            matched: vec![MatchProposal {
+                release_key: key1,
+                release_title: "Album 1".to_string(),
+                candidate_path: std::path::PathBuf::from("/music/artist42/Album 1"),
+                candidate_name: "Album 1".to_string(),
+                score: Score {
+                    value: 0.98,
+                    signals: vec![],
+                },
+                format_guess: None,
+            }],
+            review: vec![bcvault_core::library::matcher::ReviewItem {
+                release_key: key2,
+                release_title: "Album 2".to_string(),
+                candidates: vec![ScoredCandidate {
+                    candidate_path: std::path::PathBuf::from("/music/artist42/Album 2 (Deluxe)"),
+                    candidate_name: "Album 2 (Deluxe)".to_string(),
+                    score: Score {
+                        value: 0.82,
+                        signals: vec![],
+                    },
+                    format_guess: None,
+                }],
+            }],
+            page_only: vec![],
+            local_only: vec![],
+            conflicts: vec![],
+            restorable: vec![],
+        });
+
+        let mut modal = FxReconcileReportModalState::new(report);
+        assert_eq!(modal.active_tab, FxReportTab::Matched);
+        assert_eq!(modal.total_selected_count(), 2);
+
+        modal.selected_matched.clear();
+        assert_eq!(modal.total_selected_count(), 1);
+
+        modal.selected_review.clear();
+        assert_eq!(modal.total_selected_count(), 0);
+    }
+
+    #[test]
+    fn test_resolve_missing_modal_state() {
+        let key1 = ItemKey {
+            kind: ItemType::Album,
+            id: 1,
+        };
+        let key2 = ItemKey {
+            kind: ItemType::Album,
+            id: 2,
+        };
+        let items = vec![
+            MissingItem {
+                key: key1,
+                band_id: 42,
+                title: "Album 1".to_string(),
+                artist_name: "Artist 42".to_string(),
+                last_known_path: Some(std::path::PathBuf::from("/music/artist42/Album 1")),
+                best_candidate: Some(bcvault_core::types::MissingCandidate {
+                    path: std::path::PathBuf::from("/music/artist42/Album 1 (FLAC)"),
+                    score: 0.95,
+                }),
+            },
+            MissingItem {
+                key: key2,
+                band_id: 42,
+                title: "Album 2".to_string(),
+                artist_name: "Artist 42".to_string(),
+                last_known_path: Some(std::path::PathBuf::from("/music/artist42/Album 2")),
+                best_candidate: None,
+            },
+        ];
+
+        let modal = FxResolveMissingModalState::new(200, items, false, DeletedPolicy::KeepMarked);
+
+        // Key1 has a candidate -> default is Moved
+        assert!(matches!(
+            modal.decisions.get(&key1),
+            Some(FxMissingItemChoice::Moved(_))
+        ));
+        // Key2 has no candidate -> default is Deleted
+        assert!(matches!(
+            modal.decisions.get(&key2),
+            Some(FxMissingItemChoice::Deleted)
+        ));
+    }
+
+    #[test]
+    fn test_library_events_and_dispatches() {
+        let mut state = FxState::new();
+        let (core_tx, mut core_rx) = mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = mpsc::unbounded_channel();
+
+        // 1. Ready event sets folders
+        let f1 = ArtistFolder {
+            band_id: 10,
+            path: std::path::PathBuf::from("/music/artist10"),
+            state: bcvault_core::types::FolderState::Ok,
+        };
+        state.apply_core_event(
+            WorkerToUiEvent::Ready {
+                artists: vec![],
+                settings: Settings::default_with_dir(std::path::PathBuf::from("/out")),
+                folders: vec![f1],
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert_eq!(state.folders.len(), 1);
+
+        // 2. FolderStatus updates folder
+        let f1_missing = ArtistFolder {
+            band_id: 10,
+            path: std::path::PathBuf::from("/music/artist10"),
+            state: bcvault_core::types::FolderState::Missing,
+        };
+        state.apply_core_event(
+            WorkerToUiEvent::FolderStatus {
+                band_id: 10,
+                folder: Some(f1_missing),
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert_eq!(
+            state.folders.get(&10).map(|f| f.state),
+            Some(bcvault_core::types::FolderState::Missing)
+        );
+
+        // 3. FolderStatus with None removes folder
+        state.apply_core_event(
+            WorkerToUiEvent::FolderStatus {
+                band_id: 10,
+                folder: None,
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert!(state.folders.is_empty());
+
+        // 4. LibraryApplied pushes a toast with undo_batch_id
+        state.apply_core_event(
+            WorkerToUiEvent::LibraryApplied {
+                batch_id: 55,
+                summary: bcvault_core::types::BatchSummary {
+                    adopted: 3,
+                    relinked: 1,
+                    archived: 0,
+                    restored: 0,
+                    ignored: 0,
+                    unmarked: 0,
+                },
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(state.toasts[0].undo_batch_id, Some(55));
+
+        // 5. Dispatch actions
+        state.dispatch(
+            FxAction::OpenLinkFolderModal(Some(10)),
+            &core_tx,
+            &fx_tx,
+            0.0,
+        );
+        assert!(state.link_folder_modal.is_some());
+
+        state.dispatch(FxAction::VerifyFiles, &core_tx, &fx_tx, 0.0);
+        let cmd = core_rx.try_recv().ok();
+        assert!(matches!(cmd, Some(UiToWorkerCommand::VerifyFiles { .. })));
+
+        state.dispatch(FxAction::UndoBatch(55), &core_tx, &fx_tx, 0.0);
+        let cmd = core_rx.try_recv().ok();
+        assert!(matches!(
+            cmd,
+            Some(UiToWorkerCommand::UndoBatch { batch_id: 55 })
+        ));
     }
 }

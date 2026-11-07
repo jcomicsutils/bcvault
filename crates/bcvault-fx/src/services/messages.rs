@@ -84,6 +84,7 @@ pub struct Toast {
     pub kind: ToastKind,
     pub message: String,
     pub created_s: f64,
+    pub undo_batch_id: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
