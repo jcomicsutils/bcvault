@@ -1,8 +1,8 @@
 use crate::{
     error::DbError,
     types::{
-        ArtistStats, AudioFormat, Classification, ItemKey, ItemType, ReleaseFilter, ReleaseQuery,
-        ReleaseRow, SortDir, SortKey, Ts, UpdateReason,
+        ArtistStats, AudioFormat, Classification, ItemKey, ItemType, LocalStatus, Origin,
+        ReleaseFilter, ReleaseQuery, ReleaseRow, SortDir, SortKey, Ts, UpdateReason,
     },
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
@@ -308,7 +308,9 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
                 COALESCE(SUM(downloaded), 0) AS downloaded,
                 COALESCE(SUM(classification IN ('free','nyp','email_required')), 0) AS eligible,
                 COALESCE(SUM(classification = 'email_required'), 0) AS email_required,
-                COALESCE(SUM(classification = 'unknown'), 0) AS unknown
+                COALESCE(SUM(classification = 'unknown'), 0) AS unknown,
+                COALESCE(SUM(local_status = 'archived'), 0) AS archived,
+                COALESCE(SUM(local_status = 'missing'), 0) AS missing_files
          FROM releases
          GROUP BY band_id",
     )?;
@@ -322,6 +324,8 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
                 email_required: r.get::<_, u32>(4)?,
                 unknown: r.get::<_, u32>(5)?,
                 quota_used_30d: 0,
+                archived: r.get::<_, u32>(6)?,
+                missing_files: r.get::<_, u32>(7)?,
             },
         ))
     })?;
@@ -341,7 +345,9 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
                     COALESCE(SUM(downloaded), 0) AS downloaded,
                     COALESCE(SUM(classification IN ('free','nyp','email_required')), 0) AS eligible,
                     COALESCE(SUM(classification = 'email_required'), 0) AS email_required,
-                    COALESCE(SUM(classification = 'unknown'), 0) AS unknown
+                    COALESCE(SUM(classification = 'unknown'), 0) AS unknown,
+                    COALESCE(SUM(local_status = 'archived'), 0) AS archived,
+                    COALESCE(SUM(local_status = 'missing'), 0) AS missing_files
              FROM releases
              WHERE band_id = ?1",
             params![band_id],
@@ -353,6 +359,8 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
                     email_required: r.get::<_, u32>(3)?,
                     unknown: r.get::<_, u32>(4)?,
                     quota_used_30d: 0,
+                    archived: r.get::<_, u32>(5)?,
+                    missing_files: r.get::<_, u32>(6)?,
                 })
             },
         )
@@ -367,7 +375,7 @@ const SELECT_RELEASE_COLS: &str = "r.item_type, r.item_id, r.band_id, r.title, \
      r.url, r.cover_url, r.art_id, \
      r.classification, r.is_preorder, r.track_count, r.published_at, r.modified_at, \
      r.downloaded, r.downloaded_at, r.downloaded_format, r.local_path, \
-     r.has_remote_update, r.remote_update_reason";
+     r.has_remote_update, r.remote_update_reason, r.local_status, r.origin";
 
 const FROM_RELEASES_JOIN: &str = "releases r LEFT JOIN artists a ON r.band_id = a.band_id";
 
@@ -408,6 +416,10 @@ fn map_release_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseRow> {
     let has_remote_update: i64 = r.get(17)?;
     let reason_str: Option<String> = r.get(18)?;
     let remote_update_reason = reason_str.as_deref().and_then(UpdateReason::parse);
+    let local_status_str: Option<String> = r.get(19)?;
+    let local_status = local_status_str.as_deref().and_then(LocalStatus::parse);
+    let origin_str: Option<String> = r.get(20)?;
+    let origin = origin_str.as_deref().and_then(Origin::parse);
 
     Ok(ReleaseRow {
         key: ItemKey { kind, id },
@@ -426,6 +438,8 @@ fn map_release_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseRow> {
         downloaded_at,
         downloaded_format,
         local_path,
+        local_status,
+        origin,
         has_remote_update: has_remote_update != 0,
         remote_update_reason,
     })
@@ -500,6 +514,8 @@ pub fn build_query_sql(query: &ReleaseQuery) -> (String, Vec<Value>) {
             "r.downloaded = 0 AND r.classification IN ('free','nyp','email_required','unknown')",
         ),
         ReleaseFilter::Updated => where_parts.push("r.has_remote_update = 1"),
+        ReleaseFilter::Archived => where_parts.push("r.local_status = 'archived'"),
+        ReleaseFilter::MissingFiles => where_parts.push("r.local_status = 'missing'"),
     }
 
     let trimmed = query.search.trim();

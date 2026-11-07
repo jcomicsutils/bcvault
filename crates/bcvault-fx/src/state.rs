@@ -1006,6 +1006,8 @@ mod tests {
                 downloaded_at: None,
                 downloaded_format: None,
                 local_path: None,
+                local_status: None,
+                origin: None,
                 has_remote_update: false,
                 remote_update_reason: None,
             },

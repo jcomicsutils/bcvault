@@ -183,6 +183,126 @@ impl AudioFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LocalStatus {
+    Unverified,
+    Present,
+    Missing,
+    Archived,
+}
+
+impl LocalStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::Archived => "archived",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "unverified" => Some(Self::Unverified),
+            "present" => Some(Self::Present),
+            "missing" => Some(Self::Missing),
+            "archived" => Some(Self::Archived),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Origin {
+    App,
+    Imported,
+    Redeem,
+    Manual,
+}
+
+impl Origin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Imported => "imported",
+            Self::Redeem => "redeem",
+            Self::Manual => "manual",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "app" => Some(Self::App),
+            "imported" => Some(Self::Imported),
+            "redeem" => Some(Self::Redeem),
+            "manual" => Some(Self::Manual),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OnMissing {
+    #[default]
+    Ask,
+    Auto,
+}
+
+impl OnMissing {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ask" => Some(Self::Ask),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeletedPolicy {
+    #[default]
+    KeepMarked,
+    MarkNotDownloaded,
+}
+
+impl DeletedPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::KeepMarked => "keep_marked",
+            Self::MarkNotDownloaded => "mark_not_downloaded",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "keep_marked" => Some(Self::KeepMarked),
+            "mark_not_downloaded" => Some(Self::MarkNotDownloaded),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FolderState {
+    Ok,
+    Missing,
+    Unreadable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistFolder {
+    pub band_id: i64,
+    pub path: PathBuf,
+    pub state: FolderState,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
@@ -191,6 +311,8 @@ pub struct ArtistStats {
     pub email_required: u32,
     pub unknown: u32,
     pub quota_used_30d: u32,
+    pub archived: u32,
+    pub missing_files: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +383,8 @@ pub struct ReleaseRow {
     pub downloaded_at: Option<Ts>,
     pub downloaded_format: Option<AudioFormat>,
     pub local_path: Option<PathBuf>,
+    pub local_status: Option<LocalStatus>,
+    pub origin: Option<Origin>,
     pub has_remote_update: bool,
     pub remote_update_reason: Option<UpdateReason>,
 }
@@ -295,10 +419,12 @@ pub enum ReleaseFilter {
     Paid,
     NotDownloaded,
     Updated,
+    Archived,
+    MissingFiles,
 }
 
 impl ReleaseFilter {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::All,
         Self::Free,
         Self::Nyp,
@@ -306,6 +432,8 @@ impl ReleaseFilter {
         Self::Paid,
         Self::NotDownloaded,
         Self::Updated,
+        Self::Archived,
+        Self::MissingFiles,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -317,6 +445,8 @@ impl ReleaseFilter {
             Self::Paid => "Paid",
             Self::NotDownloaded => "Not Downloaded",
             Self::Updated => "Updated/Modified",
+            Self::Archived => "Archived",
+            Self::MissingFiles => "Missing Files",
         }
     }
 }
@@ -373,7 +503,19 @@ impl OutputLayout {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+fn default_auto_match_min() -> f32 {
+    0.92
+}
+
+fn default_review_match_min() -> f32 {
+    0.75
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub out_dir: PathBuf,
     pub format: AudioFormat,
@@ -391,6 +533,21 @@ pub struct Settings {
     pub max_concurrent_downloads: u8, // 2
     pub show_thumbnails: bool,
     pub user_agent: String,
+
+    #[serde(default = "default_true")]
+    pub verify_on_sync: bool,
+    #[serde(default = "default_true")]
+    pub rescan_linked_on_sync: bool,
+    #[serde(default)]
+    pub on_missing: OnMissing,
+    #[serde(default)]
+    pub deleted_policy: DeletedPolicy,
+    #[serde(default = "default_true")]
+    pub auto_relink: bool,
+    #[serde(default = "default_auto_match_min")]
+    pub auto_match_min: f32,
+    #[serde(default = "default_review_match_min")]
+    pub review_match_min: f32,
 }
 
 impl Settings {
@@ -414,6 +571,13 @@ impl Settings {
                 "bcvault/{} (personal archiving tool)",
                 env!("CARGO_PKG_VERSION")
             ),
+            verify_on_sync: true,
+            rescan_linked_on_sync: true,
+            on_missing: OnMissing::Ask,
+            deleted_policy: DeletedPolicy::KeepMarked,
+            auto_relink: true,
+            auto_match_min: 0.92,
+            review_match_min: 0.75,
         }
     }
 }
@@ -598,6 +762,7 @@ impl DownloadSource {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -662,5 +827,79 @@ mod tests {
         for src in [DownloadSource::Api, DownloadSource::Redeem] {
             assert_eq!(DownloadSource::parse(src.as_str()), Some(src));
         }
+    }
+
+    #[test]
+    fn library_types_and_defaults_roundtrip() {
+        for status in [
+            LocalStatus::Unverified,
+            LocalStatus::Present,
+            LocalStatus::Missing,
+            LocalStatus::Archived,
+        ] {
+            assert_eq!(LocalStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(LocalStatus::parse("bogus"), None);
+
+        for origin in [
+            Origin::App,
+            Origin::Imported,
+            Origin::Redeem,
+            Origin::Manual,
+        ] {
+            assert_eq!(Origin::parse(origin.as_str()), Some(origin));
+        }
+        assert_eq!(Origin::parse("bogus"), None);
+
+        for om in [OnMissing::Ask, OnMissing::Auto] {
+            assert_eq!(OnMissing::parse(om.as_str()), Some(om));
+        }
+        assert_eq!(OnMissing::default(), OnMissing::Ask);
+
+        for dp in [DeletedPolicy::KeepMarked, DeletedPolicy::MarkNotDownloaded] {
+            assert_eq!(DeletedPolicy::parse(dp.as_str()), Some(dp));
+        }
+        assert_eq!(DeletedPolicy::default(), DeletedPolicy::KeepMarked);
+
+        let folder = ArtistFolder {
+            band_id: 42,
+            path: PathBuf::from("/music/artist"),
+            state: FolderState::Ok,
+        };
+        assert_eq!(folder.band_id, 42);
+        assert_eq!(folder.state, FolderState::Ok);
+
+        for filter in ReleaseFilter::ALL {
+            assert!(!filter.label().is_empty());
+        }
+        assert!(ReleaseFilter::ALL.contains(&ReleaseFilter::Archived));
+        assert!(ReleaseFilter::ALL.contains(&ReleaseFilter::MissingFiles));
+
+        // Test that old Settings JSON without new fields deserializes with defaults
+        let old_json = r#"{
+            "out_dir": "downloads",
+            "format": "Flac",
+            "format_fallback": "Nearest",
+            "layout": "Flat",
+            "filename_pattern": "",
+            "auto_extract": true,
+            "delete_zip_after_extract": false,
+            "batch_limit": 150,
+            "quota_soft": 150,
+            "quota_hard": 200,
+            "page_delay_ms": 1500,
+            "page_jitter_pct": 25,
+            "max_concurrent_downloads": 2,
+            "show_thumbnails": false,
+            "user_agent": "bcvault/0.1.0"
+        }"#;
+        let s: Settings = serde_json::from_str(old_json).unwrap();
+        assert!(s.verify_on_sync);
+        assert!(s.rescan_linked_on_sync);
+        assert_eq!(s.on_missing, OnMissing::Ask);
+        assert_eq!(s.deleted_policy, DeletedPolicy::KeepMarked);
+        assert!(s.auto_relink);
+        assert!((s.auto_match_min - 0.92).abs() < 1e-4);
+        assert!((s.review_match_min - 0.75).abs() < 1e-4);
     }
 }

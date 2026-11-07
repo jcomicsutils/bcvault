@@ -8,8 +8,8 @@ use bcvault_core::{
     db::{Db, Role, repo::releases::escape_like},
     error::DbError,
     types::{
-        AudioFormat, Classification, ItemKey, ItemType, ReleaseFilter, ReleaseRow, SortDir, Ts,
-        UpdateReason,
+        AudioFormat, Classification, ItemKey, ItemType, LocalStatus, Origin, ReleaseFilter,
+        ReleaseRow, SortDir, Ts, UpdateReason,
     },
 };
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
@@ -577,6 +577,8 @@ pub fn build_wall_query_sql(query: &FxQuery) -> (String, Vec<Value>) {
                 "r.downloaded = 0 AND r.classification IN ('free','nyp','email_required','unknown')",
             ),
             ReleaseFilter::Updated => where_parts.push("r.has_remote_update = 1"),
+            ReleaseFilter::Archived => where_parts.push("r.local_status = 'archived'"),
+            ReleaseFilter::MissingFiles => where_parts.push("r.local_status = 'missing'"),
         }
     }
 
@@ -634,7 +636,7 @@ pub fn build_wall_query_sql(query: &FxQuery) -> (String, Vec<Value>) {
         "SELECT r.item_type, r.item_id, r.band_id, r.title, r.artist_name, r.url, r.cover_url, r.art_id,
                 r.classification, r.is_preorder, r.track_count, r.published_at, r.modified_at, r.first_seen_at,
                 r.downloaded, r.downloaded_at, r.downloaded_format, r.local_path,
-                r.has_remote_update, r.remote_update_reason, c.hue, c.accent_rgb
+                r.has_remote_update, r.remote_update_reason, r.local_status, r.origin, c.hue, c.accent_rgb
          FROM m.releases r
          {join_kw} cover_meta c ON c.art_id = r.art_id
          {where_sql}
@@ -672,8 +674,12 @@ pub fn query_wall(conn: &Connection, query: &FxQuery) -> Result<Vec<WallRow>, Db
         let has_remote_update: i64 = r.get(18)?;
         let reason_str: Option<String> = r.get(19)?;
         let remote_update_reason = reason_str.as_deref().and_then(UpdateReason::parse);
-        let hue: Option<u16> = r.get(20)?;
-        let accent_int: Option<i64> = r.get(21)?;
+        let local_status_str: Option<String> = r.get(20)?;
+        let local_status = local_status_str.as_deref().and_then(LocalStatus::parse);
+        let origin_str: Option<String> = r.get(21)?;
+        let origin = origin_str.as_deref().and_then(Origin::parse);
+        let hue: Option<u16> = r.get(22)?;
+        let accent_int: Option<i64> = r.get(23)?;
         let accent = accent_int.map(|acc| {
             [
                 ((acc >> 16) & 0xFF) as u8,
@@ -700,6 +706,8 @@ pub fn query_wall(conn: &Connection, query: &FxQuery) -> Result<Vec<WallRow>, Db
                 downloaded_at,
                 downloaded_format,
                 local_path,
+                local_status,
+                origin,
                 has_remote_update: has_remote_update != 0,
                 remote_update_reason,
             },

@@ -443,6 +443,8 @@ mod tests {
                     email_required: 1,
                     unknown: 0,
                     quota_used_30d: 0,
+                    archived: 0,
+                    missing_files: 0,
                 },
             },
             ArtistView {
@@ -459,6 +461,8 @@ mod tests {
                     email_required: 0,
                     unknown: 0,
                     quota_used_30d: 0,
+                    archived: 0,
+                    missing_files: 0,
                 },
             },
         ];
