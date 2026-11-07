@@ -1,11 +1,11 @@
 use crate::{
     bandcamp::redeem::validate_redeem_url,
     types::{
-        DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MatchDecision, OnMissing,
-        OutputLayout,
+        DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MatchDecision, MissingAction,
+        MissingDecision, OnMissing, OutputLayout, RememberChoice,
     },
     ui::{
-        state::{LocalAction, ReportTab, UiState},
+        state::{LocalAction, MissingItemChoice, ReportTab, UiState},
         theme::pal,
         widgets::{paint_folder_status_dot, sharp_button, sharp_rect, sharp_small_button},
     },
@@ -20,7 +20,12 @@ pub fn show(
     cmd_tx: &UnboundedSender<UiToWorkerCommand>,
     rt_handle: &tokio::runtime::Handle,
 ) {
+    let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     show_undo_toast(ctx, state, cmd_tx);
+
+    if state.show_resolve_missing_window && state.resolve_missing_modal.is_some() {
+        show_resolve_missing_modal(ctx, state, cmd_tx, rt_handle, esc);
+    }
 
     let any_modal = state.redeem_modal.is_some()
         || state.quota_modal.is_some()
@@ -33,8 +38,6 @@ pub fn show(
     if !any_modal {
         return;
     }
-
-    let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
 
     // Dimmed backdrop
     let screen = ctx.content_rect();
@@ -1388,4 +1391,402 @@ fn show_undo_toast(
                     });
                 });
         });
+}
+
+fn show_resolve_missing_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+    esc: bool,
+) {
+    let Some(mut modal) = state.resolve_missing_modal.take() else {
+        return;
+    };
+
+    // Check asynchronous folder picker completions
+    if let Some((key, path)) = modal
+        .picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        modal.decisions.insert(key, MissingItemChoice::Moved(path));
+    }
+    if let Some((band_id, new_path)) = modal
+        .repoint_picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        state.show_resolve_missing_window = false;
+        state.resolve_missing_modal = None;
+        return;
+    }
+
+    if esc {
+        state.show_resolve_missing_window = false;
+        state.resolve_missing_modal = Some(modal);
+        return;
+    }
+
+    let mut open = state.show_resolve_missing_window;
+    let mut applied = false;
+    let mut close_requested = false;
+
+    egui::Window::new("Resolve Missing Files")
+        .order(Order::Foreground)
+        .collapsible(true)
+        .resizable(true)
+        .default_size([720.0, 500.0])
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_min_width(650.0);
+
+            // Mass-missing safeguard banner
+            if modal.mass_missing {
+                egui::Frame::NONE
+                    .corner_radius(CornerRadius::ZERO)
+                    .fill(pal::WARN.gamma_multiply(0.12))
+                    .stroke(Stroke::new(1.0_f32, pal::WARN))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Many albums are missing: is a drive disconnected?")
+                                    .color(pal::WARN)
+                                    .strong(),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(
+                                "Automatic policies were halted to prevent unintended deletions. Please verify that your storage drive is mounted and accessible.",
+                            )
+                            .size(11.0)
+                            .color(pal::TEXT_DIM),
+                        );
+                    });
+                ui.add_space(8.0);
+            }
+
+            // Bulk actions
+            ui.horizontal(|ui| {
+                if sharp_small_button(ui, "Mark All as Deleted").clicked() {
+                    for it in &modal.items {
+                        modal.decisions.insert(it.key, MissingItemChoice::Deleted);
+                    }
+                }
+                if sharp_small_button(ui, "Skip All").clicked() {
+                    for it in &modal.items {
+                        modal.decisions.insert(it.key, MissingItemChoice::Skip);
+                    }
+                }
+
+                ui.separator();
+
+                let mut unique_artists: Vec<i64> = modal
+                    .items
+                    .iter()
+                    .map(|it| it.band_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                unique_artists.sort_unstable();
+
+                if unique_artists.len() == 1 {
+                    let b_id = unique_artists[0];
+                    let artist_label = modal
+                        .items
+                        .first()
+                        .map(|it| it.artist_name.as_str())
+                        .unwrap_or("Artist");
+                    if sharp_small_button(
+                        ui,
+                        &format!("The artist's folder moved ({artist_label})..."),
+                    )
+                    .clicked()
+                    {
+                        let picked = modal.repoint_picked_folder.clone();
+                        rt_handle.spawn(async move {
+                            if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                && let Ok(mut lock) = picked.lock()
+                            {
+                                *lock = Some((b_id, folder.path().to_path_buf()));
+                            }
+                        });
+                    }
+                } else if !unique_artists.is_empty() {
+                    ui.label(
+                        RichText::new("The artist's folder moved:")
+                            .size(11.0)
+                            .color(pal::TEXT_DIM),
+                    );
+                    let curr_band = modal
+                        .repoint_selected_band_id
+                        .unwrap_or(unique_artists[0]);
+                    let curr_name = modal
+                        .items
+                        .iter()
+                        .find(|it| it.band_id == curr_band)
+                        .map(|it| it.artist_name.as_str())
+                        .unwrap_or("Artist");
+                    egui::ComboBox::from_id_salt("repoint_artist_combo")
+                        .selected_text(curr_name)
+                        .show_ui(ui, |ui| {
+                            for b_id in &unique_artists {
+                                let name = modal
+                                    .items
+                                    .iter()
+                                    .find(|it| it.band_id == *b_id)
+                                    .map(|it| it.artist_name.as_str())
+                                    .unwrap_or("Artist");
+                                ui.selectable_value(
+                                    &mut modal.repoint_selected_band_id,
+                                    Some(*b_id),
+                                    name,
+                                );
+                            }
+                        });
+                    if sharp_small_button(ui, "Browse New Folder...").clicked() {
+                        let target_band = modal
+                            .repoint_selected_band_id
+                            .unwrap_or(unique_artists[0]);
+                        let picked = modal.repoint_picked_folder.clone();
+                        rt_handle.spawn(async move {
+                            if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                && let Ok(mut lock) = picked.lock()
+                            {
+                                *lock = Some((target_band, folder.path().to_path_buf()));
+                            }
+                        });
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            // Item list
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    for item in &modal.items {
+                        egui::Frame::NONE
+                            .corner_radius(CornerRadius::ZERO)
+                            .fill(pal::BG1)
+                            .stroke(Stroke::new(1.0_f32, pal::BORDER))
+                            .inner_margin(6.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.strong(format!("{} - {}", item.artist_name, item.title));
+                                });
+                                if let Some(last) = &item.last_known_path {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Last known: {}",
+                                            last.display()
+                                        ))
+                                        .size(11.0)
+                                        .color(pal::TEXT_DIM),
+                                    );
+                                }
+                                if let Some(cand) = &item.best_candidate {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Candidate in artist folder ({}%): {}",
+                                            (cand.score * 100.0) as u32,
+                                            cand.path.display()
+                                        ))
+                                        .color(pal::ACCENT)
+                                        .size(11.0),
+                                    );
+                                }
+
+                                // Decision radios
+                                let current_decision = modal
+                                    .decisions
+                                    .get(&item.key)
+                                    .cloned()
+                                    .unwrap_or(MissingItemChoice::Skip);
+                                ui.horizontal(|ui| {
+                                    let is_moved =
+                                        matches!(current_decision, MissingItemChoice::Moved(_));
+                                    if ui.radio(is_moved, "Moved").clicked() && !is_moved {
+                                        if let Some(cand) = &item.best_candidate {
+                                            modal.decisions.insert(
+                                                item.key,
+                                                MissingItemChoice::Moved(cand.path.clone()),
+                                            );
+                                        } else {
+                                            let picked = modal.picked_folder.clone();
+                                            let key = item.key;
+                                            rt_handle.spawn(async move {
+                                                if let Some(folder) =
+                                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                                    && let Ok(mut lock) = picked.lock()
+                                                {
+                                                    *lock =
+                                                        Some((key, folder.path().to_path_buf()));
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    if is_moved {
+                                        let path_str = match &current_decision {
+                                            MissingItemChoice::Moved(p) => p.display().to_string(),
+                                            _ => String::new(),
+                                        };
+                                        ui.label(
+                                            RichText::new(path_str)
+                                                .size(11.0)
+                                                .color(pal::TEXT_DIM),
+                                        );
+                                        if sharp_small_button(ui, "Browse...").clicked() {
+                                            let picked = modal.picked_folder.clone();
+                                            let key = item.key;
+                                            rt_handle.spawn(async move {
+                                                if let Some(folder) =
+                                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                                    && let Ok(mut lock) = picked.lock()
+                                                {
+                                                    *lock =
+                                                        Some((key, folder.path().to_path_buf()));
+                                                }
+                                            });
+                                        }
+                                    }
+
+                                    let is_deleted =
+                                        matches!(current_decision, MissingItemChoice::Deleted);
+                                    let del_label = match modal.deleted_policy {
+                                        DeletedPolicy::KeepMarked => {
+                                            "Deleted (Keep marked / Archive)"
+                                        }
+                                        DeletedPolicy::MarkNotDownloaded => "Deleted (Unmark)",
+                                    };
+                                    if ui.radio(is_deleted, del_label).clicked() {
+                                        modal
+                                            .decisions
+                                            .insert(item.key, MissingItemChoice::Deleted);
+                                    }
+
+                                    let is_skip = matches!(current_decision, MissingItemChoice::Skip);
+                                    if ui.radio(is_skip, "Skip for now").clicked() {
+                                        modal.decisions.insert(item.key, MissingItemChoice::Skip);
+                                    }
+                                });
+                            });
+                        ui.add_space(4.0);
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            // Footer controls
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("When deleted:").size(12.0));
+                let curr_text = match modal.deleted_policy {
+                    DeletedPolicy::KeepMarked => "Keep marked as downloaded (archived)",
+                    DeletedPolicy::MarkNotDownloaded => "Mark as not downloaded",
+                };
+                egui::ComboBox::from_id_salt("resolve_deleted_policy_combo")
+                    .selected_text(curr_text)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut modal.deleted_policy,
+                            DeletedPolicy::KeepMarked,
+                            "Keep marked as downloaded (archived)",
+                        );
+                        ui.selectable_value(
+                            &mut modal.deleted_policy,
+                            DeletedPolicy::MarkNotDownloaded,
+                            "Mark as not downloaded",
+                        );
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut modal.make_default, "Make this my default");
+                ui.checkbox(
+                    &mut modal.stop_asking,
+                    "Stop asking (treat missing as deleted automatically)",
+                );
+            });
+
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                let apply_label = format!("Apply Decisions ({})", modal.items.len());
+                if sharp_button(ui, &apply_label).clicked() {
+                    let mut decisions = Vec::new();
+                    for item in &modal.items {
+                        let choice = modal
+                            .decisions
+                            .get(&item.key)
+                            .cloned()
+                            .unwrap_or(MissingItemChoice::Skip);
+                        let action = match choice {
+                            MissingItemChoice::Moved(p) => MissingAction::Moved(p),
+                            MissingItemChoice::Deleted => {
+                                MissingAction::Deleted(modal.deleted_policy)
+                            }
+                            MissingItemChoice::Skip => MissingAction::Skip,
+                        };
+                        decisions.push(MissingDecision {
+                            key: item.key,
+                            action,
+                        });
+                    }
+
+                    let remember = if modal.make_default || modal.stop_asking {
+                        Some(RememberChoice {
+                            set_default_deleted_policy: if modal.make_default {
+                                Some(modal.deleted_policy)
+                            } else {
+                                None
+                            },
+                            stop_asking: modal.stop_asking,
+                        })
+                    } else {
+                        None
+                    };
+
+                    let _ = cmd_tx.send(UiToWorkerCommand::ResolveMissing {
+                        batch_id: modal.batch_id,
+                        decisions,
+                        remember,
+                    });
+
+                    if modal.make_default {
+                        state.settings.deleted_policy = modal.deleted_policy;
+                    }
+                    if modal.stop_asking {
+                        state.settings.on_missing = OnMissing::Auto;
+                    }
+
+                    applied = true;
+                }
+
+                if sharp_button(ui, "Close").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+
+    if close_requested {
+        open = false;
+    }
+
+    state.show_resolve_missing_window = open && !applied;
+    if applied {
+        state.resolve_missing_modal = None;
+    } else {
+        state.resolve_missing_modal = Some(modal);
+    }
 }

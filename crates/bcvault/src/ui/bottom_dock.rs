@@ -79,6 +79,19 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             draw_rate_limit_chip(ui, &state.rate_limit);
+            if let Some(modal) = &state.resolve_missing_modal {
+                let count = modal.items.len();
+                if count > 0 {
+                    let label = format!("MISSING {count}");
+                    let btn = ui.add(
+                        egui::Button::new(egui::RichText::new(&label).size(11.5).color(pal::WARN))
+                            .corner_radius(CornerRadius::ZERO),
+                    );
+                    if btn.clicked() {
+                        state.show_resolve_missing_window = true;
+                    }
+                }
+            }
         });
     });
 

@@ -1,9 +1,9 @@
 use crate::{
     library::service::ReconcileReport,
     types::{
-        ArtistFolder, ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry,
-        LogLevel, RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow, Settings, SortDir,
-        SortKey, SyncMode, SyncProgress,
+        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, ItemKey, JobId, JobState, JobView,
+        LogEntry, LogLevel, MissingItem, RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow,
+        Settings, SortDir, SortKey, SyncMode, SyncProgress,
     },
     ui::{thumbs::ThumbCache, widgets::format_date},
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
@@ -208,6 +208,58 @@ pub struct UndoToast {
     pub created_at: Instant,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum MissingItemChoice {
+    Moved(std::path::PathBuf),
+    Deleted,
+    Skip,
+}
+
+#[derive(Clone)]
+pub struct ResolveMissingModalState {
+    pub batch_id: u64,
+    pub items: Vec<MissingItem>,
+    pub mass_missing: bool,
+    pub decisions: HashMap<ItemKey, MissingItemChoice>,
+    pub deleted_policy: DeletedPolicy,
+    pub make_default: bool,
+    pub stop_asking: bool,
+    pub picked_folder: Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
+    pub repoint_picked_folder: Arc<std::sync::Mutex<Option<(i64, std::path::PathBuf)>>>,
+    pub repoint_selected_band_id: Option<i64>,
+}
+
+impl ResolveMissingModalState {
+    pub fn new(
+        batch_id: u64,
+        items: Vec<MissingItem>,
+        mass_missing: bool,
+        default_policy: DeletedPolicy,
+    ) -> Self {
+        let mut decisions = HashMap::new();
+        for item in &items {
+            if let Some(cand) = &item.best_candidate {
+                decisions.insert(item.key, MissingItemChoice::Moved(cand.path.clone()));
+            } else {
+                decisions.insert(item.key, MissingItemChoice::Deleted);
+            }
+        }
+        let repoint_selected_band_id = items.first().map(|it| it.band_id);
+        Self {
+            batch_id,
+            items,
+            mass_missing,
+            decisions,
+            deleted_policy: default_policy,
+            make_default: false,
+            stop_asking: false,
+            picked_folder: Arc::new(std::sync::Mutex::new(None)),
+            repoint_picked_folder: Arc::new(std::sync::Mutex::new(None)),
+            repoint_selected_band_id,
+        }
+    }
+}
+
 pub struct UiState {
     pub artists: Vec<ArtistView>,
     pub artist_filter: String,
@@ -253,6 +305,8 @@ pub struct UiState {
     pub link_folder_modal: Option<LinkFolderModalState>,
     pub reconcile_report_modal: Option<ReconcileReportModalState>,
     pub undo_toast: Option<UndoToast>,
+    pub resolve_missing_modal: Option<ResolveMissingModalState>,
+    pub show_resolve_missing_window: bool,
 
     pub thumbs: ThumbCache,
     pub focus_search_next_frame: bool,
@@ -313,6 +367,8 @@ impl UiState {
             link_folder_modal: None,
             reconcile_report_modal: None,
             undo_toast: None,
+            resolve_missing_modal: None,
+            show_resolve_missing_window: false,
 
             thumbs: ThumbCache::new(),
             focus_search_next_frame: false,
@@ -577,7 +633,25 @@ impl UiState {
                     });
                 }
             }
-            WorkerToUiEvent::LibraryProgress { .. } | WorkerToUiEvent::MissingFound { .. } => {}
+            WorkerToUiEvent::LibraryProgress { .. } => {}
+            WorkerToUiEvent::MissingFound {
+                batch_id,
+                items,
+                mass_missing,
+            } => {
+                if !items.is_empty() {
+                    self.resolve_missing_modal = Some(ResolveMissingModalState::new(
+                        batch_id,
+                        items,
+                        mass_missing,
+                        self.settings.deleted_policy,
+                    ));
+                    self.show_resolve_missing_window = true;
+                } else {
+                    self.resolve_missing_modal = None;
+                    self.show_resolve_missing_window = false;
+                }
+            }
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }
@@ -824,5 +898,68 @@ mod tests {
         let toast = st.undo_toast.as_ref().unwrap();
         assert_eq!(toast.batch_id, 7);
         assert!(toast.message.contains("2 adopted"));
+    }
+
+    #[test]
+    fn test_resolve_missing_modal_state() {
+        use crate::types::{DeletedPolicy, ItemType, MissingCandidate, MissingItem};
+        use std::path::PathBuf;
+
+        let key1 = ItemKey::new(ItemType::Album, 100);
+        let key2 = ItemKey::new(ItemType::Album, 200);
+
+        let items = vec![
+            MissingItem {
+                key: key1,
+                band_id: 42,
+                artist_name: "Aphex Twin".to_string(),
+                title: "SAW II".to_string(),
+                last_known_path: Some(PathBuf::from("/music/saw2")),
+                best_candidate: Some(MissingCandidate {
+                    path: PathBuf::from("/music/saw2_new"),
+                    score: 0.75,
+                }),
+            },
+            MissingItem {
+                key: key2,
+                band_id: 42,
+                artist_name: "Aphex Twin".to_string(),
+                title: "Syro".to_string(),
+                last_known_path: Some(PathBuf::from("/music/syro")),
+                best_candidate: None,
+            },
+        ];
+
+        let mut st = UiState::new();
+        st.apply_event(WorkerToUiEvent::MissingFound {
+            batch_id: 12,
+            items,
+            mass_missing: true,
+        });
+
+        assert!(st.show_resolve_missing_window);
+        assert!(st.resolve_missing_modal.is_some());
+
+        let modal = st.resolve_missing_modal.as_ref().unwrap();
+        assert_eq!(modal.batch_id, 12);
+        assert!(modal.mass_missing);
+        assert_eq!(modal.deleted_policy, DeletedPolicy::KeepMarked);
+        assert_eq!(
+            modal.decisions.get(&key1),
+            Some(&MissingItemChoice::Moved(PathBuf::from("/music/saw2_new")))
+        );
+        assert_eq!(
+            modal.decisions.get(&key2),
+            Some(&MissingItemChoice::Deleted)
+        );
+
+        // Empty items clears modal and hides window
+        st.apply_event(WorkerToUiEvent::MissingFound {
+            batch_id: 13,
+            items: vec![],
+            mass_missing: false,
+        });
+        assert!(!st.show_resolve_missing_window);
+        assert!(st.resolve_missing_modal.is_none());
     }
 }
