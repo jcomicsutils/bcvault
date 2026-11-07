@@ -5,10 +5,11 @@ use crate::{
         repo::{
             artists::{self, UpsertArtist},
             releases::{self, DiscoveredRelease, ReleaseMetadata},
+            settings,
         },
     },
     error::{BcError, DbError},
-    types::{ItemKey, LogLevel, SyncMode, SyncPhase, SyncProgress},
+    types::{ItemKey, LogLevel, SyncMode, SyncPhase, SyncProgress, SyncScope},
     worker::{bridge::UiBridge, library::LibraryService, messages::WorkerToUiEvent},
 };
 use std::collections::HashSet;
@@ -321,11 +322,29 @@ impl SyncService {
         }
 
         let mut adopted_count = 0_u32;
+        let mut missing_local_count = 0_u32;
+        let mut relinked_count = 0_u32;
+
         if !cancel.is_cancelled()
             && let Some(lib) = &self.library
         {
             let outcome = lib.rescan_and_adopt_on_sync(band_id, cancel.clone()).await;
             adopted_count = outcome.adopted;
+
+            let st = self
+                .pool
+                .reader
+                .call(|c| settings::get_settings(c, std::path::PathBuf::from("downloads")))
+                .await
+                .unwrap_or_default();
+
+            if st.verify_on_sync && !cancel.is_cancelled() {
+                let v_outcome = lib
+                    .verify_files(SyncScope::Selected(vec![band_id]), true, cancel.clone())
+                    .await;
+                missing_local_count = v_outcome.missing_count;
+                relinked_count = v_outcome.relinked_count;
+            }
         }
 
         self.bridge
@@ -363,8 +382,8 @@ impl SyncService {
             updated: updated_count,
             error: None,
             adopted: adopted_count,
-            missing_local: 0,
-            relinked: 0,
+            missing_local: missing_local_count,
+            relinked: relinked_count,
         });
 
         Ok(SyncOutcome {
@@ -372,8 +391,8 @@ impl SyncService {
             new_items: new_count,
             updated: updated_count,
             adopted: adopted_count,
-            missing_local: 0,
-            relinked: 0,
+            missing_local: missing_local_count,
+            relinked: relinked_count,
         })
     }
 }

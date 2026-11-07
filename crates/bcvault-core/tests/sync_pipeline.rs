@@ -11,13 +11,13 @@ use bcvault_core::{
         repo::{
             artists,
             history::{self, NewHistoryEntry},
-            library as lib_repo, releases,
+            library as lib_repo, releases, settings as settings_repo,
         },
     },
     error::BcError,
     types::{
-        AudioFormat, Classification, DownloadSource, ItemKey, ItemType, LocalStatus,
-        RateLimitStatus, ReleaseQuery, SyncMode, UpdateReason,
+        AudioFormat, Classification, DeletedPolicy, DownloadSource, ItemKey, ItemType, LocalStatus,
+        OnMissing, RateLimitStatus, ReleaseQuery, Settings, SyncMode, UpdateReason,
     },
     worker::{
         bridge::UiBridge, library::LibraryService, messages::WorkerToUiEvent, sync::SyncService,
@@ -629,4 +629,400 @@ async fn wiremock_sync_rescan_auto_adopts_certain_match_and_updates_stats() {
         _ => None,
     });
     assert_eq!(sync_finished, Some(1));
+}
+
+#[tokio::test]
+async fn wiremock_sync_verify_deleting_album_triggers_missing_found_in_ask_mode() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/music"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_grid_html(1)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/album/rel-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_release_html(1, 0.0, 3)))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sync_verify_ask.db");
+    let pool = DbPool::open(&db_path).unwrap();
+
+    let artist_dir = dir.path().join("Artist 777");
+    let album_dir = artist_dir.join("Album 1");
+    std::fs::create_dir_all(&album_dir).unwrap();
+    std::fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+    let out_dir = dir.path().join("downloads");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(tx, None);
+
+    let gate = BandcampGate::with_delays(10, 10, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let lib_svc = LibraryService::new(pool.clone(), bridge.clone());
+    let svc = SyncService::new(pool.clone(), client, bridge).with_library(lib_svc);
+
+    let a_dir = artist_dir.clone();
+    let o_dir = out_dir.clone();
+    let s_uri = server.uri();
+    pool.writer
+        .call(move |c| {
+            let s = Settings {
+                on_missing: OnMissing::Ask,
+                verify_on_sync: true,
+                ..Settings::default()
+            };
+            settings_repo::set_settings(c, &s)?;
+
+            artists::upsert(
+                c,
+                &artists::UpsertArtist {
+                    band_id: 777,
+                    slug: "artist-777",
+                    name: "Artist 777",
+                    url: &s_uri,
+                    cover_url: None,
+                },
+            )?;
+            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            Ok::<_, bcvault_core::error::DbError>(())
+        })
+        .await
+        .unwrap();
+
+    // 1. Initial sync adopts Album 1
+    let out1 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out1.adopted, 1);
+    assert_eq!(out1.missing_local, 0);
+
+    // Drain initial events
+    while rx.try_recv().is_ok() {}
+
+    // 2. Delete the album folder from disk
+    std::fs::remove_dir_all(&album_dir).unwrap();
+
+    // 3. Second sync: verify runs and detects missing file in Ask mode
+    let out2 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out2.missing_local, 1);
+
+    let mut events2 = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events2.push(ev);
+    }
+    let missing_ev = events2
+        .iter()
+        .find(|e| matches!(e, WorkerToUiEvent::MissingFound { items, .. } if items.len() == 1));
+    assert!(missing_ev.is_some());
+}
+
+#[tokio::test]
+async fn wiremock_sync_verify_deleting_album_auto_resolves_in_auto_mode() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/music"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_grid_html(1)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/album/rel-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_release_html(1, 0.0, 3)))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sync_verify_auto.db");
+    let pool = DbPool::open(&db_path).unwrap();
+
+    let artist_dir = dir.path().join("Artist 777");
+    let album_dir = artist_dir.join("Album 1");
+    std::fs::create_dir_all(&album_dir).unwrap();
+    std::fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+    let out_dir = dir.path().join("downloads");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(tx, None);
+
+    let gate = BandcampGate::with_delays(10, 10, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let lib_svc = LibraryService::new(pool.clone(), bridge.clone());
+    let svc = SyncService::new(pool.clone(), client, bridge).with_library(lib_svc);
+
+    let a_dir = artist_dir.clone();
+    let o_dir = out_dir.clone();
+    let s_uri = server.uri();
+    pool.writer
+        .call(move |c| {
+            let s = Settings {
+                on_missing: OnMissing::Auto,
+                deleted_policy: DeletedPolicy::KeepMarked,
+                verify_on_sync: true,
+                ..Settings::default()
+            };
+            settings_repo::set_settings(c, &s)?;
+
+            artists::upsert(
+                c,
+                &artists::UpsertArtist {
+                    band_id: 777,
+                    slug: "artist-777",
+                    name: "Artist 777",
+                    url: &s_uri,
+                    cover_url: None,
+                },
+            )?;
+            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            Ok::<_, bcvault_core::error::DbError>(())
+        })
+        .await
+        .unwrap();
+
+    // 1. Initial sync adopts Album 1
+    let out1 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out1.adopted, 1);
+
+    while rx.try_recv().is_ok() {}
+
+    // 2. Delete album folder
+    std::fs::remove_dir_all(&album_dir).unwrap();
+
+    // 3. Second sync: auto-resolves with KeepMarked (archived)
+    let out2 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out2.missing_local, 1);
+
+    let mut events2 = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events2.push(ev);
+    }
+    // No MissingFound event in Auto mode
+    assert!(
+        !events2
+            .iter()
+            .any(|e| matches!(e, WorkerToUiEvent::MissingFound { .. }))
+    );
+
+    // Verify release became archived
+    let rel = pool
+        .reader
+        .call(|c| releases::get_release(c, ItemKey::new(ItemType::Album, 1)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rel.downloaded);
+    assert_eq!(rel.local_status, Some(LocalStatus::Archived));
+}
+
+#[tokio::test]
+async fn wiremock_sync_verify_moving_album_auto_relinks_silently() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/music"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_grid_html(1)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/album/rel-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_release_html(1, 0.0, 3)))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sync_verify_relink.db");
+    let pool = DbPool::open(&db_path).unwrap();
+
+    let artist_dir = dir.path().join("Artist 777");
+    let album_dir = artist_dir.join("Album 1");
+    std::fs::create_dir_all(&album_dir).unwrap();
+    std::fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+    std::fs::write(album_dir.join("02.mp3"), b"audio").unwrap();
+    std::fs::write(album_dir.join("03.mp3"), b"audio").unwrap();
+
+    let out_dir = dir.path().join("downloads");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(tx, None);
+
+    let gate = BandcampGate::with_delays(10, 10, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let lib_svc = LibraryService::new(pool.clone(), bridge.clone());
+    let svc = SyncService::new(pool.clone(), client, bridge).with_library(lib_svc);
+
+    let a_dir = artist_dir.clone();
+    let o_dir = out_dir.clone();
+    let s_uri = server.uri();
+    pool.writer
+        .call(move |c| {
+            let s = Settings {
+                auto_relink: true,
+                verify_on_sync: true,
+                ..Settings::default()
+            };
+            settings_repo::set_settings(c, &s)?;
+
+            artists::upsert(
+                c,
+                &artists::UpsertArtist {
+                    band_id: 777,
+                    slug: "artist-777",
+                    name: "Artist 777",
+                    url: &s_uri,
+                    cover_url: None,
+                },
+            )?;
+            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            Ok::<_, bcvault_core::error::DbError>(())
+        })
+        .await
+        .unwrap();
+
+    let out1 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out1.adopted, 1);
+
+    while rx.try_recv().is_ok() {}
+
+    // Move Album 1 to a renamed folder inside the artist's folder
+    let moved_dir = artist_dir.join("Album 1 (2021)");
+    std::fs::rename(&album_dir, &moved_dir).unwrap();
+
+    let out2 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out2.relinked, 1);
+    assert_eq!(out2.missing_local, 0);
+
+    let rel = pool
+        .reader
+        .call(|c| releases::get_release(c, ItemKey::new(ItemType::Album, 1)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rel.local_status, Some(LocalStatus::Present));
+    assert_eq!(rel.local_path, Some(moved_dir));
+}
+
+#[tokio::test]
+async fn wiremock_sync_verify_disabled_by_setting_skips_verification() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/music"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_grid_html(1)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/album/rel-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_release_html(1, 0.0, 3)))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sync_verify_disabled.db");
+    let pool = DbPool::open(&db_path).unwrap();
+
+    let artist_dir = dir.path().join("Artist 777");
+    let album_dir = artist_dir.join("Album 1");
+    std::fs::create_dir_all(&album_dir).unwrap();
+    std::fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+    let out_dir = dir.path().join("downloads");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(tx, None);
+
+    let gate = BandcampGate::with_delays(10, 10, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let lib_svc = LibraryService::new(pool.clone(), bridge.clone());
+    let svc = SyncService::new(pool.clone(), client, bridge).with_library(lib_svc);
+
+    let a_dir = artist_dir.clone();
+    let o_dir = out_dir.clone();
+    let s_uri = server.uri();
+    pool.writer
+        .call(move |c| {
+            let s = Settings {
+                verify_on_sync: false,
+                ..Settings::default()
+            };
+            settings_repo::set_settings(c, &s)?;
+
+            artists::upsert(
+                c,
+                &artists::UpsertArtist {
+                    band_id: 777,
+                    slug: "artist-777",
+                    name: "Artist 777",
+                    url: &s_uri,
+                    cover_url: None,
+                },
+            )?;
+            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            Ok::<_, bcvault_core::error::DbError>(())
+        })
+        .await
+        .unwrap();
+
+    let out1 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out1.adopted, 1);
+
+    // Delete album folder
+    std::fs::remove_dir_all(&album_dir).unwrap();
+
+    // With verify_on_sync = false, verification does not run
+    let out2 = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(out2.missing_local, 0);
+
+    let rel = pool
+        .reader
+        .call(|c| releases::get_release(c, ItemKey::new(ItemType::Album, 1)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rel.local_status, Some(LocalStatus::Present));
 }

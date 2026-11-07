@@ -413,6 +413,12 @@ pub struct RescanOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerifyOutcome {
+    pub missing_count: u32,
+    pub relinked_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
     pub eligible: u32,

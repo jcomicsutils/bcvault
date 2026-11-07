@@ -16,7 +16,7 @@ use crate::library::verify::{
 use crate::types::{
     BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus, LogLevel,
     MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem, OnMissing,
-    ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope,
+    ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope, VerifyOutcome,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -542,7 +542,12 @@ impl LibraryService {
 
     /// Verifies all downloaded releases in the given scope against the filesystem.
     /// Emits progress events and, if any files are missing, a MissingFound event.
-    pub async fn verify_files(&self, scope: SyncScope, is_sync: bool, cancel: CancellationToken) {
+    pub async fn verify_files(
+        &self,
+        scope: SyncScope,
+        is_sync: bool,
+        cancel: CancellationToken,
+    ) -> VerifyOutcome {
         let _guard = self.job_lock.lock().await;
         {
             let mut c_guard = self.current_cancel.lock().await;
@@ -566,7 +571,7 @@ impl LibraryService {
                     format!("Failed to read settings: {e}"),
                     None,
                 );
-                return;
+                return VerifyOutcome::default();
             }
         };
 
@@ -590,7 +595,7 @@ impl LibraryService {
                             format!("Failed to query artists: {e}"),
                             None,
                         );
-                        return;
+                        return VerifyOutcome::default();
                     }
                 }
             }
@@ -648,7 +653,7 @@ impl LibraryService {
                     format!("Failed to query downloaded releases: {e}"),
                     None,
                 );
-                return;
+                return VerifyOutcome::default();
             }
         };
 
@@ -697,12 +702,12 @@ impl LibraryService {
                     format!("Verification task failed: {e}"),
                     None,
                 );
-                return;
+                return VerifyOutcome::default();
             }
         };
 
         if cancel.is_cancelled() {
-            return;
+            return VerifyOutcome::default();
         }
 
         // 6. Update present rows in DB
@@ -894,7 +899,7 @@ impl LibraryService {
                         format!("Failed to create verification batch: {e}"),
                         None,
                     );
-                    return;
+                    return VerifyOutcome::default();
                 }
             };
 
@@ -986,6 +991,11 @@ impl LibraryService {
             ),
             None,
         );
+
+        VerifyOutcome {
+            missing_count: missing_count as u32,
+            relinked_count: relinked_count as u32,
+        }
     }
 
     /// Reverses all modifications committed in a given batch.
@@ -1186,7 +1196,11 @@ impl LibraryService {
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
-                Ok::<_, DbError>((rels, ign))
+                let adoptable: Vec<ReleaseRow> = rels
+                    .into_iter()
+                    .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
+                    .collect();
+                Ok::<_, DbError>((adoptable, ign))
             })
             .await;
 
@@ -1373,7 +1387,11 @@ impl LibraryService {
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
-                Ok::<_, DbError>((rels, ign))
+                let adoptable: Vec<ReleaseRow> = rels
+                    .into_iter()
+                    .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
+                    .collect();
+                Ok::<_, DbError>((adoptable, ign))
             })
             .await;
 
