@@ -1,10 +1,10 @@
 use crate::{
     bandcamp::redeem::validate_redeem_url,
-    types::{DownloadOpts, FormatFallback, OutputLayout},
+    types::{DeletedPolicy, DownloadOpts, FolderState, FormatFallback, OnMissing, OutputLayout},
     ui::{
         state::UiState,
         theme::pal,
-        widgets::{sharp_button, sharp_rect},
+        widgets::{paint_folder_status_dot, sharp_button, sharp_rect, sharp_small_button},
     },
     worker::messages::UiToWorkerCommand,
 };
@@ -196,107 +196,237 @@ fn show_settings_modal(
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(440.0);
-            egui::Grid::new("settings_grid")
-                .num_columns(2)
-                .spacing([12.0, 8.0])
+            ui.set_min_width(520.0);
+            egui::ScrollArea::vertical()
+                .max_height(480.0)
                 .show(ui, |ui| {
-                    ui.label("Output Layout:");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut draft.layout, OutputLayout::Flat, "Flat");
-                        ui.selectable_value(
-                            &mut draft.layout,
-                            OutputLayout::ByArtist,
-                            "By Release Artist",
-                        );
-                        ui.selectable_value(
-                            &mut draft.layout,
-                            OutputLayout::ByPageArtist,
-                            "By Page Artist",
-                        );
-                    });
-                    ui.end_row();
+                    ui.label(RichText::new("Downloads & Storage").strong());
+                    egui::Grid::new("settings_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Output Layout:");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut draft.layout, OutputLayout::Flat, "Flat");
+                                ui.selectable_value(
+                                    &mut draft.layout,
+                                    OutputLayout::ByArtist,
+                                    "By Release Artist",
+                                );
+                                ui.selectable_value(
+                                    &mut draft.layout,
+                                    OutputLayout::ByPageArtist,
+                                    "By Page Artist",
+                                );
+                            });
+                            ui.end_row();
 
-                    ui.label("Filename Pattern:")
-                        .on_hover_text("Tags: {artist}, {page_artist}, {album} / {title}, {year}, {date}, {format}, {type}, {id}\nLeave blank to use default / Bandcamp server filename.");
-                    ui.vertical(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut draft.filename_pattern)
-                                .hint_text("Default (e.g. {artist} - {album} or {year} - {artist} - {album})")
-                                .desired_width(280.0),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Tags: {artist}, {page_artist}, {album}, {title}, {year}, {date}, {format}, {type}, {id}",
-                            )
-                            .size(11.0)
-                            .color(pal::TEXT_DIM),
-                        );
-                    });
-                    ui.end_row();
+                            ui.label("Filename Pattern:")
+                                .on_hover_text("Tags: {artist}, {page_artist}, {album} / {title}, {year}, {date}, {format}, {type}, {id}\nLeave blank to use default / Bandcamp server filename.");
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut draft.filename_pattern)
+                                        .hint_text("Default (e.g. {artist} - {album} or {year} - {artist} - {album})")
+                                        .desired_width(280.0),
+                                );
+                                ui.label(
+                                    RichText::new(
+                                        "Tags: {artist}, {page_artist}, {album}, {title}, {year}, {date}, {format}, {type}, {id}",
+                                    )
+                                    .size(11.0)
+                                    .color(pal::TEXT_DIM),
+                                );
+                            });
+                            ui.end_row();
 
-                    ui.label("Format Fallback:");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut draft.format_fallback,
-                            FormatFallback::Nearest,
-                            "Nearest Available",
-                        );
-                        ui.selectable_value(
-                            &mut draft.format_fallback,
-                            FormatFallback::Strict,
-                            "Strict (Fail if missing)",
-                        );
-                    });
-                    ui.end_row();
+                            ui.label("Format Fallback:");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut draft.format_fallback,
+                                    FormatFallback::Nearest,
+                                    "Nearest Available",
+                                );
+                                ui.selectable_value(
+                                    &mut draft.format_fallback,
+                                    FormatFallback::Strict,
+                                    "Strict (Fail if missing)",
+                                );
+                            });
+                            ui.end_row();
 
-                    ui.label("Archive Extraction:");
-                    ui.checkbox(&mut draft.auto_extract, "Automatically extract album ZIPs");
-                    ui.end_row();
+                            ui.label("Archive Extraction:");
+                            ui.checkbox(&mut draft.auto_extract, "Automatically extract album ZIPs");
+                            ui.end_row();
 
-                    ui.label("Cleanup ZIP:");
-                    ui.add_enabled(
-                        draft.auto_extract,
-                        egui::Checkbox::new(
-                            &mut draft.delete_zip_after_extract,
-                            "Delete ZIP after successful extraction",
-                        ),
-                    );
-                    ui.end_row();
+                            ui.label("Cleanup ZIP:");
+                            ui.add_enabled(
+                                draft.auto_extract,
+                                egui::Checkbox::new(
+                                    &mut draft.delete_zip_after_extract,
+                                    "Delete ZIP after successful extraction",
+                                ),
+                            );
+                            ui.end_row();
 
-                    ui.label("Cover Thumbnails:");
-                    ui.checkbox(
-                        &mut draft.show_thumbnails,
-                        "Show 20px cover thumbnails in table",
-                    );
-                    ui.end_row();
+                            ui.label("Cover Thumbnails:");
+                            ui.checkbox(
+                                &mut draft.show_thumbnails,
+                                "Show 20px cover thumbnails in table",
+                            );
+                            ui.end_row();
 
-                    ui.label("Page Request Delay (ms):");
-                    ui.add(egui::Slider::new(&mut draft.page_delay_ms, 500..=5000));
-                    ui.end_row();
+                            ui.label("Page Request Delay (ms):");
+                            ui.add(egui::Slider::new(&mut draft.page_delay_ms, 500..=5000));
+                            ui.end_row();
 
-                    ui.label("Page Jitter (%):");
-                    ui.add(egui::Slider::new(&mut draft.page_jitter_pct, 0..=50));
-                    ui.end_row();
+                            ui.label("Page Jitter (%):");
+                            ui.add(egui::Slider::new(&mut draft.page_jitter_pct, 0..=50));
+                            ui.end_row();
 
-                    ui.label("Max Concurrent Downloads:");
-                    ui.add(egui::Slider::new(
-                        &mut draft.max_concurrent_downloads,
-                        1..=4,
-                    ));
-                    ui.end_row();
+                            ui.label("Max Concurrent Downloads:");
+                            ui.add(egui::Slider::new(
+                                &mut draft.max_concurrent_downloads,
+                                1..=4,
+                            ));
+                            ui.end_row();
 
-                    ui.label("Soft Quota Warning (30d):");
-                    ui.add(egui::Slider::new(&mut draft.quota_soft, 25..=200));
-                    ui.end_row();
+                            ui.label("Soft Quota Warning (30d):");
+                            ui.add(egui::Slider::new(&mut draft.quota_soft, 25..=200));
+                            ui.end_row();
 
-                    ui.label("Hard Quota Cap (30d):");
-                    ui.add(egui::Slider::new(&mut draft.quota_hard, 50..=300));
-                    ui.end_row();
+                            ui.label("Hard Quota Cap (30d):");
+                            ui.add(egui::Slider::new(&mut draft.quota_hard, 50..=300));
+                            ui.end_row();
 
-                    ui.label("User-Agent:");
-                    ui.add(egui::TextEdit::singleline(&mut draft.user_agent).desired_width(260.0));
-                    ui.end_row();
+                            ui.label("User-Agent:");
+                            ui.add(egui::TextEdit::singleline(&mut draft.user_agent).desired_width(260.0));
+                            ui.end_row();
+                        });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new("Library").strong());
+
+                    egui::Grid::new("library_settings_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Verify on Sync:");
+                            ui.checkbox(&mut draft.verify_on_sync, "Verify files after every sync");
+                            ui.end_row();
+
+                            ui.label("Rescan on Sync:");
+                            ui.checkbox(&mut draft.rescan_linked_on_sync, "Re-read linked folders on sync");
+                            ui.end_row();
+
+                            ui.label("Auto-Relink:");
+                            ui.checkbox(&mut draft.auto_relink, "Try to find moved albums automatically");
+                            ui.end_row();
+
+                            ui.label("When Files Missing:")
+                                .on_hover_text("Ask: show resolve missing dialog on sync\nHandle automatically: apply deleted policy");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut draft.on_missing, OnMissing::Ask, "Ask");
+                                ui.selectable_value(&mut draft.on_missing, OnMissing::Auto, "Handle automatically");
+                            });
+                            ui.end_row();
+
+                            ui.label("If Deleted:")
+                                .on_hover_text("Keep marked: mark as archived and keep downloaded = 1\nMark as not downloaded: clear downloaded mark");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut draft.deleted_policy,
+                                    DeletedPolicy::KeepMarked,
+                                    "Keep marked as downloaded",
+                                );
+                                ui.selectable_value(
+                                    &mut draft.deleted_policy,
+                                    DeletedPolicy::MarkNotDownloaded,
+                                    "Mark as not downloaded",
+                                );
+                            });
+                            ui.end_row();
+
+                            ui.label("Auto-Match Min Score:")
+                                .on_hover_text("Score threshold (0.50 - 1.00) required to adopt matches automatically.");
+                            ui.add(
+                                egui::Slider::new(&mut draft.auto_match_min, 0.50..=1.00)
+                                    .step_by(0.01)
+                                    .custom_formatter(|n, _| format!("{:.2}", n)),
+                            );
+                            ui.end_row();
+
+                            ui.label("Review Min Score:")
+                                .on_hover_text("Minimum score threshold (0.50 - 1.00) to propose matches for review.");
+                            ui.add(
+                                egui::Slider::new(&mut draft.review_match_min, 0.50..=1.00)
+                                    .step_by(0.01)
+                                    .custom_formatter(|n, _| format!("{:.2}", n)),
+                            );
+                            ui.end_row();
+                        });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new("Linked Artist Folders").strong());
+
+                    if state.folders.is_empty() {
+                        ui.label(RichText::new("No artist folders linked.").color(pal::TEXT_DIM));
+                    } else {
+                        let mut linked: Vec<_> = state.folders.values().cloned().collect();
+                        linked.sort_by(|a, b| {
+                            let name_a = state
+                                .artists
+                                .iter()
+                                .find(|x| x.band_id == a.band_id)
+                                .map(|x| x.display_name())
+                                .unwrap_or("");
+                            let name_b = state
+                                .artists
+                                .iter()
+                                .find(|x| x.band_id == b.band_id)
+                                .map(|x| x.display_name())
+                                .unwrap_or("");
+                            name_a.to_lowercase().cmp(&name_b.to_lowercase())
+                        });
+
+                        egui::Grid::new("linked_folders_grid")
+                            .num_columns(4)
+                            .spacing([10.0, 6.0])
+                            .show(ui, |ui| {
+                                for folder in linked {
+                                    let tip = match folder.state {
+                                        FolderState::Ok => "Folder OK and accessible",
+                                        FolderState::Missing => "Folder missing on disk",
+                                        FolderState::Unreadable => "Folder unreadable or inaccessible",
+                                    };
+                                    paint_folder_status_dot(ui, folder.state).on_hover_text(tip);
+
+                                    let artist_name = state
+                                        .artists
+                                        .iter()
+                                        .find(|a| a.band_id == folder.band_id)
+                                        .map(|a| a.display_name())
+                                        .unwrap_or("Unknown Artist");
+                                    ui.label(RichText::new(artist_name).strong());
+
+                                    let path_str = folder.path.display().to_string();
+                                    ui.label(
+                                        RichText::new(&path_str)
+                                            .color(pal::TEXT_DIM)
+                                            .monospace(),
+                                    )
+                                    .on_hover_text(&path_str);
+
+                                    if sharp_small_button(ui, "Unlink").clicked() {
+                                        let _ = cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                            band_id: folder.band_id,
+                                        });
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
                 });
 
             ui.separator();
@@ -304,6 +434,7 @@ fn show_settings_modal(
                 if sharp_button(ui, "Save").clicked() {
                     draft.quota_soft = draft.quota_soft.min(draft.quota_hard);
                     draft.batch_limit = draft.batch_limit.min(draft.quota_hard);
+                    draft.review_match_min = draft.review_match_min.min(draft.auto_match_min);
                     state.settings = draft.clone();
                     let _ = cmd_tx.send(UiToWorkerCommand::UpdateSettings(draft.clone()));
                     keep_open = false;

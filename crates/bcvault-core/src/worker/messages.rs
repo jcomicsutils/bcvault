@@ -109,6 +109,7 @@ pub enum WorkerToUiEvent {
     Ready {
         artists: Vec<ArtistView>,
         settings: Settings,
+        folders: Vec<crate::types::ArtistFolder>,
     },
     SettingsUpdated(Settings),
     ArtistUpserted(ArtistView),
@@ -176,7 +177,7 @@ pub enum WorkerToUiEvent {
     },
     FolderStatus {
         band_id: i64,
-        state: crate::types::FolderState,
+        folder: Option<crate::types::ArtistFolder>,
     },
     LibraryApplied {
         batch_id: u64,

@@ -358,7 +358,9 @@ impl FxState {
         now_s: f64,
     ) {
         match ev {
-            WorkerToUiEvent::Ready { artists, settings } => {
+            WorkerToUiEvent::Ready {
+                artists, settings, ..
+            } => {
                 self.artists = artists;
                 self.settings = settings;
                 self.booted = true;

@@ -14,9 +14,9 @@ use crate::library::verify::{
     VerifyResult, find_relink_candidates, is_mass_missing, verify_single_release,
 };
 use crate::types::{
-    BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus, LogLevel,
-    MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem, OnMissing,
-    ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope, VerifyOutcome,
+    ArtistFolder, BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus,
+    LogLevel, MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem,
+    OnMissing, ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope, VerifyOutcome,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -117,7 +117,15 @@ impl LibraryService {
         }
 
         let state = probe_folder(&path);
-        bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
+        let af = ArtistFolder {
+            band_id,
+            path: path.clone(),
+            state,
+        };
+        bridge.emit(WorkerToUiEvent::FolderStatus {
+            band_id,
+            folder: Some(af),
+        });
 
         if let Ok(Some(av)) = pool
             .reader
@@ -183,7 +191,7 @@ impl LibraryService {
                 );
                 bridge.emit(WorkerToUiEvent::FolderStatus {
                     band_id,
-                    state: FolderState::Missing,
+                    folder: None,
                 });
                 if let Ok(Some(av)) = pool
                     .reader
@@ -375,7 +383,15 @@ impl LibraryService {
                     None,
                 );
                 let state = probe_folder(&af.path);
-                bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
+                let updated_af = ArtistFolder {
+                    band_id,
+                    path: af.path.clone(),
+                    state,
+                };
+                bridge.emit(WorkerToUiEvent::FolderStatus {
+                    band_id,
+                    folder: Some(updated_af),
+                });
             }
             Err(e) => {
                 bridge.log(
@@ -1139,7 +1155,15 @@ impl LibraryService {
         };
 
         let state = probe_folder(&folder.path);
-        bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
+        let updated_af = ArtistFolder {
+            band_id,
+            path: folder.path.clone(),
+            state,
+        };
+        bridge.emit(WorkerToUiEvent::FolderStatus {
+            band_id,
+            folder: Some(updated_af),
+        });
         if state != FolderState::Ok {
             bridge.log(
                 LogLevel::Warn,
@@ -1313,7 +1337,15 @@ impl LibraryService {
         };
 
         let state = probe_folder(&folder.path);
-        bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
+        let updated_af = ArtistFolder {
+            band_id,
+            path: folder.path.clone(),
+            state,
+        };
+        bridge.emit(WorkerToUiEvent::FolderStatus {
+            band_id,
+            folder: Some(updated_af),
+        });
         if state != FolderState::Ok {
             bridge.log(
                 LogLevel::Warn,
@@ -1683,8 +1715,8 @@ mod tests {
                 e,
                 WorkerToUiEvent::FolderStatus {
                     band_id: b,
-                    state: FolderState::Ok
-                } if *b == band_id
+                    folder: Some(f),
+                } if *b == band_id && f.state == FolderState::Ok
             )
         });
         assert!(has_folder_ok);
@@ -1715,16 +1747,16 @@ mod tests {
             unlink_events.push(ev);
         }
 
-        let has_folder_missing = unlink_events.iter().any(|e| {
+        let has_folder_unlinked = unlink_events.iter().any(|e| {
             matches!(
                 e,
                 WorkerToUiEvent::FolderStatus {
                     band_id: b,
-                    state: FolderState::Missing
+                    folder: None,
                 } if *b == band_id
             )
         });
-        assert!(has_folder_missing);
+        assert!(has_folder_unlinked);
 
         let folder_after_unlink = pool
             .reader
@@ -2064,8 +2096,8 @@ mod tests {
                 e,
                 WorkerToUiEvent::FolderStatus {
                     band_id: b,
-                    state: FolderState::Ok
-                } if *b == band_id
+                    folder: Some(f),
+                } if *b == band_id && f.state == FolderState::Ok
             )
         });
         assert!(has_folder_ok);

@@ -2,7 +2,7 @@ use crate::{
     bandcamp::BandcampClient,
     db::{
         DbPool,
-        repo::{artists, history, releases, settings},
+        repo::{artists, history, library as lib_repo, releases, settings},
     },
     error::DbError,
     paths::AppPaths,
@@ -91,9 +91,16 @@ impl Supervisor {
             paths.cover_cache_dir.clone(),
         );
 
+        let initial_folders = pool
+            .reader
+            .call(|c| lib_repo::all_folders(c))
+            .await
+            .unwrap_or_default();
+
         bridge.emit(WorkerToUiEvent::Ready {
             artists: initial_artists,
             settings: initial_settings,
+            folders: initial_folders,
         });
 
         let mut sup = Self {

@@ -1,5 +1,5 @@
 use crate::{
-    types::{Classification, SortDir, Ts, UpdateReason},
+    types::{Classification, FolderState, SortDir, Ts, UpdateReason},
     ui::theme::pal,
 };
 use egui::{
@@ -110,6 +110,21 @@ pub fn paint_status_glyph(
         );
     }
 
+    resp
+}
+
+/// Square status dot for folder links (green for Ok, red for Missing, yellow for Unreadable).
+pub fn paint_folder_status_dot(ui: &mut Ui, state: FolderState) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let color = match state {
+            FolderState::Ok => pal::OK,
+            FolderState::Missing => pal::ERR,
+            FolderState::Unreadable => pal::WARN,
+        };
+        let dot_rect = Rect::from_center_size(rect.center(), Vec2::splat(6.0));
+        sharp_rect(ui.painter(), dot_rect, color, Stroke::NONE);
+    }
     resp
 }
 

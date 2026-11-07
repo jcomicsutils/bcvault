@@ -1,8 +1,8 @@
 use crate::{
     types::{
-        ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry, LogLevel,
-        RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow, Settings, SortDir, SortKey,
-        SyncMode, SyncProgress,
+        ArtistFolder, ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry,
+        LogLevel, RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow, Settings, SortDir,
+        SortKey, SyncMode, SyncProgress,
     },
     ui::{thumbs::ThumbCache, widgets::format_date},
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
@@ -118,6 +118,7 @@ pub struct UiState {
 
     pub settings: Settings,
     pub settings_draft: Option<Settings>,
+    pub folders: HashMap<i64, ArtistFolder>,
     pub redeem_modal: Option<RedeemModalState>,
     pub quota_modal: Option<QuotaWarningModalState>,
     pub confirm_remove_artist: Option<(i64, String)>,
@@ -174,6 +175,7 @@ impl UiState {
 
             settings: Settings::default(),
             settings_draft: None,
+            folders: HashMap::new(),
             redeem_modal: None,
             quota_modal: None,
             confirm_remove_artist: None,
@@ -242,9 +244,14 @@ impl UiState {
 
     pub fn apply_event(&mut self, ev: WorkerToUiEvent) {
         match ev {
-            WorkerToUiEvent::Ready { artists, settings } => {
+            WorkerToUiEvent::Ready {
+                artists,
+                settings,
+                folders,
+            } => {
                 self.artists = artists;
                 self.settings = settings;
+                self.folders = folders.into_iter().map(|f| (f.band_id, f)).collect();
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::SettingsUpdated(settings) => {
@@ -266,6 +273,7 @@ impl UiState {
                 self.artists.retain(|a| a.band_id != band_id);
                 self.selected_artists.remove(&band_id);
                 self.active_syncs.remove(&band_id);
+                self.folders.remove(&band_id);
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::ArtistStats { band_id, stats } => {
@@ -393,9 +401,15 @@ impl UiState {
             WorkerToUiEvent::ThumbReady { key, path } => {
                 self.thumbs.on_thumb_ready(key, path);
             }
+            WorkerToUiEvent::FolderStatus { band_id, folder } => {
+                if let Some(f) = folder {
+                    self.folders.insert(band_id, f);
+                } else {
+                    self.folders.remove(&band_id);
+                }
+            }
             WorkerToUiEvent::LibraryProgress { .. }
             | WorkerToUiEvent::ReconcileReport { .. }
-            | WorkerToUiEvent::FolderStatus { .. }
             | WorkerToUiEvent::LibraryApplied { .. }
             | WorkerToUiEvent::MissingFound { .. } => {}
             WorkerToUiEvent::Log(entry) => {
@@ -419,6 +433,7 @@ impl UiState {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::{Classification, ItemType};
@@ -465,5 +480,85 @@ mod tests {
             rows: vec![sample_row],
         });
         assert_eq!(st.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_folders_lifecycle_in_state() {
+        use crate::types::{ArtistFolder, FolderState};
+        use std::path::PathBuf;
+
+        let mut st = UiState::new();
+        assert!(st.folders.is_empty());
+
+        let f1 = ArtistFolder {
+            band_id: 10,
+            path: PathBuf::from("/music/artist10"),
+            state: FolderState::Ok,
+        };
+        let f2 = ArtistFolder {
+            band_id: 20,
+            path: PathBuf::from("/music/artist20"),
+            state: FolderState::Missing,
+        };
+
+        // 1. Ready populates folders
+        st.apply_event(WorkerToUiEvent::Ready {
+            artists: vec![],
+            settings: Settings::default(),
+            folders: vec![f1.clone(), f2.clone()],
+        });
+        assert_eq!(st.folders.len(), 2);
+        assert_eq!(st.folders.get(&10).unwrap().state, FolderState::Ok);
+        assert_eq!(st.folders.get(&20).unwrap().state, FolderState::Missing);
+
+        // 2. FolderStatus updates an existing folder state
+        let f2_updated = ArtistFolder {
+            band_id: 20,
+            path: PathBuf::from("/music/artist20"),
+            state: FolderState::Ok,
+        };
+        st.apply_event(WorkerToUiEvent::FolderStatus {
+            band_id: 20,
+            folder: Some(f2_updated),
+        });
+        assert_eq!(st.folders.get(&20).unwrap().state, FolderState::Ok);
+
+        // 3. FolderStatus with None removes the folder (unlink)
+        st.apply_event(WorkerToUiEvent::FolderStatus {
+            band_id: 10,
+            folder: None,
+        });
+        assert!(!st.folders.contains_key(&10));
+        assert_eq!(st.folders.len(), 1);
+
+        // 4. ArtistRemoved cleans up remaining linked folder
+        st.apply_event(WorkerToUiEvent::ArtistRemoved { band_id: 20 });
+        assert!(!st.folders.contains_key(&20));
+        assert!(st.folders.is_empty());
+    }
+
+    #[test]
+    fn test_library_settings_defaults_and_clamping() {
+        let mut s = Settings::default();
+        assert!(s.verify_on_sync);
+        assert!(s.rescan_linked_on_sync);
+        assert!(s.auto_relink);
+        assert_eq!(s.on_missing, crate::types::OnMissing::Ask);
+        assert_eq!(s.deleted_policy, crate::types::DeletedPolicy::KeepMarked);
+        assert_eq!(s.auto_match_min, 0.92);
+        assert_eq!(s.review_match_min, 0.75);
+
+        // Clamping review_match_min to auto_match_min
+        s.auto_match_min = 0.60;
+        s.review_match_min = 0.80;
+        s.review_match_min = s.review_match_min.min(s.auto_match_min);
+        assert_eq!(s.review_match_min, 0.60);
+
+        // JSON serialization roundtrip
+        let json = serde_json::to_string(&s).unwrap();
+        let deserialized: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.verify_on_sync, s.verify_on_sync);
+        assert_eq!(deserialized.auto_match_min, 0.60);
+        assert_eq!(deserialized.review_match_min, 0.60);
     }
 }
