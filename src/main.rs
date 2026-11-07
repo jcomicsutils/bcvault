@@ -1,4 +1,4 @@
-use bcvault::{app::App, paths::AppPaths};
+use bcvault::{app::App, paths::AppPaths, worker::spawn_worker};
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
@@ -30,7 +30,10 @@ fn main() -> anyhow::Result<()> {
     let res = eframe::run_native(
         "bcvault",
         native_options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, handle)))),
+        Box::new(move |cc| {
+            let worker = spawn_worker(&handle, paths, Some(cc.egui_ctx.clone()))?;
+            Ok(Box::new(App::new(cc, handle, worker)))
+        }),
     );
 
     rt.shutdown_timeout(Duration::from_secs(2));

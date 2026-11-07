@@ -1,0 +1,451 @@
+use crate::{
+    types::{
+        ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry, LogLevel,
+        RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow, Settings, SortDir, SortKey,
+        SyncMode, SyncProgress,
+    },
+    ui::{thumbs::ThumbCache, widgets::format_date},
+    worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
+};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::mpsc::UnboundedSender;
+
+#[derive(Clone, Debug)]
+pub struct CachedRow {
+    pub row: ReleaseRow,
+    pub artist_arc: Arc<str>,
+    pub date_str: Arc<str>,
+    pub tracks_str: Arc<str>,
+}
+
+impl CachedRow {
+    pub fn from_row(row: ReleaseRow, artist_interner: &mut HashMap<String, Arc<str>>) -> Self {
+        let artist_arc = artist_interner
+            .entry(row.artist_name.clone())
+            .or_insert_with(|| Arc::from(row.artist_name.as_str()))
+            .clone();
+        let date_str: Arc<str> = Arc::from(format_date(row.published_at).as_str());
+        let tracks_str: Arc<str> = match row.track_count {
+            Some(n) if n > 0 => Arc::from(n.to_string().as_str()),
+            _ => Arc::from("-"),
+        };
+        Self {
+            row,
+            artist_arc,
+            date_str,
+            tracks_str,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JobProgress {
+    pub bytes: u64,
+    pub total: Option<u64>,
+    pub bytes_per_sec: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockTab {
+    Queue,
+    Errors,
+}
+
+#[derive(Clone, Debug)]
+pub struct RedeemModalState {
+    pub target: ItemKey,
+    pub title: String,
+    pub url_input: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuotaWarningModalState {
+    pub band_id: i64,
+    pub used_30d: u32,
+    pub requested: u32,
+    pub soft: u32,
+    pub hard: u32,
+    pub items: Vec<ItemKey>,
+    pub opts: DownloadOpts,
+}
+
+pub struct UiState {
+    pub artists: Vec<ArtistView>,
+    pub artist_filter: String,
+    pub selected_artists: BTreeSet<i64>,
+    pub last_clicked_artist: Option<i64>,
+    pub add_artist_input: String,
+    pub add_artist_pending: bool,
+    pub sync_mode: SyncMode,
+    pub active_syncs: HashMap<i64, SyncProgress>,
+
+    pub rows: Vec<CachedRow>,
+    pub index: HashMap<ItemKey, usize>,
+    pub artist_interner: HashMap<String, Arc<str>>,
+    pub latest_request_id: u64,
+    pub filter: ReleaseFilter,
+    pub search: String,
+    pub sort: SortKey,
+    pub dir: SortDir,
+    pub query_dirty_at: Option<Instant>,
+    pub query_immediate: bool,
+
+    pub selected: HashSet<ItemKey>,
+    pub last_clicked_row: Option<usize>,
+
+    pub jobs: Vec<JobView>,
+    pub job_index: HashMap<JobId, usize>,
+    pub active_item_jobs: HashSet<ItemKey>,
+    pub progress: HashMap<JobId, JobProgress>,
+    pub queue_paused: bool,
+
+    pub dock_tab: DockTab,
+    pub logs: VecDeque<LogEntry>,
+    pub log_filter: Option<LogLevel>,
+    pub rate_limit: RateLimitStatus,
+
+    pub settings: Settings,
+    pub settings_draft: Option<Settings>,
+    pub redeem_modal: Option<RedeemModalState>,
+    pub quota_modal: Option<QuotaWarningModalState>,
+    pub confirm_remove_artist: Option<(i64, String)>,
+
+    pub thumbs: ThumbCache,
+    pub focus_search_next_frame: bool,
+    pub show_debug_overlay: bool,
+    pub last_event_backlog: usize,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UiState {
+    pub fn new() -> Self {
+        Self {
+            artists: Vec::new(),
+            artist_filter: String::new(),
+            selected_artists: BTreeSet::new(),
+            last_clicked_artist: None,
+            add_artist_input: String::new(),
+            add_artist_pending: false,
+            sync_mode: SyncMode::Incremental,
+            active_syncs: HashMap::new(),
+
+            rows: Vec::new(),
+            index: HashMap::new(),
+            artist_interner: HashMap::new(),
+            latest_request_id: 0,
+            filter: ReleaseFilter::All,
+            search: String::new(),
+            sort: SortKey::Released,
+            dir: SortDir::Desc,
+            query_dirty_at: None,
+            query_immediate: true,
+
+            selected: HashSet::new(),
+            last_clicked_row: None,
+
+            jobs: Vec::new(),
+            job_index: HashMap::new(),
+            active_item_jobs: HashSet::new(),
+            progress: HashMap::new(),
+            queue_paused: false,
+
+            dock_tab: DockTab::Queue,
+            logs: VecDeque::with_capacity(2000),
+            log_filter: None,
+            rate_limit: RateLimitStatus::Idle,
+
+            settings: Settings::default(),
+            settings_draft: None,
+            redeem_modal: None,
+            quota_modal: None,
+            confirm_remove_artist: None,
+
+            thumbs: ThumbCache::new(),
+            focus_search_next_frame: false,
+            show_debug_overlay: false,
+            last_event_backlog: 0,
+        }
+    }
+
+    pub fn active_band_id(&self) -> Option<i64> {
+        if self.selected_artists.len() == 1 {
+            self.selected_artists.iter().next().copied()
+        } else {
+            None
+        }
+    }
+
+    pub fn mark_query_immediate(&mut self) {
+        self.query_immediate = true;
+        self.query_dirty_at = None;
+    }
+
+    pub fn mark_query_debounced(&mut self) {
+        self.query_dirty_at = Some(Instant::now());
+    }
+
+    pub fn flush_debounced_query(&mut self, cmd_tx: &UnboundedSender<UiToWorkerCommand>) {
+        let should_send = self.query_immediate
+            || self
+                .query_dirty_at
+                .is_some_and(|t| t.elapsed() >= Duration::from_millis(120));
+
+        if should_send {
+            self.query_immediate = false;
+            self.query_dirty_at = None;
+            self.latest_request_id = self.latest_request_id.wrapping_add(1);
+            let query = ReleaseQuery {
+                band_id: self.active_band_id(),
+                filter: self.filter,
+                search: self.search.clone(),
+                sort: self.sort,
+                dir: self.dir,
+            };
+            let _ = cmd_tx.send(UiToWorkerCommand::QueryReleases {
+                request_id: self.latest_request_id,
+                query,
+            });
+        }
+
+        self.thumbs.flush_debounced(&self.settings, cmd_tx);
+    }
+
+    pub fn cooldown_visible(&self) -> bool {
+        matches!(self.rate_limit, RateLimitStatus::Cooldown { .. })
+    }
+
+    pub fn push_log(&mut self, entry: LogEntry) {
+        if self.logs.len() >= 2000 {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(entry);
+    }
+
+    pub fn apply_event(&mut self, ev: WorkerToUiEvent) {
+        match ev {
+            WorkerToUiEvent::Ready { artists, settings } => {
+                self.artists = artists;
+                self.settings = settings;
+                self.mark_query_immediate();
+            }
+            WorkerToUiEvent::SettingsUpdated(settings) => {
+                self.settings = settings;
+            }
+            WorkerToUiEvent::ArtistUpserted(view) => {
+                self.add_artist_pending = false;
+                if let Some(existing) = self.artists.iter_mut().find(|a| a.band_id == view.band_id)
+                {
+                    *existing = view;
+                } else {
+                    self.artists.push(view);
+                    self.artists.sort_by_key(|a| a.name.to_lowercase());
+                }
+                self.mark_query_immediate();
+            }
+            WorkerToUiEvent::ArtistRemoved { band_id } => {
+                self.artists.retain(|a| a.band_id != band_id);
+                self.selected_artists.remove(&band_id);
+                self.active_syncs.remove(&band_id);
+                self.mark_query_immediate();
+            }
+            WorkerToUiEvent::ArtistStats { band_id, stats } => {
+                if let Some(a) = self.artists.iter_mut().find(|a| a.band_id == band_id) {
+                    a.stats = stats;
+                }
+            }
+            WorkerToUiEvent::ReleasesLoaded { request_id, rows } => {
+                if request_id != self.latest_request_id {
+                    return; // discard stale query result
+                }
+                self.rows.clear();
+                self.index.clear();
+                self.rows.reserve(rows.len());
+                for (idx, r) in rows.into_iter().enumerate() {
+                    let key = r.key;
+                    let cached = CachedRow::from_row(r, &mut self.artist_interner);
+                    self.rows.push(cached);
+                    self.index.insert(key, idx);
+                }
+                // Keep selection restricted to existing keys or clear stale ones
+                self.selected.retain(|k| self.index.contains_key(k));
+                self.last_clicked_row = None;
+            }
+            WorkerToUiEvent::ReleaseUpdated(row) => {
+                let key = row.key;
+                if let Some(&idx) = self.index.get(&key) {
+                    if let Some(slot) = self.rows.get_mut(idx) {
+                        *slot = CachedRow::from_row(*row, &mut self.artist_interner);
+                    }
+                } else {
+                    // New release discovered during sync; if it matches active artist scope and filter All, insert or trigger query refresh
+                    let band_matches = self.active_band_id().is_none_or(|bid| bid == row.band_id);
+                    if band_matches
+                        && self.filter == ReleaseFilter::All
+                        && self.search.trim().is_empty()
+                    {
+                        let idx = self.rows.len();
+                        let cached = CachedRow::from_row(*row, &mut self.artist_interner);
+                        self.rows.push(cached);
+                        self.index.insert(key, idx);
+                    } else if band_matches {
+                        self.mark_query_debounced();
+                    }
+                }
+            }
+            WorkerToUiEvent::SyncProgress(prog) => {
+                self.active_syncs.insert(prog.band_id, prog);
+            }
+            WorkerToUiEvent::SyncFinished { band_id, error, .. } => {
+                self.add_artist_pending = false;
+                self.active_syncs.remove(&band_id);
+                if error.is_some() {
+                    self.dock_tab = DockTab::Errors;
+                }
+            }
+            WorkerToUiEvent::JobQueued(view) => {
+                let id = view.id;
+                let key = view.key;
+                self.active_item_jobs.insert(key);
+                let idx = self.jobs.len();
+                self.jobs.push(view);
+                self.job_index.insert(id, idx);
+            }
+            WorkerToUiEvent::JobState { job_id, state } => {
+                if let Some(&idx) = self.job_index.get(&job_id)
+                    && let Some(job) = self.jobs.get_mut(idx)
+                {
+                    let is_terminal = matches!(
+                        state,
+                        JobState::Done { .. } | JobState::Failed(_) | JobState::Cancelled
+                    );
+                    if is_terminal {
+                        self.active_item_jobs.remove(&job.key);
+                    } else {
+                        self.active_item_jobs.insert(job.key);
+                    }
+                    job.state = state;
+                }
+            }
+            WorkerToUiEvent::DownloadByteProgress {
+                job_id,
+                bytes,
+                total,
+                bytes_per_sec,
+            } => {
+                self.progress.insert(
+                    job_id,
+                    JobProgress {
+                        bytes,
+                        total,
+                        bytes_per_sec,
+                    },
+                );
+            }
+            WorkerToUiEvent::QuotaStatus {
+                band_id, used_30d, ..
+            } => {
+                if let Some(a) = self.artists.iter_mut().find(|a| a.band_id == band_id) {
+                    a.stats.quota_used_30d = used_30d;
+                }
+            }
+            WorkerToUiEvent::QuotaWarning {
+                band_id,
+                used_30d,
+                requested,
+                soft,
+                hard,
+                items,
+                opts,
+            } => {
+                self.quota_modal = Some(QuotaWarningModalState {
+                    band_id,
+                    used_30d,
+                    requested,
+                    soft,
+                    hard,
+                    items,
+                    opts,
+                });
+            }
+            WorkerToUiEvent::RateLimit(status) => {
+                self.rate_limit = status;
+            }
+            WorkerToUiEvent::ThumbReady { key, path } => {
+                self.thumbs.on_thumb_ready(key, path);
+            }
+            WorkerToUiEvent::Log(entry) => {
+                self.push_log(entry);
+            }
+        }
+    }
+
+    pub fn clear_finished_jobs(&mut self) {
+        self.jobs.retain(|j| {
+            !matches!(
+                j.state,
+                JobState::Done { .. } | JobState::Failed(_) | JobState::Cancelled
+            )
+        });
+        self.job_index.clear();
+        for (idx, j) in self.jobs.iter().enumerate() {
+            self.job_index.insert(j.id, idx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Classification, ItemType};
+
+    #[test]
+    fn discards_stale_release_query_results() {
+        let mut st = UiState::new();
+        st.latest_request_id = 5;
+
+        let sample_row = ReleaseRow {
+            key: ItemKey::new(ItemType::Album, 1),
+            band_id: 1,
+            title: "Title".to_string(),
+            artist_name: "Artist".to_string(),
+            url: "https://a.bandcamp.com/album/t".to_string(),
+            cover_url: None,
+            art_id: None,
+            classification: Classification::Free,
+            is_preorder: false,
+            track_count: Some(3),
+            published_at: None,
+            modified_at: None,
+            downloaded: false,
+            downloaded_at: None,
+            downloaded_format: None,
+            local_path: None,
+            has_remote_update: false,
+            remote_update_reason: None,
+        };
+
+        // Stale request_id = 4 is ignored
+        st.apply_event(WorkerToUiEvent::ReleasesLoaded {
+            request_id: 4,
+            rows: vec![sample_row.clone()],
+        });
+        assert!(st.rows.is_empty());
+
+        // Matching request_id = 5 is applied
+        st.apply_event(WorkerToUiEvent::ReleasesLoaded {
+            request_id: 5,
+            rows: vec![sample_row],
+        });
+        assert_eq!(st.rows.len(), 1);
+    }
+}
