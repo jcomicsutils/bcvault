@@ -1,5 +1,5 @@
 use crate::{
-    types::{Classification, FolderState, SortDir, Ts, UpdateReason},
+    types::{Classification, FolderState, LocalStatus, SortDir, Ts, UpdateReason},
     ui::theme::pal,
 };
 use egui::{
@@ -60,6 +60,7 @@ pub fn update_badge(ui: &mut Ui, reason: UpdateReason) {
 pub fn paint_status_glyph(
     ui: &mut Ui,
     downloaded: bool,
+    local_status: Option<LocalStatus>,
     has_remote_update: bool,
     in_queue: bool,
 ) -> Response {
@@ -96,9 +97,63 @@ pub fn paint_status_glyph(
         let inner = Rect::from_center_size(c, Vec2::splat(4.0));
         sharp_rect(painter, inner, pal::WARN, Stroke::NONE);
     } else if downloaded {
-        // Solid green square
-        let box_rect = Rect::from_center_size(c, Vec2::splat(9.0));
-        sharp_rect(painter, box_rect, pal::OK, Stroke::new(1.0_f32, pal::OK));
+        match local_status {
+            Some(LocalStatus::Present) => {
+                // Filled square with check
+                let box_rect = Rect::from_center_size(c, Vec2::splat(10.0));
+                sharp_rect(painter, box_rect, pal::OK, Stroke::new(1.0_f32, pal::OK));
+                painter.line_segment(
+                    [Pos2::new(c.x - 3.0, c.y), Pos2::new(c.x - 0.5, c.y + 2.5)],
+                    Stroke::new(1.5_f32, pal::BG0),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(c.x - 0.5, c.y + 2.5),
+                        Pos2::new(c.x + 3.0, c.y - 2.5),
+                    ],
+                    Stroke::new(1.5_f32, pal::BG0),
+                );
+            }
+            Some(LocalStatus::Archived) => {
+                // Hollow square with horizontal bar
+                let box_rect = Rect::from_center_size(c, Vec2::splat(10.0));
+                sharp_rect(
+                    painter,
+                    box_rect,
+                    Color32::TRANSPARENT,
+                    Stroke::new(1.0_f32, pal::BORDER_HI),
+                );
+                painter.line_segment(
+                    [Pos2::new(c.x - 3.0, c.y), Pos2::new(c.x + 3.0, c.y)],
+                    Stroke::new(1.5_f32, pal::BORDER_HI),
+                );
+            }
+            Some(LocalStatus::Missing) => {
+                // Square with '!' in warning colour
+                let box_rect = Rect::from_center_size(c, Vec2::splat(10.0));
+                sharp_rect(
+                    painter,
+                    box_rect,
+                    pal::WARN.gamma_multiply(0.15),
+                    Stroke::new(1.0_f32, pal::WARN),
+                );
+                painter.line_segment(
+                    [Pos2::new(c.x, c.y - 3.0), Pos2::new(c.x, c.y + 0.5)],
+                    Stroke::new(1.5_f32, pal::WARN),
+                );
+                sharp_rect(
+                    painter,
+                    Rect::from_center_size(Pos2::new(c.x, c.y + 2.5), Vec2::splat(1.5)),
+                    pal::WARN,
+                    Stroke::NONE,
+                );
+            }
+            _ => {
+                // Solid green square (unverified or generic downloaded)
+                let box_rect = Rect::from_center_size(c, Vec2::splat(9.0));
+                sharp_rect(painter, box_rect, pal::OK, Stroke::new(1.0_f32, pal::OK));
+            }
+        }
     } else {
         // Empty dim square outline
         let box_rect = Rect::from_center_size(c, Vec2::splat(9.0));

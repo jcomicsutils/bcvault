@@ -143,7 +143,7 @@ impl eframe::App for App {
                 ui::sidebar::show(ui, &mut self.state, &self.cmd_tx);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui::release_table::show(ui, &mut self.state, &self.cmd_tx);
+            ui::release_table::show(ui, &mut self.state, &self.cmd_tx, &self.rt_handle);
         });
 
         ui::modals::show(ctx, &mut self.state, &self.cmd_tx, &self.rt_handle);

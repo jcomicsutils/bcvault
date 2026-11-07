@@ -307,6 +307,7 @@ pub struct UiState {
     pub undo_toast: Option<UndoToast>,
     pub resolve_missing_modal: Option<ResolveMissingModalState>,
     pub show_resolve_missing_window: bool,
+    pub relink_picked_folder: Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
 
     pub thumbs: ThumbCache,
     pub focus_search_next_frame: bool,
@@ -369,6 +370,7 @@ impl UiState {
             undo_toast: None,
             resolve_missing_modal: None,
             show_resolve_missing_window: false,
+            relink_picked_folder: Arc::new(std::sync::Mutex::new(None)),
 
             thumbs: ThumbCache::new(),
             focus_search_next_frame: false,

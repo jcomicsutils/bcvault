@@ -1,10 +1,11 @@
 use crate::{
-    types::{Classification, DownloadOpts, SortDir, SortKey},
+    types::{Classification, DownloadOpts, LocalStatus, SortDir, SortKey},
     ui::{
         state::{RedeemModalState, UiState},
         theme::pal,
         widgets::{
-            class_badge, paint_sort_arrow, paint_status_glyph, sharp_small_button, update_badge,
+            badge, class_badge, paint_sort_arrow, paint_status_glyph, sharp_small_button,
+            update_badge,
         },
     },
     worker::messages::UiToWorkerCommand,
@@ -13,7 +14,21 @@ use egui::{Align, CornerRadius, Layout, Pos2, RichText, Sense, Ui, Vec2};
 use egui_extras::{Column, TableBuilder};
 use tokio::sync::mpsc::UnboundedSender;
 
-pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorkerCommand>) {
+pub fn show(
+    ui: &mut Ui,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+) {
+    if let Some((key, path)) = state
+        .relink_picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        let _ = cmd_tx.send(UiToWorkerCommand::RelinkRelease { key, path });
+    }
+
     let eligible_visible_keys: Vec<_> = state
         .rows
         .iter()
@@ -123,16 +138,35 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
 
                 // Column 1: Status glyph
                 row.col(|ui| {
-                    let glyph_resp =
-                        paint_status_glyph(ui, r.downloaded, r.has_remote_update, in_queue);
+                    let glyph_resp = paint_status_glyph(
+                        ui,
+                        r.downloaded,
+                        r.local_status,
+                        r.has_remote_update,
+                        in_queue,
+                    );
                     let tip = if in_queue {
-                        "Queued or downloading"
-                    } else if r.downloaded && r.has_remote_update {
-                        "Downloaded (remote update available)"
-                    } else if r.downloaded {
-                        "Downloaded"
+                        "Queued or downloading".to_string()
                     } else {
-                        "Not downloaded"
+                        let mut s = match r.local_status {
+                            Some(LocalStatus::Present) => "Downloaded (files present)".to_string(),
+                            Some(LocalStatus::Archived) => {
+                                "Archived (files removed, kept as done)".to_string()
+                            }
+                            Some(LocalStatus::Missing) => {
+                                "Missing (files not found on disk)".to_string()
+                            }
+                            Some(LocalStatus::Unverified) => "Downloaded (unverified)".to_string(),
+                            None if r.downloaded => "Downloaded".to_string(),
+                            _ => "Not downloaded".to_string(),
+                        };
+                        if r.has_remote_update {
+                            s.push_str(" · remote update available");
+                        }
+                        if let Some(path) = &r.local_path {
+                            s.push_str(&format!("\nLocal path: {}", path.display()));
+                        }
+                        s
                     };
                     glyph_resp.on_hover_text(tip);
                 });
@@ -142,12 +176,19 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                     ui.add(egui::Label::new(cached.artist_arc.as_ref()).truncate());
                 });
 
-                // Column 3: Title (+ optional thumbnail + update badge)
+                // Column 3: Title (+ optional thumbnail + badges)
                 row.col(|ui| {
                     if state.settings.show_thumbnails {
                         state.thumbs.draw_thumb(ui, key);
                     }
                     ui.add(egui::Label::new(&r.title).truncate());
+                    if r.downloaded {
+                        if r.local_status == Some(LocalStatus::Archived) {
+                            badge(ui, "ARCHIVED", pal::TEXT_DIM, pal::BORDER_HI);
+                        } else if r.local_status == Some(LocalStatus::Missing) {
+                            badge(ui, "MISSING", pal::WARN, pal::WARN);
+                        }
+                    }
                     if r.has_remote_update
                         && let Some(reason) = r.remote_update_reason
                     {
@@ -201,20 +242,109 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                 let row_resp = row.response();
                 row_resp.context_menu(|ui| {
                     if r.downloaded {
-                        if sharp_small_button(ui, "Unmark Downloaded").clicked() {
-                            let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
-                                key,
-                                downloaded: false,
+                        if sharp_small_button(ui, "Mark as Archived").clicked() {
+                            let _ =
+                                cmd_tx.send(UiToWorkerCommand::MarkArchived { keys: vec![key] });
+                            ui.close();
+                        }
+                        if sharp_small_button(ui, "Mark as Not Downloaded").clicked() {
+                            let _ = cmd_tx
+                                .send(UiToWorkerCommand::UnmarkDownloaded { keys: vec![key] });
+                            ui.close();
+                        }
+                        if sharp_small_button(ui, "Relink to Folder...").clicked() {
+                            let slot = state.relink_picked_folder.clone();
+                            rt_handle.spawn(async move {
+                                if let Some(folder) =
+                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                    && let Ok(mut lock) = slot.lock()
+                                {
+                                    *lock = Some((key, folder.path().to_path_buf()));
+                                }
                             });
                             ui.close();
                         }
-                    } else if sharp_small_button(ui, "Mark Downloaded").clicked() {
-                        let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
-                            key,
-                            downloaded: true,
-                        });
-                        ui.close();
+                        if let Some(ref path) = r.local_path {
+                            let is_missing = r.local_status == Some(LocalStatus::Missing);
+                            let btn = ui.add_enabled(
+                                !is_missing,
+                                egui::Button::new(RichText::new("Open Folder").size(11.5))
+                                    .corner_radius(CornerRadius::ZERO),
+                            );
+                            if btn.clicked() {
+                                let target_dir = if path.is_dir() {
+                                    path.as_path()
+                                } else {
+                                    path.parent().unwrap_or(path.as_path())
+                                };
+                                let _ = open::that_detached(target_dir);
+                                ui.close();
+                            }
+                        }
+                        if r.classification.auto_downloadable()
+                            && !r.is_preorder
+                            && sharp_small_button(ui, "Re-download").clicked()
+                        {
+                            let opts = DownloadOpts {
+                                format: state.settings.format,
+                                out_dir: state.settings.out_dir.clone(),
+                                batch_limit: state.settings.batch_limit,
+                            };
+                            let _ = cmd_tx.send(UiToWorkerCommand::EnqueueDownloads {
+                                items: vec![r.key],
+                                opts,
+                                ack_soft_quota: false,
+                            });
+                            ui.close();
+                        }
+                    } else {
+                        if sharp_small_button(ui, "Mark Downloaded").clicked() {
+                            let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
+                                key,
+                                downloaded: true,
+                            });
+                            ui.close();
+                        }
+                        if sharp_small_button(ui, "Relink to Folder...").clicked() {
+                            let slot = state.relink_picked_folder.clone();
+                            rt_handle.spawn(async move {
+                                if let Some(folder) =
+                                    rfd::AsyncFileDialog::new().pick_folder().await
+                                    && let Ok(mut lock) = slot.lock()
+                                {
+                                    *lock = Some((key, folder.path().to_path_buf()));
+                                }
+                            });
+                            ui.close();
+                        }
                     }
+
+                    if state.selected.len() > 1 && state.selected.contains(&key) {
+                        ui.separator();
+                        let sel_count = state.selected.len();
+                        if sharp_small_button(
+                            ui,
+                            &format!("Mark Selected as Archived ({sel_count})"),
+                        )
+                        .clicked()
+                        {
+                            let keys = state.selected.iter().copied().collect();
+                            let _ = cmd_tx.send(UiToWorkerCommand::MarkArchived { keys });
+                            ui.close();
+                        }
+                        if sharp_small_button(
+                            ui,
+                            &format!("Mark Selected as Not Downloaded ({sel_count})"),
+                        )
+                        .clicked()
+                        {
+                            let keys = state.selected.iter().copied().collect();
+                            let _ = cmd_tx.send(UiToWorkerCommand::UnmarkDownloaded { keys });
+                            ui.close();
+                        }
+                    }
+
+                    ui.separator();
                     if sharp_small_button(ui, "Open in Browser").clicked() {
                         let _ = open::that_detached(&r.url);
                         ui.close();
@@ -332,15 +462,21 @@ fn draw_row_actions(
             });
         }
 
-        if let Some(ref path) = r.local_path
-            && sharp_small_button(ui, "Open Folder").clicked()
-        {
-            let target_dir = if path.is_dir() {
-                path.as_path()
-            } else {
-                path.parent().unwrap_or(path.as_path())
-            };
-            let _ = open::that_detached(target_dir);
+        if let Some(ref path) = r.local_path {
+            let is_missing = r.local_status == Some(LocalStatus::Missing);
+            let btn = ui.add_enabled(
+                !is_missing,
+                egui::Button::new(RichText::new("Open Folder").size(11.5))
+                    .corner_radius(CornerRadius::ZERO),
+            );
+            if btn.clicked() {
+                let target_dir = if path.is_dir() {
+                    path.as_path()
+                } else {
+                    path.parent().unwrap_or(path.as_path())
+                };
+                let _ = open::that_detached(target_dir);
+            }
         }
 
         if r.classification == Classification::EmailRequired {
