@@ -49,6 +49,12 @@ Pre-compiled release archives are available on the [GitHub Releases](https://git
 - **Rolling Quota Protection**: Tracks rolling 30-day downloads per artist locally (default: `150` soft warning / `200` hard cap) and halts queues if Bandcamp reports free monthly download exhaustion.
 - **Ethical Email Gate Handling**: Never attempts to spoof or bypass email verification or payment barriers. Provides direct browser redirection and a one-click **Redeem URL** intake dialog.
 
+### Artist Folder Links and Library Sync
+- **1-to-1 Artist Folder Binding**: Tie a local music folder to any Bandcamp artist page with non-destructive candidate matching and format guessing (see [`docs/library.md`](docs/library.md)).
+- **Disk Verification & Safeguards**: Probes volume roots and storage devices to ensure unmounted drives never trigger accidental deletions. Mass-missing guard halts automated operations if >30% of albums disappear in a single pass.
+- **Archive Workflow & Auto-Relink**: Silently relinks albums moved within a linked folder. Supports keeping deleted albums marked as downloaded (`archived`) or unmarking them.
+- **Full Non-Destructive Undo**: Every library action creates a batch transaction with before/after audit entries in `library_events` and instant undo support.
+
 ### Design
 - **Adaptive Dynamic Themes**: OKLab contrast-safe color generation across four built-in themes:
   - **Carbon**: Deep neutral slate and high-tech cyan/mint accents.
