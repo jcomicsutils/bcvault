@@ -146,7 +146,7 @@ impl eframe::App for App {
             ui::release_table::show(ui, &mut self.state, &self.cmd_tx);
         });
 
-        ui::modals::show(ctx, &mut self.state, &self.cmd_tx);
+        ui::modals::show(ctx, &mut self.state, &self.cmd_tx, &self.rt_handle);
         self.draw_debug_overlay(ctx);
 
         if self.state.cooldown_visible() {

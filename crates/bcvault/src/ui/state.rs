@@ -81,6 +81,46 @@ pub struct RenameArtistModalState {
     pub name_input: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct LinkFolderModalState {
+    pub band_id: Option<i64>,
+    pub artist_input: String,
+    pub folder_path: String,
+    pub auto_apply_confident: bool,
+    pub error: Option<String>,
+    pub picked_folder: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+}
+
+impl LinkFolderModalState {
+    pub fn new_empty(band_id: Option<i64>) -> Self {
+        Self {
+            band_id,
+            artist_input: String::new(),
+            folder_path: String::new(),
+            auto_apply_confident: true,
+            error: None,
+            picked_folder: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    pub fn for_artist(
+        band_id: i64,
+        display_name: &str,
+        existing_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            band_id: Some(band_id),
+            artist_input: display_name.to_string(),
+            folder_path: existing_path
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            auto_apply_confident: true,
+            error: None,
+            picked_folder: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
 pub struct UiState {
     pub artists: Vec<ArtistView>,
     pub artist_filter: String,
@@ -123,6 +163,7 @@ pub struct UiState {
     pub quota_modal: Option<QuotaWarningModalState>,
     pub confirm_remove_artist: Option<(i64, String)>,
     pub rename_artist_modal: Option<RenameArtistModalState>,
+    pub link_folder_modal: Option<LinkFolderModalState>,
 
     pub thumbs: ThumbCache,
     pub focus_search_next_frame: bool,
@@ -180,6 +221,7 @@ impl UiState {
             quota_modal: None,
             confirm_remove_artist: None,
             rename_artist_modal: None,
+            link_folder_modal: None,
 
             thumbs: ThumbCache::new(),
             focus_search_next_frame: false,
@@ -560,5 +602,32 @@ mod tests {
         assert_eq!(deserialized.verify_on_sync, s.verify_on_sync);
         assert_eq!(deserialized.auto_match_min, 0.60);
         assert_eq!(deserialized.review_match_min, 0.60);
+    }
+
+    #[test]
+    fn test_link_folder_modal_state() {
+        use std::path::PathBuf;
+
+        let empty = LinkFolderModalState::new_empty(None);
+        assert!(empty.band_id.is_none());
+        assert!(empty.artist_input.is_empty());
+        assert!(empty.folder_path.is_empty());
+        assert!(empty.auto_apply_confident);
+
+        let for_art =
+            LinkFolderModalState::for_artist(42, "Aphex Twin", Some(PathBuf::from("/music/aphex")));
+        assert_eq!(for_art.band_id, Some(42));
+        assert_eq!(for_art.artist_input, "Aphex Twin");
+        assert_eq!(for_art.folder_path, "/music/aphex");
+        assert!(for_art.auto_apply_confident);
+
+        // Async picked folder communication
+        {
+            let mut lock = for_art.picked_folder.lock().unwrap();
+            *lock = Some(PathBuf::from("/new/path"));
+        }
+        let retrieved = for_art.picked_folder.lock().unwrap().take();
+        assert_eq!(retrieved, Some(PathBuf::from("/new/path")));
+        assert!(for_art.picked_folder.lock().unwrap().is_none());
     }
 }

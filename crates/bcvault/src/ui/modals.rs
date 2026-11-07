@@ -11,12 +11,18 @@ use crate::{
 use egui::{Align2, Color32, Context, Id, Order, RichText, Sense, Stroke};
 use tokio::sync::mpsc::UnboundedSender;
 
-pub fn show(ctx: &Context, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorkerCommand>) {
+pub fn show(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+) {
     let any_modal = state.redeem_modal.is_some()
         || state.quota_modal.is_some()
         || state.settings_draft.is_some()
         || state.confirm_remove_artist.is_some()
-        || state.rename_artist_modal.is_some();
+        || state.rename_artist_modal.is_some()
+        || state.link_folder_modal.is_some();
 
     if !any_modal {
         return;
@@ -53,6 +59,9 @@ pub fn show(ctx: &Context, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWor
     }
     if state.rename_artist_modal.is_some() {
         show_rename_artist_modal(ctx, state, cmd_tx, esc);
+    }
+    if state.link_folder_modal.is_some() {
+        show_link_folder_modal(ctx, state, cmd_tx, rt_handle, esc);
     }
 }
 
@@ -557,5 +566,186 @@ fn show_rename_artist_modal(
 
     if keep_open {
         state.rename_artist_modal = Some(modal);
+    }
+}
+
+fn show_link_folder_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+    esc: bool,
+) {
+    let Some(mut modal) = state.link_folder_modal.take() else {
+        return;
+    };
+    let mut keep_open = !esc;
+
+    if let Ok(mut lock) = modal.picked_folder.lock()
+        && let Some(p) = lock.take()
+    {
+        modal.folder_path = p.display().to_string();
+    }
+
+    egui::Window::new("Link Artist Folder")
+        .order(Order::Foreground)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(460.0);
+
+            ui.label(
+                RichText::new("Link a local music folder to a Bandcamp artist:")
+                    .color(pal::TEXT_DIM),
+            );
+            ui.add_space(4.0);
+
+            egui::Grid::new("link_folder_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Artist Page:");
+                    if let Some(band_id) = modal.band_id {
+                        let artist_name = state
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == band_id)
+                            .map(|a| a.display_name().to_string())
+                            .unwrap_or_else(|| format!("Artist {band_id}"));
+                        ui.label(RichText::new(artist_name).strong());
+                    } else {
+                        ui.vertical(|ui| {
+                            let mut selected_text = "Select tracked artist...".to_string();
+                            if let Some(band_id) = modal.band_id
+                                && let Some(a) = state.artists.iter().find(|a| a.band_id == band_id)
+                            {
+                                selected_text = a.display_name().to_string();
+                            }
+                            egui::ComboBox::from_id_salt("link_modal_artist_combo")
+                                .selected_text(&selected_text)
+                                .width(280.0)
+                                .show_ui(ui, |ui| {
+                                    for a in &state.artists {
+                                        if ui
+                                            .selectable_label(
+                                                modal.band_id == Some(a.band_id),
+                                                a.display_name(),
+                                            )
+                                            .clicked()
+                                        {
+                                            modal.band_id = Some(a.band_id);
+                                            modal.artist_input = a.url.clone();
+                                        }
+                                    }
+                                });
+
+                            ui.add(
+                                egui::TextEdit::singleline(&mut modal.artist_input)
+                                    .hint_text("or paste Bandcamp URL / slug")
+                                    .desired_width(280.0),
+                            );
+                        });
+                    }
+                    ui.end_row();
+
+                    ui.label("Folder:");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut modal.folder_path)
+                                .hint_text("/path/to/artist/folder")
+                                .desired_width(240.0),
+                        );
+                        if sharp_small_button(ui, "Browse...").clicked() {
+                            let slot = modal.picked_folder.clone();
+                            let start_dir = if !modal.folder_path.trim().is_empty() {
+                                Some(std::path::PathBuf::from(modal.folder_path.trim()))
+                            } else {
+                                None
+                            };
+                            rt_handle.spawn(async move {
+                                let mut dialog = rfd::AsyncFileDialog::new();
+                                if let Some(ref d) = start_dir {
+                                    dialog = dialog.set_directory(d);
+                                }
+                                if let Some(handle) = dialog.pick_folder().await
+                                    && let Ok(mut l) = slot.lock()
+                                {
+                                    *l = Some(handle.path().to_path_buf());
+                                }
+                            });
+                        }
+                    });
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut modal.auto_apply_confident,
+                "Adopt confident matches automatically",
+            );
+
+            if let Some(ref err) = modal.error {
+                ui.add_space(4.0);
+                ui.label(RichText::new(err).color(pal::ERR));
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if sharp_button(ui, "Link Folder").clicked() {
+                    let path_str = modal.folder_path.trim();
+                    if path_str.is_empty() {
+                        modal.error = Some("Folder path cannot be empty.".to_string());
+                    } else {
+                        let path = std::path::PathBuf::from(path_str);
+                        if !path.exists() {
+                            modal.error =
+                                Some("Selected folder path does not exist on disk.".to_string());
+                        } else if !path.is_dir() {
+                            modal.error =
+                                Some("Selected path is a file, not a directory.".to_string());
+                        } else {
+                            let target_band_id = modal.band_id.or_else(|| {
+                                let input = modal.artist_input.trim();
+                                if input.is_empty() {
+                                    None
+                                } else {
+                                    let lower = input.to_lowercase();
+                                    state
+                                        .artists
+                                        .iter()
+                                        .find(|a| {
+                                            a.url.to_lowercase().contains(&lower)
+                                                || a.slug.to_lowercase() == lower
+                                                || a.name.to_lowercase() == lower
+                                                || a.display_name().to_lowercase() == lower
+                                        })
+                                        .map(|a| a.band_id)
+                                }
+                            });
+
+                            if let Some(band_id) = target_band_id {
+                                let _ = cmd_tx.send(UiToWorkerCommand::LinkArtistFolder {
+                                    band_id,
+                                    path,
+                                    auto_apply_confident: modal.auto_apply_confident,
+                                });
+                                keep_open = false;
+                            } else {
+                                modal.error = Some(
+                                    "Please select or specify a valid tracked artist.".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                if sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
+
+    if keep_open {
+        state.link_folder_modal = Some(modal);
     }
 }

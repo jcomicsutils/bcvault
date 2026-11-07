@@ -1,9 +1,9 @@
 use crate::{
-    types::{ArtistStats, SyncMode, SyncScope},
+    types::{ArtistFolder, ArtistStats, FolderState, SyncMode, SyncScope},
     ui::{
-        state::{RenameArtistModalState, UiState},
+        state::{LinkFolderModalState, RenameArtistModalState, UiState},
         theme::pal,
-        widgets::{sharp_button, sharp_rect},
+        widgets::{paint_folder_glyph, sharp_button, sharp_rect},
     },
     worker::messages::UiToWorkerCommand,
 };
@@ -78,6 +78,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                         is_selected,
                         None,
                         state.settings.quota_hard,
+                        None,
                     );
                     if resp.clicked() {
                         state.selected_artists.clear();
@@ -89,6 +90,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                     let artist = state.artists[artist_idx].clone();
                     let is_selected = state.selected_artists.contains(&artist.band_id);
                     let sync_prog = state.active_syncs.get(&artist.band_id).cloned();
+                    let linked_folder = state.folders.get(&artist.band_id).cloned();
 
                     let resp = draw_artist_row(
                         ui,
@@ -103,6 +105,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             }
                         }),
                         state.settings.quota_hard,
+                        linked_folder.as_ref(),
                     );
 
                     let modifiers = ui.input(|i| i.modifiers);
@@ -141,6 +144,44 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             let _ = cmd_tx.send(UiToWorkerCommand::Sync {
                                 scope: SyncScope::Selected(vec![artist.band_id]),
                                 mode: state.sync_mode,
+                            });
+                            ui.close();
+                        }
+                        if let Some(folder) = state.folders.get(&artist.band_id) {
+                            if sharp_button(ui, "Change Folder...").clicked() {
+                                state.link_folder_modal = Some(LinkFolderModalState::for_artist(
+                                    artist.band_id,
+                                    artist.display_name(),
+                                    Some(folder.path.clone()),
+                                ));
+                                ui.close();
+                            }
+                            if sharp_button(ui, "Match Folder").clicked() {
+                                let _ = cmd_tx.send(UiToWorkerCommand::MatchArtistFolder {
+                                    band_id: artist.band_id,
+                                    auto_apply_confident: true,
+                                });
+                                ui.close();
+                            }
+                            if sharp_button(ui, "Unlink Folder").clicked() {
+                                let _ = cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                    band_id: artist.band_id,
+                                });
+                                ui.close();
+                            }
+                        } else {
+                            if sharp_button(ui, "Link Folder...").clicked() {
+                                state.link_folder_modal = Some(LinkFolderModalState::for_artist(
+                                    artist.band_id,
+                                    artist.display_name(),
+                                    None,
+                                ));
+                                ui.close();
+                            }
+                        }
+                        if sharp_button(ui, "Verify Files").clicked() {
+                            let _ = cmd_tx.send(UiToWorkerCommand::VerifyFiles {
+                                scope: SyncScope::Selected(vec![artist.band_id]),
                             });
                             ui.close();
                         }
@@ -204,6 +245,15 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
             });
         }
 
+        if sharp_button(ui, "Verify Files").clicked() {
+            let scope = if state.selected_artists.is_empty() {
+                SyncScope::All
+            } else {
+                SyncScope::Selected(state.selected_artists.iter().copied().collect())
+            };
+            let _ = cmd_tx.send(UiToWorkerCommand::VerifyFiles { scope });
+        }
+
         if !state.active_syncs.is_empty() && sharp_button(ui, "Stop").clicked() {
             let _ = cmd_tx.send(UiToWorkerCommand::CancelSync);
         }
@@ -230,6 +280,7 @@ fn draw_artist_row(
     selected: bool,
     sync_frac: Option<f32>,
     quota_hard: u32,
+    linked_folder: Option<&ArtistFolder>,
 ) -> egui::Response {
     let desired = Vec2::new(ui.available_width(), 24.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
@@ -267,6 +318,19 @@ fn draw_artist_row(
                 .max_rect(inner)
                 .layout(Layout::left_to_right(Align::Center)),
         );
+        if let Some(folder) = linked_folder {
+            let tip = match folder.state {
+                FolderState::Ok => format!("Linked: {}\nStatus: Reachable", folder.path.display()),
+                FolderState::Missing => {
+                    format!("Linked: {}\nStatus: Missing", folder.path.display())
+                }
+                FolderState::Unreadable => {
+                    format!("Linked: {}\nStatus: Unreadable", folder.path.display())
+                }
+            };
+            paint_folder_glyph(&mut child, folder.state).on_hover_text(tip);
+            child.add_space(2.0);
+        }
         child.add(egui::Label::new(RichText::new(name).color(pal::TEXT)).truncate());
         child.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
@@ -278,14 +342,24 @@ fn draw_artist_row(
         });
     }
 
+    let folder_tooltip = match linked_folder {
+        Some(f) => format!(
+            "\nLinked folder: {}\nFolder status: {:?}",
+            f.path.display(),
+            f.state
+        ),
+        None => String::new(),
+    };
+
     resp.on_hover_text(format!(
-        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}",
+        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}{}",
         stats.downloaded,
         stats.eligible,
         stats.total,
         stats.email_required,
         stats.unknown,
         stats.quota_used_30d,
-        quota_hard
+        quota_hard,
+        folder_tooltip
     ))
 }

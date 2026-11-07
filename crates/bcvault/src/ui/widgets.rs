@@ -128,6 +128,39 @@ pub fn paint_folder_status_dot(ui: &mut Ui, state: FolderState) -> Response {
     resp
 }
 
+/// Painter-drawn folder glyph with status dot for linked artists in the sidebar.
+pub fn paint_folder_glyph(ui: &mut Ui, state: FolderState) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(16.0, 14.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let min = rect.min;
+        // Tab: top-left
+        let tab = Rect::from_min_max(
+            Pos2::new(min.x, min.y + 1.0),
+            Pos2::new(min.x + 5.0, min.y + 3.0),
+        );
+        sharp_rect(painter, tab, pal::TEXT_DIM, Stroke::NONE);
+        // Folder body: rect
+        let body = Rect::from_min_max(
+            Pos2::new(min.x, min.y + 3.0),
+            Pos2::new(min.x + 13.0, min.y + 12.0),
+        );
+        sharp_rect(painter, body, pal::BG2, Stroke::new(1.0_f32, pal::TEXT_DIM));
+        // Status dot on right/inside
+        let dot_color = match state {
+            FolderState::Ok => pal::OK,
+            FolderState::Missing => pal::ERR,
+            FolderState::Unreadable => pal::WARN,
+        };
+        let dot_rect = Rect::from_min_max(
+            Pos2::new(min.x + 8.0, min.y + 7.0),
+            Pos2::new(min.x + 12.0, min.y + 11.0),
+        );
+        sharp_rect(painter, dot_rect, dot_color, Stroke::NONE);
+    }
+    resp
+}
+
 /// Painter-drawn sort direction triangle.
 pub fn paint_sort_arrow(painter: &Painter, center: Pos2, dir: SortDir, color: Color32) {
     let pts = match dir {

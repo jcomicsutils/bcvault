@@ -50,6 +50,11 @@ pub fn show(
             if sharp_button(ui, "Settings").clicked() {
                 state.settings_draft = Some(state.settings.clone());
             }
+            if sharp_button(ui, "Link Folder to Artist...").clicked() {
+                state.link_folder_modal = Some(crate::ui::state::LinkFolderModalState::new_empty(
+                    state.active_band_id(),
+                ));
+            }
         });
     });
 
