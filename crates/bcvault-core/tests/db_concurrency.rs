@@ -423,6 +423,39 @@ async fn explain_query_plan_and_100k_seed_performance() {
                 "Unexpected SCAN download_history in plan: {qplan_text}"
             );
 
+            // Verify query plan for library indexes idx_releases_archived and idx_releases_attention
+            let explain_arch =
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM releases WHERE band_id = ?1 AND local_status = 'archived'";
+            let mut arch_stmt = c.prepare(explain_arch)?;
+            let arch_details: Vec<String> = arch_stmt
+                .query_map(params![1_i64], |r| r.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let arch_plan_text = arch_details.join(" | ");
+            assert!(
+                arch_plan_text.contains("idx_releases_archived"),
+                "Expected idx_releases_archived in plan: {arch_plan_text}"
+            );
+            assert!(
+                !arch_plan_text.contains("SCAN releases"),
+                "Unexpected SCAN releases in plan: {arch_plan_text}"
+            );
+
+            let explain_miss =
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM releases WHERE band_id = ?1 AND local_status = 'missing'";
+            let mut miss_stmt = c.prepare(explain_miss)?;
+            let miss_details: Vec<String> = miss_stmt
+                .query_map(params![1_i64], |r| r.get::<_, String>(3))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let miss_plan_text = miss_details.join(" | ");
+            assert!(
+                miss_plan_text.contains("idx_releases_attention"),
+                "Expected idx_releases_attention in plan: {miss_plan_text}"
+            );
+            assert!(
+                !miss_plan_text.contains("SCAN releases"),
+                "Unexpected SCAN releases in plan: {miss_plan_text}"
+            );
+
             Ok(())
         })
         .await
