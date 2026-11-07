@@ -450,6 +450,29 @@ impl ArtistView {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(&self.name)
     }
+
+    pub fn matches_input(&self, input: &str) -> bool {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if let Ok(norm) = crate::bandcamp::input::normalize_artist_input(trimmed)
+            && (self.slug.eq_ignore_ascii_case(&norm.slug)
+                || self
+                    .url
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(norm.base_url.trim_end_matches('/')))
+        {
+            return true;
+        }
+        let lower = trimmed.to_lowercase();
+        self.slug.to_lowercase() == lower
+            || self.name.to_lowercase() == lower
+            || self.display_name().to_lowercase() == lower
+            || self.url.to_lowercase() == lower
+            || lower.contains(&self.url.to_lowercase())
+            || self.url.to_lowercase().contains(&lower)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1029,5 +1052,34 @@ mod tests {
         assert!(s.auto_relink);
         assert!((s.auto_match_min - 0.92).abs() < 1e-4);
         assert!((s.review_match_min - 0.75).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_artist_view_matches_input() {
+        let artist = ArtistView {
+            band_id: 123,
+            slug: "areyoudoneyet".to_string(),
+            name: "Are You Done Yet".to_string(),
+            custom_name: None,
+            url: "https://areyoudoneyet.bandcamp.com".to_string(),
+            last_synced_at: None,
+            stats: ArtistStats::default(),
+        };
+
+        // Exact slug
+        assert!(artist.matches_input("areyoudoneyet"));
+        assert!(artist.matches_input("AreYouDoneYet"));
+        // URL variants
+        assert!(artist.matches_input("https://areyoudoneyet.bandcamp.com"));
+        assert!(artist.matches_input("https://areyoudoneyet.bandcamp.com/"));
+        assert!(artist.matches_input("https://areyoudoneyet.bandcamp.com/music"));
+        assert!(artist.matches_input("areyoudoneyet.bandcamp.com"));
+        // Display name
+        assert!(artist.matches_input("Are You Done Yet"));
+        assert!(artist.matches_input("are you done yet"));
+        // Mismatches
+        assert!(!artist.matches_input("otherartist"));
+        assert!(!artist.matches_input("https://otherartist.bandcamp.com"));
+        assert!(!artist.matches_input(""));
     }
 }

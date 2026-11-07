@@ -353,6 +353,49 @@ impl Supervisor {
                         .await;
                 });
             }
+            UiToWorkerCommand::AddAndLinkArtistFolder {
+                input,
+                path,
+                auto_apply_confident,
+            } => {
+                let sync_svc = self.sync_service.clone();
+                let lib_svc = self.library_service.clone();
+                let bridge = self.bridge.clone();
+                let sync_tok = self.sync_cancel.child_token();
+                let lib_tok = self.library_cancel.child_token();
+                tokio::spawn(async move {
+                    match sync_svc.add_and_sync_artist(&input, sync_tok).await {
+                        Ok(outcome) => {
+                            lib_svc
+                                .link_artist_folder(
+                                    outcome.band_id,
+                                    path,
+                                    auto_apply_confident,
+                                    lib_tok.clone(),
+                                )
+                                .await;
+                            lib_svc.on_artist_synced(outcome.band_id, lib_tok).await;
+                        }
+                        Err(e) => {
+                            bridge.log(
+                                LogLevel::Error,
+                                "library",
+                                format!("Failed to add artist '{input}' for folder link: {e}"),
+                                None,
+                            );
+                            bridge.emit(WorkerToUiEvent::SyncFinished {
+                                band_id: 0,
+                                new_items: 0,
+                                updated: 0,
+                                error: Some(e.to_string()),
+                                adopted: 0,
+                                missing_local: 0,
+                                relinked: 0,
+                            });
+                        }
+                    }
+                });
+            }
             UiToWorkerCommand::UnlinkArtistFolder { band_id } => {
                 let svc = self.library_service.clone();
                 tokio::spawn(async move {

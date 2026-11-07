@@ -652,11 +652,18 @@ fn show_link_folder_modal(
                                     }
                                 });
 
-                            ui.add(
+                            let text_resp = ui.add(
                                 egui::TextEdit::singleline(&mut modal.artist_input)
                                     .hint_text("or paste Bandcamp URL / slug")
                                     .desired_width(280.0),
                             );
+                            if text_resp.changed() {
+                                modal.band_id = state
+                                    .artists
+                                    .iter()
+                                    .find(|a| a.matches_input(&modal.artist_input))
+                                    .map(|a| a.band_id);
+                            }
                         });
                     }
                     ui.end_row();
@@ -718,22 +725,11 @@ fn show_link_folder_modal(
                                 Some("Selected path is a file, not a directory.".to_string());
                         } else {
                             let target_band_id = modal.band_id.or_else(|| {
-                                let input = modal.artist_input.trim();
-                                if input.is_empty() {
-                                    None
-                                } else {
-                                    let lower = input.to_lowercase();
-                                    state
-                                        .artists
-                                        .iter()
-                                        .find(|a| {
-                                            a.url.to_lowercase().contains(&lower)
-                                                || a.slug.to_lowercase() == lower
-                                                || a.name.to_lowercase() == lower
-                                                || a.display_name().to_lowercase() == lower
-                                        })
-                                        .map(|a| a.band_id)
-                                }
+                                state
+                                    .artists
+                                    .iter()
+                                    .find(|a| a.matches_input(&modal.artist_input))
+                                    .map(|a| a.band_id)
                             });
 
                             if let Some(band_id) = target_band_id {
@@ -744,9 +740,25 @@ fn show_link_folder_modal(
                                 });
                                 keep_open = false;
                             } else {
-                                modal.error = Some(
-                                    "Please select or specify a valid tracked artist.".to_string(),
-                                );
+                                let input = modal.artist_input.trim();
+                                if !input.is_empty()
+                                    && let Ok(norm) =
+                                        bcvault_core::bandcamp::input::normalize_artist_input(input)
+                                {
+                                    let _ = cmd_tx.send(
+                                        UiToWorkerCommand::AddAndLinkArtistFolder {
+                                            input: norm.base_url,
+                                            path,
+                                            auto_apply_confident: modal.auto_apply_confident,
+                                        },
+                                    );
+                                    keep_open = false;
+                                } else {
+                                    modal.error = Some(
+                                        "Please select a tracked artist or enter a valid Bandcamp artist URL / slug."
+                                            .to_string(),
+                                    );
+                                }
                             }
                         }
                     }

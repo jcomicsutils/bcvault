@@ -58,6 +58,11 @@ pub enum UiToWorkerCommand {
         path: PathBuf,
         auto_apply_confident: bool,
     },
+    AddAndLinkArtistFolder {
+        input: String,
+        path: PathBuf,
+        auto_apply_confident: bool,
+    },
     UnlinkArtistFolder {
         band_id: i64,
     },
