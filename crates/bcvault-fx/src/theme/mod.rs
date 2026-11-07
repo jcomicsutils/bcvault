@@ -259,6 +259,7 @@ pub fn apply_theme(ctx: &egui::Context, theme: &FxTheme) {
 
     s.spacing.item_spacing = egui::vec2(8.0, 6.0);
     s.spacing.button_padding = egui::vec2(10.0, 5.0);
+    s.spacing.interact_size = egui::vec2(40.0, 25.0);
     s.spacing.window_margin = Margin::same(10);
     s.spacing.menu_margin = Margin::same(6);
     s.spacing.scroll.bar_width = 8.0;

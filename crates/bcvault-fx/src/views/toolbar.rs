@@ -21,6 +21,7 @@ pub fn show(
 ) {
     let th = state.active_theme;
     let mut pending_actions: Vec<FxAction> = Vec::new();
+    ui.spacing_mut().interact_size.y = 25.0;
 
     // Row 1: Nav Back/Forward | Breadcrumbs | View Mode Segmented | Card Size | Command Palette | Settings
     ui.horizontal(|ui| {
@@ -342,5 +343,96 @@ pub fn show(
 
     for act in pending_actions {
         state.dispatch(act, core_tx, fx_tx, now_s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolbar_controls_are_vertically_aligned() {
+        let ctx = egui::Context::default();
+        crate::theme::apply_theme(&ctx, &crate::theme::FxTheme::PAPER);
+        let mut state = FxState::new();
+        state.view_mode = ViewMode::Wall;
+
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel::<UiToWorkerCommand>();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel::<FxCommand>();
+
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 860.0))),
+            ..Default::default()
+        };
+
+        let full_output = ctx.run(raw, |ctx| {
+            egui::TopBottomPanel::top("fx_top_toolbar")
+                .exact_height(64.0)
+                .show(ctx, |ui| {
+                    show(ui, &mut state, &core_tx, &fx_tx, 0.0);
+                });
+        });
+
+        let mut rects = Vec::new();
+        let mut texts = Vec::new();
+        for shape in full_output.shapes {
+            match shape {
+                egui::epaint::ClippedShape {
+                    shape: egui::epaint::Shape::Rect(r),
+                    ..
+                } => {
+                    rects.push(r.rect);
+                }
+                egui::epaint::ClippedShape {
+                    shape: egui::epaint::Shape::Text(t),
+                    ..
+                } => {
+                    texts.push((t.galley.text().to_string(), t.pos));
+                }
+                _ => {}
+            }
+        }
+
+        let button_rect = |label: &str| -> Rect {
+            let (_, pos) = texts
+                .iter()
+                .find(|(txt, _)| txt == label)
+                .unwrap_or_else(|| panic!("text {label} not found"));
+            *rects
+                .iter()
+                .find(|r| r.contains(*pos))
+                .unwrap_or_else(|| panic!("rect enclosing {label} at {pos:?} not found"))
+        };
+
+        let r_wall = button_rect("Wall");
+        let r_grp = button_rect("No grouping");
+        let r_sort = button_rect("Sort: Released");
+        let r_dir = button_rect("↓");
+
+        // Row 1 buttons and ComboBoxes share identical top and bottom coordinates
+        assert_eq!(r_grp.min.y, r_wall.min.y, "No grouping top misaligned");
+        assert_eq!(r_grp.max.y, r_wall.max.y, "No grouping bottom misaligned");
+        assert_eq!(r_sort.min.y, r_wall.min.y, "Sort dropdown top misaligned");
+        assert_eq!(
+            r_sort.max.y, r_wall.max.y,
+            "Sort dropdown bottom misaligned"
+        );
+        assert_eq!(r_dir.min.y, r_wall.min.y, "Sort dir arrow top misaligned");
+        assert_eq!(
+            r_dir.max.y, r_wall.max.y,
+            "Sort dir arrow bottom misaligned"
+        );
+
+        // Row 2 Download button and Format ComboBox share identical top and bottom coordinates
+        let r_dl = button_rect("Download");
+        let r_fmt = button_rect("FLAC");
+        assert_eq!(
+            r_fmt.min.y, r_dl.min.y,
+            "Format combo top misaligned with Download button"
+        );
+        assert_eq!(
+            r_fmt.max.y, r_dl.max.y,
+            "Format combo bottom misaligned with Download button"
+        );
     }
 }
