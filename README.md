@@ -1,59 +1,206 @@
 # bcvault
 
-A desktop application for tracking and downloading free and Name-Your-Price (NYP) Bandcamp discographies, built with Rust 2024, `eframe`/`egui` (zero-radius dark theme), `tokio`, `reqwest`, and `rusqlite` (WAL mode).
+<div align="center">
 
-## Features
+[![GitHub Release](https://img.shields.io/github/v/release/jcomicsutils/bcvault?style=flat-square)](https://github.com/jcomicsutils/bcvault/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/jcomicsutils/bcvault/ci.yml?style=flat-square&label=CI)](https://github.com/jcomicsutils/bcvault/actions/workflows/ci.yml)
+[![Rust 2024](https://img.shields.io/badge/rust-2024%20(MSRV%201.89)-orange.svg?style=flat-square)](https://www.rust-lang.org)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg?style=flat-square)](https://github.com/jcomicsutils/bcvault/releases)
 
-- **Discography Tracking & Classification**: Resolves artist slugs, Bandcamp URLs, and custom domains; parses both initial `/music` grids and `data-client-items` overflow lists; classifies every release as `FREE`, `NYP`, `EMAIL`, `PAID`, or `UNKNOWN`.
-- **Smart Incremental Sync**:
-  - *Incremental*: Fetches only newly discovered or previously interrupted (`unknown`) releases.
-  - *Check downloaded*: Re-inspects downloaded releases to flag bonus tracks (`+TRACKS`) or remote modifications (`MOD`).
-  - *Full refresh*: Re-fetches metadata for the entire discography.
-- **Polite Traffic Gate (`BandcampGate`)**: All HTTP traffic passes through a single rate-limiting gate with configurable request delays, random jitter, per-artist concurrency limits, `Retry-After` handling, and exponential 429/503 cooldowns.
-- **Shared Quota Guard**: Tracks rolling 30-day downloads per artist locally (`150` soft warning / `200` hard cap default) and immediately halts an artist's queue for 30 minutes if Bandcamp's API reports monthly free-download exhaustion.
-- **Email-Gated Redeem Flow**: Never attempts to bypass email gates or paid releases. Provides one-click browser launch and a Redeem URL modal for `https://*.bandcamp.com/download` links.
-- **Zero-Radius UI**: Strict square-cornered (`CornerRadius::ZERO`) dark interface with virtualized scrolling for 100k+ release rows and painter-drawn glyphs.
+**A high-performance Bandcamp vault archiver and discography manager for free and Name-Your-Price releases.**  
+
+</div>
+
+> [!WARNING]
+> This is a personal project developed entirely with LLMs. Run at your own risk and do not trust that it does what it says it does.
+
+---
+
+## Releases
+
+Pre-compiled release archives are available on the [GitHub Releases](https://github.com/jcomicsutils/bcvault/releases) page for every tagged release:
+
+- **Linux (x86_64)**: `bcvault-linux-x86_64.tar.gz` (contains both `bcvault` and `bcvault-fx`)
+- **Windows (x86_64)**: `bcvault-windows-x86_64.zip` (contains both `bcvault.exe` and `bcvault-fx.exe`)
+
+---
+
+## Key Features
+
+### Discography Tracking and Classification
+- **Universal Resolver**: Ingests artist slugs (`artist-slug`), full Bandcamp URLs (`https://artist-slug.bandcamp.com`), and custom artist domains (`https://custom-domain.example.com`).
+- **Comprehensive Scraper**: Parses both initial `/music` release grids and dynamic `data-client-items` overflow batches.
+- **Release Classification**:
+  - `FREE`: Direct download available without payment or email requirement.
+  - `NYP` (Name-Your-Price): Free download eligible via zero-dollar checkout.
+  - `EMAIL`: Free download gated behind an email submission.
+  - `PAID`: Fixed-price commercial releases (flagged, never scraped or bypassed).
+  - `UNKNOWN`: Unresolved release awaiting metadata inspection.
+
+### Smart Incremental Synchronization
+- **Incremental Sync**: Only queries newly discovered releases or previously interrupted catalog items.
+- **Check Downloaded**: Re-inspects existing downloaded releases to detect newly appended bonus tracks (`+TRACKS`) or remote modifications (`MOD`).
+- **Full Refresh**: Force-updates the complete discography metadata while preserving local download history and custom tags.
+
+### Polite Scraping and Traffic Guard
+- **`BandcampGate` Pacing**: Centralized token-bucket rate limiter with configurable delays, random jitter, and per-artist concurrency limits.
+- **Cooldown and Retry Enforcement**: Respects HTTP `429 Too Many Requests`, `503 Service Unavailable`, and `Retry-After` headers with exponential backoff.
+- **Rolling Quota Protection**: Tracks rolling 30-day downloads per artist locally (default: `150` soft warning / `200` hard cap) and halts queues if Bandcamp reports free monthly download exhaustion.
+- **Ethical Email Gate Handling**: Never attempts to spoof or bypass email verification or payment barriers. Provides direct browser redirection and a one-click **Redeem URL** intake dialog.
+
+### Design
+- **Adaptive Dynamic Themes**: OKLab contrast-safe color generation across four built-in themes:
+  - **Carbon**: Deep neutral slate and high-tech cyan/mint accents.
+  - **Paper**: High-contrast editorial ink on warm newsprint.
+  - **Terminal**: Monochromatic amber and green phosphor CRT glow.
+  - **Vapor**: Twilight lavender with neon synthwave contrast.
+
+---
 
 ## Workspace Crates
 
-- `crates/bcvault-core`: Shared sync, classification, download, `BandcampGate`, and SQLite WAL engine.
-- `crates/bcvault`: Classic zero-radius table UI.
-- `crates/bcvault-fx`: Eye-Candy Edition (`bcvault-fx`) — virtualized Cover Wall, FLIP animations, spring physics (`1/240s` fixed sub-steps), OKLab palette extraction & adaptive themes (`Carbon`, `Paper`, `Terminal`, `Vapor`), lazy slide-over Detail Drawer, fuzzy Command Palette (`Ctrl+K`), Artists banners, and Stats visualizations (squarified treemap, 53×7 heat-calendar, rolling odometer counters), backed by a read-only attached sidecar database (`fx.sqlite`).
+| Crate | Path | Description |
+| :--- | :--- | :--- |
+| **`bcvault-core`** | [`crates/bcvault-core`](crates/bcvault-core) | Headless scraping engine, `BandcampGate` rate-limiting, release classification, audio format negotiation, stream extraction, and SQLite WAL database repository. |
+| **`bcvault-fx`** | [`crates/bcvault-fx`](crates/bcvault-fx) | **Eye-Candy Edition GUI**: Virtualized Cover Wall, spring physics, dynamic OKLab theming, slide-over Detail Drawer, fuzzy Command Palette (`Ctrl+K`), Treemap and Calendar stats visualizations, and sidecar database. |
+| **`bcvault`** | [`crates/bcvault`](crates/bcvault) | **Classic Desktop GUI**: High-density spreadsheet table interface with virtualized rendering for 100,000+ release collections. |
+
+---
+
+## Installation and Building
+
+### Prerequisites
+
+A modern Rust toolchain is required (MSRV **1.89+** / Edition **2024**).
+
+#### Arch Linux
+```bash
+sudo pacman -Syu --needed base-devel git rust mesa \
+  libx11 libxcursor libxrandr libxi libxinerama wayland libxkbcommon
+```
+
+#### Ubuntu / Debian
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential git libx11-dev libxcursor-dev \
+  libxrandr-dev libxi-dev libxinerama-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+```
+
+#### Fedora
+```bash
+sudo dnf install -y gcc gcc-c++ git mesa-libGL-devel \
+  libX11-devel libXcursor-devel libXrandr-devel libXi-devel libXinerama-devel wayland-devel libxkbcommon-devel
+```
+
+#### Windows
+Install Rust using [rustup.rs](https://rustup.rs/). The default MSVC toolchain (`x86_64-pc-windows-msvc`) and C++ build tools are supported out-of-the-box.
+
+---
+
+### Building from Source
+
+```bash
+git clone https://github.com/jcomicsutils/bcvault.git
+cd bcvault
+cargo build --workspace --release
+```
+
+Compiled binaries will be located in `target/release/`:
+- `target/release/bcvault-fx` (or `bcvault-fx.exe` on Windows)
+- `target/release/bcvault` (or `bcvault.exe` on Windows)
+
+---
 
 ## Usage
 
+### 1. Eye-Candy Edition (`bcvault-fx`)
+
 ```bash
-# Run the classic desktop GUI
-cargo run --release -p bcvault
-
-# Run the bcvault-fx Eye-Candy Edition GUI
 cargo run --release -p bcvault-fx
+```
+Includes the virtualized Cover Wall, FLIP layout animations, interactive OKLab color filtering, artist banners, and library statistics.
 
-# Run the headless CLI smoke harness
+### 2. Classic Table GUI (`bcvault`)
+
+```bash
+cargo run --release -p bcvault
+```
+High-density, low-latency table view optimized for rapidly triaging and batch-downloading thousands of items.
+
+### 3. Headless CLI (`bcvault-core`)
+
+Run operations from the terminal without graphical dependencies:
+
+```bash
+# Add a new artist to the vault
 cargo run -p bcvault-core --example headless -- add <artist_slug_or_url>
-cargo run -p bcvault-core --example headless -- download <band_id> [flac|mp3-320|...] [out_dir]
 
-# Run the 100k-row headless wall scroll benchmark
-cargo run --release -p bcvault-fx --example fx_bench -- --check
+# Sync an artist discography
+cargo run -p bcvault-core --example headless -- sync <band_id>
 
-# Run formatting, clippy, unit/integration tests, and zero-radius UI checks
-./scripts/check.sh
+# Batch-download eligible releases (formats: flac, mp3-320, mp3-v0, aac-hi, vorbis, alac, wav, aiff-lossless)
+cargo run -p bcvault-core --example headless -- download <band_id> flac ./my_music
 ```
 
-## Keyboard Shortcuts (`bcvault-fx`)
+### 4. High-Load Benchmark
 
-- `Ctrl+K` / `Ctrl+P`: Open Command Palette (`@` artists, `#` filters, `>` commands)
-- `/` or `Ctrl+F`: Focus toolbar search box
-- `1` / `2` / `3` / `4`: Switch view (`Wall`, `Table`, `Artists`, `Stats`)
-- `[` / `]`: Decrease / increase Cover Wall card size (`S`, `M`, `L`, `XL`)
-- `Ctrl+B`: Collapse / expand left sidebar
-- `Alt+Left` / `Alt+Right`: Navigate view history back / forward
-- `Arrow Keys`: Move focus on the Cover Wall (or step prev/next in Detail Drawer)
-- `Space`: Toggle selection on focused release
-- `Enter`: Open/close Detail Drawer (`Ctrl+Enter`: enqueue selected for download)
-- `Esc`: Close Command Palette, Detail Drawer, or clear selection
-- `F3`: Toggle diagnostics overlay (frame time, active springs, texture LRU RAM, event drain)
+Benchmark the virtualized wall renderer under a synthetic 100,000-release library:
+
+```bash
+cargo run --release -p bcvault-fx --example fx_bench -- --check
+```
+
+---
+
+## Keyboard Shortcuts
+
+### Global Navigation (`bcvault-fx`)
+
+| Shortcut | Action |
+| :--- | :--- |
+| <kbd>Ctrl</kbd> + <kbd>K</kbd> / <kbd>Ctrl</kbd> + <kbd>P</kbd> | Open **Command Palette** (`@` artists, `#` filters, `>` commands) |
+| <kbd>/</kbd> or <kbd>Ctrl</kbd> + <kbd>F</kbd> | Focus toolbar release search input |
+| <kbd>Ctrl</kbd> + <kbd>B</kbd> | Toggle left sidebar visibility |
+| <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> / <kbd>4</kbd> | Switch primary view (**Wall**, **Table**, **Artists**, **Stats**) |
+| <kbd>Alt</kbd> + <kbd>Left</kbd> | Navigate view history backward |
+| <kbd>Alt</kbd> + <kbd>Right</kbd> | Navigate view history forward |
+| <kbd>F3</kbd> | Toggle live performance diagnostics overlay |
+| <kbd>Esc</kbd> | Close active drawer, palette, modal, or clear selection |
+
+### Cover Wall Navigation
+
+| Shortcut | Action |
+| :--- | :--- |
+| <kbd>Arrow Keys</kbd> | Move card focus across the cover grid |
+| <kbd>[</kbd> / <kbd>]</kbd> | Decrease / increase cover card size (`S`, `M`, `L`, `XL`) |
+| <kbd>Space</kbd> | Toggle selection checkbox on focused release |
+| <kbd>Enter</kbd> | Slide open the **Detail Drawer** for focused release |
+| <kbd>Ctrl</kbd> + <kbd>Enter</kbd> | Immediately enqueue selected releases for download |
+
+---
+
+## Architecture and Storage
+
+### Storage Layout
+
+`bcvault` follows standard OS platform directory conventions via the `directories` crate:
+
+| Platform | Database and Logs (`data_dir`) | Thumbnails and Cache (`cache_dir`) |
+| :--- | :--- | :--- |
+| **Linux** | `~/.local/share/bcvault/` | `~/.cache/bcvault/covers/` |
+| **Windows** | `%APPDATA%\bcvault\bcvault\data\` | `%LOCALAPPDATA%\bcvault\bcvault\cache\covers\` |
+
+The storage location can be overridden at runtime by setting the `BCVAULT_DATA_DIR=/custom/path` environment variable or launching with `--data-dir=/custom/path`.
+
+### Database Files
+
+- **`bcvault.db`**: Primary transactional SQLite store operating in WAL mode. Contains normalized artist records, release catalogs, tracklists, download history, and quota ledgers.
+- **`fx.sqlite`**: Attached sidecar database tailored for fast, zero-allocation UI reads, caching OKLab dominant hues, 8x8 RGB blur hashes (`tiny8`), cover dimensions, and aggregated stats.
+
+---
 
 ## License
 
-GPL-3.0-or-later
+Distributed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`).  
+See [LICENSE](LICENSE) for full details.

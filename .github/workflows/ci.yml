@@ -1,0 +1,212 @@
+name: CI & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test-archlinux:
+    name: Arch Linux (Test)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install system packages
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -Syu --noconfirm --needed \
+            base-devel \
+            git \
+            curl \
+            mesa \
+            libx11 \
+            libxcursor \
+            libxrandr \
+            libxi \
+            libxinerama \
+            wayland \
+            libxkbcommon
+      - name: Install stable Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run workspace tests
+        run: |
+          source "$HOME/.cargo/env"
+          cargo test --workspace
+
+  test-fedora:
+    name: Fedora Linux (Test)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install system packages
+        run: |
+          dnf install -y \
+            gcc \
+            gcc-c++ \
+            git \
+            curl \
+            mesa-libGL-devel \
+            libX11-devel \
+            libXcursor-devel \
+            libXrandr-devel \
+            libXi-devel \
+            libXinerama-devel \
+            wayland-devel \
+            libxkbcommon-devel
+      - name: Install stable Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run workspace tests
+        run: |
+          source "$HOME/.cargo/env"
+          cargo test --workspace
+
+  build-linux:
+    name: Linux x86_64 (Build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run test suite and checks
+        run: ./scripts/check.sh
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Package Linux archive
+        run: |
+          mkdir -p dist
+          tar -czvf dist/bcvault-linux-x86_64.tar.gz -C target/release bcvault bcvault-fx
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bcvault-linux-x86_64
+          path: dist/bcvault-linux-x86_64.tar.gz
+
+  build-windows:
+    name: Windows x86_64 (Build)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Package Windows archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path target/release/bcvault.exe, target/release/bcvault-fx.exe -DestinationPath dist/bcvault-windows-x86_64.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bcvault-windows-x86_64
+          path: dist/bcvault-windows-x86_64.zip
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-linux, build-windows, test-archlinux, test-fedora]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Linux release archive
+        uses: actions/download-artifact@v4
+        with:
+          name: bcvault-linux-x86_64
+          path: dist
+
+      - name: Download Windows release archive
+        uses: actions/download-artifact@v4
+        with:
+          name: bcvault-windows-x86_64
+          path: dist
+
+      - name: Generate release changelog
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
+          echo "Previous tag: ${PREV_TAG}"
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"* %s (%h)" "${PREV_TAG}..${TAG}")
+          else
+            COMMITS=$(git log --pretty=format:"* %s (%h)" -n 50 "${TAG}")
+          fi
+          {
+            echo "CHANGELOG<<EOF"
+            echo "Release ${TAG}"
+            echo ""
+            echo "### Changes"
+            echo "${COMMITS}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.changelog.outputs.CHANGELOG }}
+          files: |
+            dist/bcvault-linux-x86_64.tar.gz
+            dist/bcvault-windows-x86_64.zip
