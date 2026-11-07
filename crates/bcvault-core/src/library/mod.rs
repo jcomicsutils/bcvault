@@ -1,4 +1,5 @@
 pub mod link;
+pub mod matcher;
 pub mod scan;
 pub mod tags;
 pub mod textmatch;
@@ -7,6 +8,7 @@ pub use link::{
     FolderLinkError, FolderWarning, ValidatedLink, check_looks_like_library, normalize_path_key,
     probe_folder, validate_folder_link,
 };
+pub use matcher::{Score, Signal, normalize_bandcamp_url, score_candidate, score_release};
 pub use scan::{
     AUDIO_EXTENSIONS, AlbumCandidate, CandidateKind, ScanReport, is_audio_file,
     is_disc_folder_name, normalize_candidate_path_key, scan_linked_folder,

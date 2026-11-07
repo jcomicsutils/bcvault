@@ -23,6 +23,7 @@ directories = { workspace = true }
 zip = { workspace = true }
 lofty = { workspace = true }
 dunce = { workspace = true }
+strsim = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
