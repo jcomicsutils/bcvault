@@ -552,3 +552,85 @@ pub fn query_releases(conn: &Connection, query: &ReleaseQuery) -> Result<Vec<Rel
     }
     Ok(out)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::db::migrations;
+
+    #[test]
+    fn archived_and_missing_filters_and_stats() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations::run(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'art1', 'Artist 1', 'https://art1.bandcamp.com')",
+            [],
+        )
+        .unwrap();
+
+        // Release 1: present, downloaded = 1
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, local_status)
+             VALUES ('album', 1, 1, 'Alb 1', 'Artist 1', 'https://art1.bandcamp.com/album/1', 'free', 1, 'present')",
+            [],
+        )
+        .unwrap();
+
+        // Release 2: archived, downloaded = 1
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, local_status)
+             VALUES ('album', 2, 1, 'Alb 2', 'Artist 1', 'https://art1.bandcamp.com/album/2', 'nyp', 1, 'archived')",
+            [],
+        )
+        .unwrap();
+
+        // Release 3: missing, downloaded = 1
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, local_status)
+             VALUES ('album', 3, 1, 'Alb 3', 'Artist 1', 'https://art1.bandcamp.com/album/3', 'free', 1, 'missing')",
+            [],
+        )
+        .unwrap();
+
+        // Release 4: not downloaded
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, local_status)
+             VALUES ('album', 4, 1, 'Alb 4', 'Artist 1', 'https://art1.bandcamp.com/album/4', 'paid', 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Test stats
+        let stats = artist_stats_for_one(&conn, 1).unwrap();
+        assert_eq!(stats.total, 4);
+        assert_eq!(stats.downloaded, 3); // 1 present + 1 archived + 1 missing
+        assert_eq!(stats.archived, 1);
+        assert_eq!(stats.missing_files, 1);
+
+        let all_stats = all_artist_stats(&conn).unwrap();
+        assert_eq!(all_stats.get(&1), Some(&stats));
+
+        // Test Archived filter
+        let q_arch = ReleaseQuery {
+            band_id: Some(1),
+            filter: ReleaseFilter::Archived,
+            ..Default::default()
+        };
+        let arch_rows = query_releases(&conn, &q_arch).unwrap();
+        assert_eq!(arch_rows.len(), 1);
+        assert_eq!(arch_rows[0].key.id, 2);
+        assert_eq!(arch_rows[0].local_status, Some(LocalStatus::Archived));
+
+        // Test MissingFiles filter
+        let q_miss = ReleaseQuery {
+            band_id: Some(1),
+            filter: ReleaseFilter::MissingFiles,
+            ..Default::default()
+        };
+        let miss_rows = query_releases(&conn, &q_miss).unwrap();
+        assert_eq!(miss_rows.len(), 1);
+        assert_eq!(miss_rows[0].key.id, 3);
+        assert_eq!(miss_rows[0].local_status, Some(LocalStatus::Missing));
+    }
+}

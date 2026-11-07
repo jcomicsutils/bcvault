@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## Current
-Task: L0.5  ·  Branch: feature/library-sync  ·  Started: 2026-11-07
+Task: L0.6  ·  Branch: feature/library-sync  ·  Started: 2026-11-07
 
 ## Done
 - B0.1 to B5.x: base engine (released v0.1.0)
@@ -10,6 +10,7 @@ Task: L0.5  ·  Branch: feature/library-sync  ·  Started: 2026-11-07
 - L0.2: add library statuses, settings fields and filters
 - L0.3: add artist folder links with overlap validation
 - L0.4: add library repository with batches, events and undo
+- L0.5: add archived and missing filters and stats
 
 ## Milestones
 - [x] Base engine (Phase 0 - 5)
