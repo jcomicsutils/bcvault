@@ -10,10 +10,12 @@ use crate::library::link::probe_folder;
 use crate::library::matcher::assign_matches;
 use crate::library::scan::scan_linked_folder;
 use crate::library::service::ReconcileReport;
-use crate::library::verify::{VerifyResult, is_mass_missing, verify_single_release};
+use crate::library::verify::{
+    VerifyResult, find_relink_candidates, is_mass_missing, verify_single_release,
+};
 use crate::types::{
     BatchSummary, FolderState, ItemKey, LibraryPhase, LocalStatus, LogLevel, MatchDecision,
-    MissingItem, ReleaseQuery, SyncScope,
+    MissingCandidate, MissingItem, ReleaseQuery, ReleaseRow, SyncScope,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -436,18 +438,152 @@ impl LibraryService {
             );
         }
 
-        // 8. If missing releases found, create a batch and emit MissingFound
-        let missing_count = missing_rels.len();
-        if !missing_rels.is_empty() {
-            let missing_items: Vec<MissingItem> = missing_rels
+        // 8. Auto-relink moved albums (if enabled, artist has a link, and not mass_missing)
+        let mut still_missing: Vec<ReleaseRow> = Vec::new();
+        let mut best_candidates: std::collections::HashMap<ItemKey, MissingCandidate> =
+            std::collections::HashMap::new();
+        let mut relinked_count = 0;
+
+        if !mass_missing && st.auto_relink && !missing_rels.is_empty() {
+            let mut by_band: std::collections::HashMap<i64, Vec<ReleaseRow>> =
+                std::collections::HashMap::new();
+            for r in missing_rels {
+                by_band.entry(r.band_id).or_default().push(r);
+            }
+
+            for (band_id, band_rels) in by_band {
+                let folder_opt = pool
+                    .reader
+                    .call(move |c| lib_repo::get_folder(c, band_id))
+                    .await
+                    .unwrap_or(None);
+
+                let Some(folder) = folder_opt else {
+                    // Artists without a link skip auto-relink
+                    still_missing.extend(band_rels);
+                    continue;
+                };
+
+                let state = probe_folder(&folder.path);
+                if state != FolderState::Ok {
+                    still_missing.extend(band_rels);
+                    continue;
+                }
+
+                // Rescan artist's linked folder
+                let folder_path = folder.path.clone();
+                let cancel_scan = cancel.clone();
+                let scan_res = tokio::task::spawn_blocking(move || {
+                    scan_linked_folder(&folder_path, &cancel_scan)
+                })
+                .await;
+
+                let scan_report = match scan_res {
+                    Ok(Ok(r)) => r,
+                    _ => {
+                        still_missing.extend(band_rels);
+                        continue;
+                    }
+                };
+
+                // Query existing present releases & ignored local keys
+                let excluded_res = pool
+                    .reader
+                    .call(move |c| {
+                        let q = ReleaseQuery {
+                            band_id: Some(band_id),
+                            ..Default::default()
+                        };
+                        let rels = releases::query_releases(c, &q)?;
+                        let mut excluded = std::collections::HashSet::new();
+                        for r in rels {
+                            if r.downloaded
+                                && r.local_status == Some(LocalStatus::Present)
+                                && let Some(p) = &r.local_path
+                            {
+                                excluded.insert(crate::library::link::normalize_path_key(p));
+                            }
+                        }
+                        let ign = lib_repo::get_ignored_local(c, band_id)?;
+                        excluded.extend(ign);
+                        Ok::<_, DbError>(excluded)
+                    })
+                    .await;
+
+                let excluded_keys = excluded_res.unwrap_or_default();
+
+                let outcome = find_relink_candidates(
+                    &band_rels,
+                    &scan_report.candidates,
+                    &excluded_keys,
+                    st.auto_match_min,
+                );
+
+                if !outcome.relinked.is_empty() {
+                    let relink_props = outcome.relinked;
+                    let relink_res = pool
+                        .writer
+                        .call(move |c| {
+                            let b_id =
+                                lib_repo::create_batch(c, "relink", &BatchSummary::default())?;
+                            let mut updated = Vec::new();
+                            for prop in relink_props {
+                                lib_repo::relink(c, prop.key, &prop.path, b_id)?;
+                                if let Some(r) = releases::get_release(c, prop.key)? {
+                                    updated.push(r);
+                                }
+                            }
+                            Ok::<_, DbError>(updated)
+                        })
+                        .await;
+
+                    if let Ok(updated_releases) = relink_res {
+                        relinked_count += updated_releases.len();
+                        for r in updated_releases {
+                            bridge.log(
+                                LogLevel::Info,
+                                "library",
+                                format!(
+                                    "Auto-relinked '{}' to '{}'",
+                                    r.title,
+                                    r.local_path
+                                        .as_ref()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_default()
+                                ),
+                                None,
+                            );
+                            bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(r)));
+                        }
+                    }
+                }
+
+                for (unresolved_rel, best_cand_opt) in outcome.unresolved {
+                    if let Some(cand) = best_cand_opt {
+                        best_candidates.insert(unresolved_rel.key, cand);
+                    }
+                    still_missing.push(unresolved_rel);
+                }
+            }
+        } else {
+            still_missing = missing_rels;
+        }
+
+        // 9. If missing releases remain, create a batch and emit MissingFound
+        let missing_count = still_missing.len();
+        if !still_missing.is_empty() {
+            let missing_items: Vec<MissingItem> = still_missing
                 .into_iter()
-                .map(|r| MissingItem {
-                    key: r.key,
-                    band_id: r.band_id,
-                    artist_name: r.artist_name,
-                    title: r.title,
-                    last_known_path: r.local_path,
-                    best_candidate: None,
+                .map(|r| {
+                    let best = best_candidates.remove(&r.key);
+                    MissingItem {
+                        key: r.key,
+                        band_id: r.band_id,
+                        artist_name: r.artist_name,
+                        title: r.title,
+                        last_known_path: r.local_path,
+                        best_candidate: best,
+                    }
                 })
                 .collect();
 
@@ -479,8 +615,9 @@ impl LibraryService {
             LogLevel::Info,
             "library",
             format!(
-                "Verification finished: {} present, {} missing, {} unknown",
-                present_keys.len(),
+                "Verification finished: {} present ({} relinked), {} missing, {} unknown",
+                present_keys.len() + relinked_count,
+                relinked_count,
                 missing_count,
                 unknown_rels.len()
             ),
@@ -906,7 +1043,7 @@ mod tests {
     use crate::db::migrations;
     use crate::db::repo::artists::{self, UpsertArtist};
     use crate::db::repo::releases::DiscoveredRelease;
-    use crate::types::{ItemKey, ItemType};
+    use crate::types::{ItemKey, ItemType, Settings};
 
     #[tokio::test]
     async fn test_library_service_link_match_and_unlink() {
@@ -1716,5 +1853,286 @@ mod tests {
 
         assert_eq!(missing_found.0.len(), 25);
         assert!(missing_found.1); // mass_missing MUST be true!
+    }
+
+    #[tokio::test]
+    async fn test_library_service_verify_relinks_moved_album() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("relink_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 444;
+        let key = ItemKey::new(ItemType::Album, 401);
+
+        let artist_dir = dir.path().join("Artist 444");
+        let original_path = artist_dir.join("Old Album Folder");
+        let moved_path = artist_dir.join("Moved Album Folder");
+        fs::create_dir_all(&moved_path).unwrap();
+        fs::write(moved_path.join("01.mp3"), b"audio").unwrap();
+
+        let out_dir = dir.path().join("Downloads");
+        let a_dir = artist_dir.clone();
+        let p_old = original_path.clone();
+
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-444",
+                        name: "Artist 444",
+                        url: "https://artist444.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Moved Album Folder",
+                    artist_name: "Artist 444",
+                    url: "https://artist444.bandcamp.com/album/moved",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &p_old,
+                    Some(crate::types::AudioFormat::Mp3_320),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+
+                lib_repo::link_folder(c, band_id, &a_dir, &out_dir)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::Selected(vec![band_id]), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Release should be updated to present with new path
+        let row = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.local_status, Some(LocalStatus::Present));
+        assert_eq!(row.local_path, Some(moved_path));
+
+        // MissingFound should NOT be emitted because it was successfully relinked
+        let has_missing = events
+            .iter()
+            .any(|e| matches!(e, WorkerToUiEvent::MissingFound { .. }));
+        assert!(!has_missing);
+    }
+
+    #[tokio::test]
+    async fn test_library_service_verify_relink_two_identical_candidates_asks_instead() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("relink_two_identical.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 555;
+        let key = ItemKey::new(ItemType::Album, 501);
+
+        let artist_dir = dir.path().join("Artist 555");
+        let original_path = artist_dir.join("Album");
+        // Two identical candidate folders
+        let cand1 = artist_dir.join("Album Copy 1");
+        let cand2 = artist_dir.join("Album Copy 2");
+        fs::create_dir_all(&cand1).unwrap();
+        fs::write(cand1.join("01.mp3"), b"audio").unwrap();
+        fs::create_dir_all(&cand2).unwrap();
+        fs::write(cand2.join("01.mp3"), b"audio").unwrap();
+
+        let out_dir = dir.path().join("Downloads");
+        let a_dir = artist_dir.clone();
+        let p_old = original_path.clone();
+
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-555",
+                        name: "Artist 555",
+                        url: "https://artist555.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Album",
+                    artist_name: "Artist 555",
+                    url: "https://artist555.bandcamp.com/album/album",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &p_old,
+                    Some(crate::types::AudioFormat::Mp3_320),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+
+                lib_repo::link_folder(c, band_id, &a_dir, &out_dir)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::Selected(vec![band_id]), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Two identical candidates -> asks instead -> MissingFound emitted
+        let missing_found = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::MissingFound { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("should emit MissingFound for ambiguous match");
+
+        assert_eq!(missing_found.len(), 1);
+        assert_eq!(missing_found[0].key, key);
+        assert!(missing_found[0].best_candidate.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_library_service_verify_relink_unlinked_artist_skips() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("unlinked_skips.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 666;
+        let key = ItemKey::new(ItemType::Album, 601);
+
+        let out_dir = dir.path().join("downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let deleted_path = dir.path().join("Unlinked Artist").join("Deleted Album");
+
+        let custom_out_dir = out_dir.clone();
+        pool.writer
+            .call(move |c| {
+                let s = Settings {
+                    out_dir: custom_out_dir,
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &s)?;
+
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-666",
+                        name: "Artist 666",
+                        url: "https://artist666.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Deleted Album",
+                    artist_name: "Artist 666",
+                    url: "https://artist666.bandcamp.com/album/deleted",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &deleted_path,
+                    Some(crate::types::AudioFormat::Mp3_320),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                // Artist has NO linked folder!
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::Selected(vec![band_id]), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Unlinked artist skips relink -> emits MissingFound with best_candidate: None
+        let missing_found = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::MissingFound { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("should emit MissingFound for unlinked artist");
+
+        assert_eq!(missing_found.len(), 1);
+        assert_eq!(missing_found[0].key, key);
+        assert_eq!(missing_found[0].best_candidate, None);
     }
 }

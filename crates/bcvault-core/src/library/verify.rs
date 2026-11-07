@@ -1,7 +1,9 @@
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use crate::library::scan::is_audio_file;
-use crate::types::{ItemKey, LocalStatus, Origin, ReleaseRow};
+use crate::library::matcher::score_release;
+use crate::library::scan::{AlbumCandidate, is_audio_file};
+use crate::types::{AudioFormat, ItemKey, LocalStatus, MissingCandidate, Origin, ReleaseRow};
 
 /// Verification status for a downloaded release on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +111,150 @@ pub fn is_mass_missing(missing_count: usize, total_checked: usize) -> bool {
         return false;
     }
     (missing_count as f32 / total_checked as f32) > 0.30
+}
+
+/// Relink proposal for a missing release that confidently matches a local folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelinkProposal {
+    pub key: ItemKey,
+    pub path: PathBuf,
+    pub score: f32,
+    pub format: Option<AudioFormat>,
+}
+
+/// Outcome of searching for relink candidates for missing releases.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelinkOutcome {
+    /// Confident, unique 1-to-1 relink proposals.
+    pub relinked: Vec<RelinkProposal>,
+    /// Releases that could not be auto-relinked, along with their best candidate (if any).
+    pub unresolved: Vec<(ReleaseRow, Option<MissingCandidate>)>,
+}
+
+/// Evaluates candidates in an artist's linked folder to find confident, unique relink proposals
+/// for missing releases.
+///
+/// Rules:
+/// - Candidates already linked to other releases (or ignored) are excluded.
+/// - A candidate qualifies if `score >= auto_match_min` and beats runner-up by >= 0.05.
+/// - If two or more identical/near-identical candidates compete for a release, it is NOT auto-relinked (asks instead).
+/// - If two releases compete for the same candidate, neither is auto-relinked.
+pub fn find_relink_candidates(
+    missing_releases: &[ReleaseRow],
+    candidates: &[AlbumCandidate],
+    excluded_path_keys: &HashSet<String>,
+    auto_match_min: f32,
+) -> RelinkOutcome {
+    let available_candidates: Vec<&AlbumCandidate> = candidates
+        .iter()
+        .filter(|c| !excluded_path_keys.contains(&c.path_key))
+        .collect();
+
+    if available_candidates.is_empty() {
+        return RelinkOutcome {
+            relinked: Vec::new(),
+            unresolved: missing_releases
+                .iter()
+                .cloned()
+                .map(|r| (r, None))
+                .collect(),
+        };
+    }
+
+    struct Scored<'a> {
+        candidate: &'a AlbumCandidate,
+        score: f32,
+    }
+
+    let mut per_release_scores: Vec<(&ReleaseRow, Vec<Scored>)> = Vec::new();
+
+    for rel in missing_releases {
+        let mut scored = Vec::new();
+        for &cand in &available_candidates {
+            let s = score_release(cand, rel);
+            scored.push(Scored {
+                candidate: cand,
+                score: s.value,
+            });
+        }
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        per_release_scores.push((rel, scored));
+    }
+
+    let mut potential_matches: Vec<(&ReleaseRow, &AlbumCandidate, f32)> = Vec::new();
+    let mut unresolved_releases: Vec<(&ReleaseRow, Option<MissingCandidate>)> = Vec::new();
+
+    for (rel, scored) in per_release_scores {
+        if scored.is_empty() {
+            unresolved_releases.push((rel, None));
+            continue;
+        }
+
+        let best = &scored[0];
+        let best_candidate_info = if best.score > 0.0 {
+            Some(MissingCandidate {
+                path: best.candidate.path.clone(),
+                score: best.score,
+            })
+        } else {
+            None
+        };
+
+        if best.score >= auto_match_min {
+            let beats_runner_up = if scored.len() > 1 {
+                (best.score - scored[1].score) >= 0.05
+            } else {
+                true
+            };
+
+            if beats_runner_up {
+                potential_matches.push((rel, best.candidate, best.score));
+            } else {
+                // Ambiguous runner-up (e.g. two identical candidates): asks instead
+                unresolved_releases.push((rel, best_candidate_info));
+            }
+        } else {
+            unresolved_releases.push((rel, best_candidate_info));
+        }
+    }
+
+    // Ensure 1-to-1 uniqueness
+    let mut candidate_claim_count: HashMap<PathBuf, usize> = HashMap::new();
+    for (_, cand, _) in &potential_matches {
+        *candidate_claim_count.entry(cand.path.clone()).or_insert(0) += 1;
+    }
+
+    let mut relinked = Vec::new();
+    for (rel, cand, score) in potential_matches {
+        if candidate_claim_count.get(&cand.path).copied().unwrap_or(0) == 1 {
+            relinked.push(RelinkProposal {
+                key: rel.key,
+                path: cand.path.clone(),
+                score,
+                format: cand.metadata.as_ref().and_then(|m| m.format_guess),
+            });
+        } else {
+            unresolved_releases.push((
+                rel,
+                Some(MissingCandidate {
+                    path: cand.path.clone(),
+                    score,
+                }),
+            ));
+        }
+    }
+
+    RelinkOutcome {
+        relinked,
+        unresolved: unresolved_releases
+            .into_iter()
+            .map(|(r, opt)| (r.clone(), opt))
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +389,82 @@ mod tests {
         assert!(is_mass_missing(20, 50));
         // 31 missing out of 100 (31%) -> true
         assert!(is_mass_missing(31, 100));
+    }
+
+    fn make_test_candidate(name: &str, path: PathBuf, track_count: usize) -> AlbumCandidate {
+        AlbumCandidate {
+            name: name.to_string(),
+            path_key: name.to_lowercase(),
+            path,
+            kind: crate::library::scan::CandidateKind::Folder,
+            track_count,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn find_relink_single_candidate_auto_relinks() {
+        let key = ItemKey::new(ItemType::Album, 10);
+        let rel = make_test_row(key, true, Some(PathBuf::from("/music/old_path")));
+        let cand = make_test_candidate("Test Album", PathBuf::from("/music/new_path"), 10);
+
+        let outcome = find_relink_candidates(&[rel], &[cand], &HashSet::new(), 0.90);
+        assert_eq!(outcome.relinked.len(), 1);
+        assert_eq!(outcome.relinked[0].key, key);
+        assert_eq!(outcome.relinked[0].path, PathBuf::from("/music/new_path"));
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn find_relink_two_identical_candidates_asks_instead() {
+        let key = ItemKey::new(ItemType::Album, 10);
+        let rel = make_test_row(key, true, Some(PathBuf::from("/music/old_path")));
+        let cand1 = make_test_candidate("Test Album", PathBuf::from("/music/path_a"), 10);
+        let mut cand2 = make_test_candidate("Test Album", PathBuf::from("/music/path_b"), 10);
+        cand2.path_key = "test_album_b".to_string();
+
+        let outcome = find_relink_candidates(&[rel], &[cand1, cand2], &HashSet::new(), 0.90);
+        assert!(outcome.relinked.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert!(outcome.unresolved[0].1.is_some());
+    }
+
+    #[test]
+    fn find_relink_below_threshold_asks_instead() {
+        let key = ItemKey::new(ItemType::Album, 10);
+        let rel = make_test_row(key, true, Some(PathBuf::from("/music/old_path")));
+        let cand = make_test_candidate("Completely Different", PathBuf::from("/music/diff"), 1);
+
+        let outcome = find_relink_candidates(&[rel], &[cand], &HashSet::new(), 0.90);
+        assert!(outcome.relinked.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+    }
+
+    #[test]
+    fn find_relink_already_linked_candidate_ignored() {
+        let key = ItemKey::new(ItemType::Album, 10);
+        let rel = make_test_row(key, true, Some(PathBuf::from("/music/old_path")));
+        let cand = make_test_candidate("Test Album", PathBuf::from("/music/new_path"), 10);
+
+        let mut excluded = HashSet::new();
+        excluded.insert("test album".to_string());
+
+        let outcome = find_relink_candidates(&[rel], &[cand], &excluded, 0.90);
+        assert!(outcome.relinked.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].1, None);
+    }
+
+    #[test]
+    fn find_relink_competing_releases_collide() {
+        let key1 = ItemKey::new(ItemType::Album, 10);
+        let key2 = ItemKey::new(ItemType::Album, 20);
+        let rel1 = make_test_row(key1, true, Some(PathBuf::from("/music/old1")));
+        let rel2 = make_test_row(key2, true, Some(PathBuf::from("/music/old2")));
+        let cand = make_test_candidate("Test Album", PathBuf::from("/music/cand"), 10);
+
+        let outcome = find_relink_candidates(&[rel1, rel2], &[cand], &HashSet::new(), 0.90);
+        assert!(outcome.relinked.is_empty());
+        assert_eq!(outcome.unresolved.len(), 2);
     }
 }
