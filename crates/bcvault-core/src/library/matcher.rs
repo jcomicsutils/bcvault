@@ -737,6 +737,7 @@ mod tests {
             local_path: None,
             local_status,
             origin: None,
+            missing_ack_at: None,
             has_remote_update: false,
             remote_update_reason: None,
         }

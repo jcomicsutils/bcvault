@@ -639,7 +639,7 @@ pub fn build_wall_query_sql(query: &FxQuery) -> (String, Vec<Value>) {
         "SELECT r.item_type, r.item_id, r.band_id, r.title, r.artist_name, r.url, r.cover_url, r.art_id,
                 r.classification, r.is_preorder, r.track_count, r.published_at, r.modified_at, r.first_seen_at,
                 r.downloaded, r.downloaded_at, r.downloaded_format, r.local_path,
-                r.has_remote_update, r.remote_update_reason, r.local_status, r.origin, c.hue, c.accent_rgb
+                r.has_remote_update, r.remote_update_reason, r.local_status, r.origin, r.missing_ack_at, c.hue, c.accent_rgb
          FROM m.releases r
          {join_kw} cover_meta c ON c.art_id = r.art_id
          {where_sql}
@@ -681,8 +681,9 @@ pub fn query_wall(conn: &Connection, query: &FxQuery) -> Result<Vec<WallRow>, Db
         let local_status = local_status_str.as_deref().and_then(LocalStatus::parse);
         let origin_str: Option<String> = r.get(21)?;
         let origin = origin_str.as_deref().and_then(Origin::parse);
-        let hue: Option<u16> = r.get(22)?;
-        let accent_int: Option<i64> = r.get(23)?;
+        let missing_ack_at: Option<Ts> = r.get(22)?;
+        let hue: Option<u16> = r.get(23)?;
+        let accent_int: Option<i64> = r.get(24)?;
         let accent = accent_int.map(|acc| {
             [
                 ((acc >> 16) & 0xFF) as u8,
@@ -711,6 +712,7 @@ pub fn query_wall(conn: &Connection, query: &FxQuery) -> Result<Vec<WallRow>, Db
                 local_path,
                 local_status,
                 origin,
+                missing_ack_at,
                 has_remote_update: has_remote_update != 0,
                 remote_update_reason,
             },

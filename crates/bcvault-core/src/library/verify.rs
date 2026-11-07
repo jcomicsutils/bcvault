@@ -68,7 +68,11 @@ pub fn check_disk_release_path(path: &Path) -> bool {
 
 /// Verifies a single release against the disk and folder health state.
 /// Returns `None` if the release should be skipped (e.g. not downloaded or unverified without a path).
-pub fn verify_single_release(rel: &ReleaseRow, is_folder_probe_ok: bool) -> Option<VerifyResult> {
+pub fn verify_single_release(
+    rel: &ReleaseRow,
+    is_folder_probe_ok: bool,
+    is_sync: bool,
+) -> Option<VerifyResult> {
     if !rel.downloaded {
         return None;
     }
@@ -101,6 +105,12 @@ pub fn verify_single_release(rel: &ReleaseRow, is_folder_probe_ok: bool) -> Opti
     if check_disk_release_path(path) {
         Some(VerifyResult::Present)
     } else {
+        // Skip is not re-asked on sync if already acknowledged (missing_ack_at is set),
+        // but is re-asked on manual VerifyFiles (is_sync == false).
+        if is_sync && rel.local_status == Some(LocalStatus::Missing) && rel.missing_ack_at.is_some()
+        {
+            return None;
+        }
         Some(VerifyResult::Missing)
     }
 }
@@ -294,6 +304,7 @@ mod tests {
                 None
             },
             origin: Some(Origin::App),
+            missing_ack_at: None,
             has_remote_update: false,
             remote_update_reason: None,
         }
@@ -349,26 +360,26 @@ mod tests {
 
         // 1. Folder probe is Ok -> Present
         assert_eq!(
-            verify_single_release(&row, true),
+            verify_single_release(&row, true, false),
             Some(VerifyResult::Present)
         );
 
         // 2. Folder probe is NOT Ok (unavailable drive) -> Unknown, NEVER Missing
         assert_eq!(
-            verify_single_release(&row, false),
+            verify_single_release(&row, false, false),
             Some(VerifyResult::Unknown)
         );
 
         // 3. File removed, probe Ok -> Missing
         let missing_row = make_test_row(key, true, Some(dir.path().join("deleted")));
         assert_eq!(
-            verify_single_release(&missing_row, true),
+            verify_single_release(&missing_row, true, false),
             Some(VerifyResult::Missing)
         );
 
         // 4. File removed, probe NOT Ok -> Unknown
         assert_eq!(
-            verify_single_release(&missing_row, false),
+            verify_single_release(&missing_row, false, false),
             Some(VerifyResult::Unknown)
         );
 
@@ -376,7 +387,24 @@ mod tests {
         let mut unverified_row = make_test_row(key, true, None);
         unverified_row.local_status = Some(LocalStatus::Unverified);
         unverified_row.origin = Some(Origin::Imported);
-        assert_eq!(verify_single_release(&unverified_row, true), None);
+        assert_eq!(verify_single_release(&unverified_row, true, false), None);
+    }
+
+    #[test]
+    fn skip_not_reasked_on_sync_but_reasked_on_manual_verify() {
+        let key = ItemKey::new(ItemType::Album, 10);
+        let mut row = make_test_row(key, true, Some(PathBuf::from("/music/deleted")));
+        row.local_status = Some(LocalStatus::Missing);
+        row.missing_ack_at = Some(1_700_000_000);
+
+        // During sync: skipped -> None
+        assert_eq!(verify_single_release(&row, true, true), None);
+
+        // During manual verify: re-asked -> Some(VerifyResult::Missing)
+        assert_eq!(
+            verify_single_release(&row, true, false),
+            Some(VerifyResult::Missing)
+        );
     }
 
     #[test]

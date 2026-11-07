@@ -389,7 +389,48 @@ impl Supervisor {
                 let svc = self.library_service.clone();
                 let tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
-                    svc.verify_files(scope, tok).await;
+                    svc.verify_files(scope, false, tok).await;
+                });
+            }
+            UiToWorkerCommand::ResolveMissing {
+                batch_id,
+                decisions,
+                remember,
+            } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.resolve_missing(batch_id, decisions, remember).await;
+                });
+            }
+            UiToWorkerCommand::RelinkRelease { key, path } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.relink_release(key, path).await;
+                });
+            }
+            UiToWorkerCommand::MarkArchived { keys } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.mark_archived(keys).await;
+                });
+            }
+            UiToWorkerCommand::UnmarkDownloaded { keys } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.unmark_downloaded(keys).await;
+                });
+            }
+            UiToWorkerCommand::IgnoreLocal { band_id, paths } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.ignore_local(band_id, paths).await;
+                });
+            }
+            UiToWorkerCommand::RepointArtistFolder { band_id, new_path } => {
+                let svc = self.library_service.clone();
+                let tok = self.library_cancel.child_token();
+                tokio::spawn(async move {
+                    svc.repoint_artist_folder(band_id, new_path, tok).await;
                 });
             }
             UiToWorkerCommand::CancelLibrary => {

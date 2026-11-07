@@ -381,6 +381,31 @@ pub struct MissingItem {
     pub best_candidate: Option<MissingCandidate>,
 }
 
+/// Action to apply when resolving a missing release.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MissingAction {
+    /// Relink to a newly located folder or archive.
+    Moved(PathBuf),
+    /// Treat as deleted according to the chosen policy.
+    Deleted(DeletedPolicy),
+    /// Skip acknowledging absence; do not re-ask on sync.
+    Skip,
+}
+
+/// Decision made by user or policy for a missing release.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MissingDecision {
+    pub key: ItemKey,
+    pub action: MissingAction,
+}
+
+/// User preference choices to remember when resolving missing albums.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RememberChoice {
+    pub set_default_deleted_policy: Option<DeletedPolicy>,
+    pub stop_asking: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
@@ -463,6 +488,7 @@ pub struct ReleaseRow {
     pub local_path: Option<PathBuf>,
     pub local_status: Option<LocalStatus>,
     pub origin: Option<Origin>,
+    pub missing_ack_at: Option<Ts>,
     pub has_remote_update: bool,
     pub remote_update_reason: Option<UpdateReason>,
 }

@@ -1013,6 +1013,7 @@ mod tests {
                 local_path: None,
                 local_status: None,
                 origin: None,
+                missing_ack_at: None,
                 has_remote_update: false,
                 remote_update_reason: None,
             },

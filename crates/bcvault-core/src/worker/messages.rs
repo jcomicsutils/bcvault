@@ -75,6 +75,29 @@ pub enum UiToWorkerCommand {
     VerifyFiles {
         scope: SyncScope,
     },
+    ResolveMissing {
+        batch_id: u64,
+        decisions: Vec<crate::types::MissingDecision>,
+        remember: Option<crate::types::RememberChoice>,
+    },
+    RelinkRelease {
+        key: ItemKey,
+        path: PathBuf,
+    },
+    MarkArchived {
+        keys: Vec<ItemKey>,
+    },
+    UnmarkDownloaded {
+        keys: Vec<ItemKey>,
+    },
+    IgnoreLocal {
+        band_id: i64,
+        paths: Vec<PathBuf>,
+    },
+    RepointArtistFolder {
+        band_id: i64,
+        new_path: PathBuf,
+    },
     CancelLibrary,
     // misc
     UpdateSettings(Settings),

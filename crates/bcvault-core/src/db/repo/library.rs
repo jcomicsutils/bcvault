@@ -312,6 +312,18 @@ pub fn set_local_status(
     Ok(())
 }
 
+pub fn skip_missing(conn: &Connection, key: ItemKey) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE releases SET
+             local_status = 'missing',
+             missing_ack_at = unixepoch(),
+             local_checked_at = unixepoch()
+         WHERE item_type = ?1 AND item_id = ?2",
+        params![key.kind.as_str(), key.id],
+    )?;
+    Ok(())
+}
+
 pub fn adopt(
     conn: &mut Connection,
     key: ItemKey,

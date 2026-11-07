@@ -375,7 +375,7 @@ const SELECT_RELEASE_COLS: &str = "r.item_type, r.item_id, r.band_id, r.title, \
      r.url, r.cover_url, r.art_id, \
      r.classification, r.is_preorder, r.track_count, r.published_at, r.modified_at, \
      r.downloaded, r.downloaded_at, r.downloaded_format, r.local_path, \
-     r.has_remote_update, r.remote_update_reason, r.local_status, r.origin";
+     r.has_remote_update, r.remote_update_reason, r.local_status, r.origin, r.missing_ack_at";
 
 const FROM_RELEASES_JOIN: &str = "releases r LEFT JOIN artists a ON r.band_id = a.band_id";
 
@@ -420,6 +420,7 @@ fn map_release_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseRow> {
     let local_status = local_status_str.as_deref().and_then(LocalStatus::parse);
     let origin_str: Option<String> = r.get(20)?;
     let origin = origin_str.as_deref().and_then(Origin::parse);
+    let missing_ack_at: Option<Ts> = r.get(21)?;
 
     Ok(ReleaseRow {
         key: ItemKey { kind, id },
@@ -440,6 +441,7 @@ fn map_release_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseRow> {
         local_path,
         local_status,
         origin,
+        missing_ack_at,
         has_remote_update: has_remote_update != 0,
         remote_update_reason,
     })
