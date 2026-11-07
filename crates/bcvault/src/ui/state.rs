@@ -1,4 +1,5 @@
 use crate::{
+    library::service::ReconcileReport,
     types::{
         ArtistFolder, ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry,
         LogLevel, RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow, Settings, SortDir,
@@ -121,6 +122,92 @@ impl LinkFolderModalState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportTab {
+    Matched,
+    Review,
+    PageOnly,
+    LocalOnly,
+    Conflicts,
+    Restorable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalAction {
+    Leave,
+    Ignore,
+    Attach(ItemKey),
+}
+
+#[derive(Clone, Debug)]
+pub struct ReconcileReportModalState {
+    pub report: Box<ReconcileReport>,
+    pub active_tab: ReportTab,
+    pub selected_matched: HashSet<ItemKey>,
+    pub selected_review: HashMap<ItemKey, usize>,
+    pub selected_restorable: HashSet<ItemKey>,
+    pub local_decisions: HashMap<std::path::PathBuf, LocalAction>,
+    pub local_attach_search: HashMap<std::path::PathBuf, String>,
+}
+
+impl ReconcileReportModalState {
+    pub fn new(report: Box<ReconcileReport>) -> Self {
+        let selected_matched = report.matched.iter().map(|m| m.release_key).collect();
+        let selected_restorable = report.restorable.iter().map(|m| m.release_key).collect();
+        let mut selected_review = HashMap::new();
+        for r in &report.review {
+            if !r.candidates.is_empty() {
+                selected_review.insert(r.release_key, 0);
+            }
+        }
+        let local_decisions = HashMap::new();
+        let local_attach_search = HashMap::new();
+
+        let active_tab = if !report.matched.is_empty() {
+            ReportTab::Matched
+        } else if !report.review.is_empty() {
+            ReportTab::Review
+        } else if !report.restorable.is_empty() {
+            ReportTab::Restorable
+        } else if !report.local_only.is_empty() {
+            ReportTab::LocalOnly
+        } else if !report.conflicts.is_empty() {
+            ReportTab::Conflicts
+        } else {
+            ReportTab::PageOnly
+        };
+
+        Self {
+            report,
+            active_tab,
+            selected_matched,
+            selected_review,
+            selected_restorable,
+            local_decisions,
+            local_attach_search,
+        }
+    }
+
+    pub fn total_selected_count(&self) -> usize {
+        let matched_cnt = self.selected_matched.len();
+        let review_cnt = self.selected_review.len();
+        let restorable_cnt = self.selected_restorable.len();
+        let local_cnt = self
+            .local_decisions
+            .values()
+            .filter(|a| !matches!(a, LocalAction::Leave))
+            .count();
+        matched_cnt + review_cnt + restorable_cnt + local_cnt
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UndoToast {
+    pub batch_id: u64,
+    pub message: String,
+    pub created_at: Instant,
+}
+
 pub struct UiState {
     pub artists: Vec<ArtistView>,
     pub artist_filter: String,
@@ -164,6 +251,8 @@ pub struct UiState {
     pub confirm_remove_artist: Option<(i64, String)>,
     pub rename_artist_modal: Option<RenameArtistModalState>,
     pub link_folder_modal: Option<LinkFolderModalState>,
+    pub reconcile_report_modal: Option<ReconcileReportModalState>,
+    pub undo_toast: Option<UndoToast>,
 
     pub thumbs: ThumbCache,
     pub focus_search_next_frame: bool,
@@ -222,6 +311,8 @@ impl UiState {
             confirm_remove_artist: None,
             rename_artist_modal: None,
             link_folder_modal: None,
+            reconcile_report_modal: None,
+            undo_toast: None,
 
             thumbs: ThumbCache::new(),
             focus_search_next_frame: false,
@@ -450,10 +541,43 @@ impl UiState {
                     self.folders.remove(&band_id);
                 }
             }
-            WorkerToUiEvent::LibraryProgress { .. }
-            | WorkerToUiEvent::ReconcileReport { .. }
-            | WorkerToUiEvent::LibraryApplied { .. }
-            | WorkerToUiEvent::MissingFound { .. } => {}
+            WorkerToUiEvent::ReconcileReport { report } => {
+                self.reconcile_report_modal = Some(ReconcileReportModalState::new(report));
+            }
+            WorkerToUiEvent::LibraryApplied { batch_id, summary } => {
+                if batch_id > 0 {
+                    let mut parts = Vec::new();
+                    if summary.adopted > 0 {
+                        parts.push(format!("{} adopted", summary.adopted));
+                    }
+                    if summary.relinked > 0 {
+                        parts.push(format!("{} relinked", summary.relinked));
+                    }
+                    if summary.archived > 0 {
+                        parts.push(format!("{} archived", summary.archived));
+                    }
+                    if summary.restored > 0 {
+                        parts.push(format!("{} restored", summary.restored));
+                    }
+                    if summary.ignored > 0 {
+                        parts.push(format!("{} ignored", summary.ignored));
+                    }
+                    if summary.unmarked > 0 {
+                        parts.push(format!("{} unmarked", summary.unmarked));
+                    }
+                    let summary_str = if parts.is_empty() {
+                        "Library changes applied".to_string()
+                    } else {
+                        parts.join(", ")
+                    };
+                    self.undo_toast = Some(UndoToast {
+                        batch_id,
+                        message: summary_str,
+                        created_at: Instant::now(),
+                    });
+                }
+            }
+            WorkerToUiEvent::LibraryProgress { .. } | WorkerToUiEvent::MissingFound { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }
@@ -629,5 +753,76 @@ mod tests {
         let retrieved = for_art.picked_folder.lock().unwrap().take();
         assert_eq!(retrieved, Some(PathBuf::from("/new/path")));
         assert!(for_art.picked_folder.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_reconcile_report_modal_state() {
+        use crate::library::matcher::{MatchProposal, ReviewItem, Score, ScoredCandidate};
+        use crate::types::{AudioFormat, BatchSummary, ItemType};
+        use std::path::PathBuf;
+
+        let key1 = ItemKey::new(ItemType::Album, 100);
+        let key2 = ItemKey::new(ItemType::Album, 200);
+
+        let report = Box::new(ReconcileReport {
+            batch_id: 7,
+            band_id: 42,
+            matched: vec![MatchProposal {
+                release_key: key1,
+                release_title: "Selected Ambient Works".to_string(),
+                candidate_path: PathBuf::from("/music/saw"),
+                candidate_name: "Selected Ambient Works".to_string(),
+                score: Score {
+                    value: 0.98,
+                    signals: vec![],
+                },
+                format_guess: Some(AudioFormat::Flac),
+            }],
+            review: vec![ReviewItem {
+                release_key: key2,
+                release_title: "Drukqs".to_string(),
+                candidates: vec![ScoredCandidate {
+                    candidate_path: PathBuf::from("/music/drukqs"),
+                    candidate_name: "Drukqs".to_string(),
+                    score: Score {
+                        value: 0.85,
+                        signals: vec![],
+                    },
+                    format_guess: Some(AudioFormat::Mp3_320),
+                }],
+            }],
+            page_only: vec![],
+            local_only: vec![],
+            conflicts: vec![],
+            restorable: vec![],
+        });
+
+        let mut st = UiState::new();
+        st.apply_event(WorkerToUiEvent::ReconcileReport { report });
+        assert!(st.reconcile_report_modal.is_some());
+
+        let modal = st.reconcile_report_modal.as_ref().unwrap();
+        assert_eq!(modal.active_tab, ReportTab::Matched);
+        assert!(modal.selected_matched.contains(&key1));
+        assert_eq!(modal.selected_review.get(&key2), Some(&0));
+        assert_eq!(modal.total_selected_count(), 2);
+
+        // Apply event creates undo toast
+        let summary = BatchSummary {
+            adopted: 2,
+            relinked: 0,
+            archived: 0,
+            unmarked: 0,
+            restored: 0,
+            ignored: 0,
+        };
+        st.apply_event(WorkerToUiEvent::LibraryApplied {
+            batch_id: 7,
+            summary,
+        });
+        assert!(st.undo_toast.is_some());
+        let toast = st.undo_toast.as_ref().unwrap();
+        assert_eq!(toast.batch_id, 7);
+        assert!(toast.message.contains("2 adopted"));
     }
 }
