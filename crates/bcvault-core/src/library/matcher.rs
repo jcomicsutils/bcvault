@@ -43,6 +43,351 @@ pub struct Score {
     pub signals: Vec<Signal>,
 }
 
+/// An automated confident match proposal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchProposal {
+    pub release_key: crate::types::ItemKey,
+    pub release_title: String,
+    pub candidate_path: std::path::PathBuf,
+    pub candidate_name: String,
+    pub score: Score,
+    pub format_guess: Option<crate::types::AudioFormat>,
+}
+
+/// A candidate scored against a release for review.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScoredCandidate {
+    pub candidate_path: std::path::PathBuf,
+    pub candidate_name: String,
+    pub score: Score,
+    pub format_guess: Option<crate::types::AudioFormat>,
+}
+
+/// A release requiring user review among multiple candidate options.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewItem {
+    pub release_key: crate::types::ItemKey,
+    pub release_title: String,
+    pub candidates: Vec<ScoredCandidate>,
+}
+
+/// A local album candidate with no matching Bandcamp release.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalOrphan {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub track_count: usize,
+    pub format_guess: Option<crate::types::AudioFormat>,
+}
+
+/// A conflict where multiple candidates or releases collide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conflict {
+    pub description: String,
+    pub release_keys: Vec<crate::types::ItemKey>,
+    pub candidate_paths: Vec<std::path::PathBuf>,
+}
+
+/// Complete outcome of assigning candidates to releases.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MatchAssignment {
+    /// Auto-confident 1-to-1 matches.
+    pub matched: Vec<MatchProposal>,
+    /// Ambiguous or below-auto matches for user review.
+    pub review: Vec<ReviewItem>,
+    /// Releases on artist's page with no corresponding folder.
+    pub page_only: Vec<crate::types::ItemKey>,
+    /// Folders with no matching release.
+    pub local_only: Vec<LocalOrphan>,
+    /// Duplicate format or multi-release collisions.
+    pub conflicts: Vec<Conflict>,
+    /// Previously archived releases whose files reappeared.
+    pub restorable: Vec<MatchProposal>,
+}
+
+/// Greedy 1-to-1 candidate assignment according to §6 rules:
+/// - A pair is auto if score >= auto_match_min and it beats runner-up for both sides by >= 0.05
+/// - Review if score >= review_match_min or ambiguous
+/// - Conflicts if duplicate local copies (e.g. FLAC and MP3) or multiple releases match same folder
+/// - Otherwise page_only or local_only
+pub fn assign_matches(
+    candidates: &[AlbumCandidate],
+    releases: &[ReleaseRow],
+    auto_match_min: f32,
+    review_match_min: f32,
+    ignored_path_keys: &std::collections::HashSet<String>,
+) -> MatchAssignment {
+    let mut assignment = MatchAssignment::default();
+
+    // Filter out candidates ignored by user
+    let active_candidates: Vec<&AlbumCandidate> = candidates
+        .iter()
+        .filter(|c| !ignored_path_keys.contains(&c.path_key))
+        .collect();
+
+    if releases.is_empty() {
+        for c in active_candidates {
+            assignment.local_only.push(LocalOrphan {
+                path: c.path.clone(),
+                name: c.name.clone(),
+                track_count: c.track_count,
+                format_guess: c.metadata.as_ref().and_then(|m| m.format_guess),
+            });
+        }
+        return assignment;
+    }
+
+    if active_candidates.is_empty() {
+        for r in releases {
+            assignment.page_only.push(r.key);
+        }
+        return assignment;
+    }
+
+    // Compute pairwise score matrix
+    // matrix[cand_idx][rel_idx] = Score
+    let mut matrix: Vec<Vec<Score>> = Vec::with_capacity(active_candidates.len());
+    for c in &active_candidates {
+        let mut row = Vec::with_capacity(releases.len());
+        for r in releases {
+            row.push(score_release(c, r));
+        }
+        matrix.push(row);
+    }
+
+    // 1. Detect conflicts:
+    // Check if multiple candidates score >= review_match_min on the same release with close scores (difference < 0.05)
+    let mut conflicted_rel_indices = std::collections::HashSet::new();
+    let mut conflicted_cand_indices = std::collections::HashSet::new();
+
+    for (rel_idx, r) in releases.iter().enumerate() {
+        let mut high_scoring_cands = Vec::new();
+        for (cand_idx, _) in active_candidates.iter().enumerate() {
+            let score_val = matrix[cand_idx][rel_idx].value;
+            if score_val >= review_match_min {
+                high_scoring_cands.push((cand_idx, score_val));
+            }
+        }
+
+        if high_scoring_cands.len() > 1 {
+            high_scoring_cands
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // If top two are close (< 0.05 difference), it's a conflict (e.g. FLAC and MP3 duplicates)
+            if (high_scoring_cands[0].1 - high_scoring_cands[1].1) < 0.05 {
+                conflicted_rel_indices.insert(rel_idx);
+                let paths: Vec<std::path::PathBuf> = high_scoring_cands
+                    .iter()
+                    .map(|(ci, _)| {
+                        conflicted_cand_indices.insert(*ci);
+                        active_candidates[*ci].path.clone()
+                    })
+                    .collect();
+
+                assignment.conflicts.push(Conflict {
+                    description: format!(
+                        "Multiple local folders match release '{}' (duplicate formats or identical titles)",
+                        r.title
+                    ),
+                    release_keys: vec![r.key],
+                    candidate_paths: paths,
+                });
+            }
+        }
+    }
+
+    // Check if one candidate matches multiple releases with close scores
+    for (cand_idx, c) in active_candidates.iter().enumerate() {
+        if conflicted_cand_indices.contains(&cand_idx) {
+            continue;
+        }
+        let mut high_scoring_rels = Vec::new();
+        for (rel_idx, _) in releases.iter().enumerate() {
+            let score_val = matrix[cand_idx][rel_idx].value;
+            if score_val >= review_match_min {
+                high_scoring_rels.push((rel_idx, score_val));
+            }
+        }
+
+        if high_scoring_rels.len() > 1 {
+            high_scoring_rels
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            if (high_scoring_rels[0].1 - high_scoring_rels[1].1) < 0.05 {
+                conflicted_cand_indices.insert(cand_idx);
+                let rel_keys: Vec<crate::types::ItemKey> = high_scoring_rels
+                    .iter()
+                    .map(|(ri, _)| {
+                        conflicted_rel_indices.insert(*ri);
+                        releases[*ri].key
+                    })
+                    .collect();
+
+                assignment.conflicts.push(Conflict {
+                    description: format!(
+                        "Folder '{}' matches multiple releases with equal confidence",
+                        c.name
+                    ),
+                    release_keys: rel_keys,
+                    candidate_paths: vec![c.path.clone()],
+                });
+            }
+        }
+    }
+
+    // 2. Greedy assignment of non-conflicted pairs
+    // Collect all valid pairs (cand_idx, rel_idx, score)
+    struct Pair {
+        cand_idx: usize,
+        rel_idx: usize,
+        score: Score,
+    }
+
+    let mut pairs = Vec::new();
+    for (cand_idx, _) in active_candidates.iter().enumerate() {
+        if conflicted_cand_indices.contains(&cand_idx) {
+            continue;
+        }
+        for (rel_idx, _) in releases.iter().enumerate() {
+            if conflicted_rel_indices.contains(&rel_idx) {
+                continue;
+            }
+            let s = matrix[cand_idx][rel_idx].clone();
+            if s.value >= review_match_min {
+                pairs.push(Pair {
+                    cand_idx,
+                    rel_idx,
+                    score: s,
+                });
+            }
+        }
+    }
+
+    // Sort descending by score value
+    pairs.sort_by(|a, b| {
+        b.score
+            .value
+            .partial_cmp(&a.score.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut assigned_cands = std::collections::HashSet::new();
+    let mut assigned_rels = std::collections::HashSet::new();
+
+    for pair in pairs {
+        if assigned_cands.contains(&pair.cand_idx) || assigned_rels.contains(&pair.rel_idx) {
+            continue;
+        }
+
+        // Runner up check for cand_idx
+        let cand_runner_up = (0..releases.len())
+            .filter(|&ri| ri != pair.rel_idx && !conflicted_rel_indices.contains(&ri))
+            .map(|ri| matrix[pair.cand_idx][ri].value)
+            .fold(0.0f32, f32::max);
+
+        // Runner up check for rel_idx
+        let rel_runner_up = (0..active_candidates.len())
+            .filter(|&ci| ci != pair.cand_idx && !conflicted_cand_indices.contains(&ci))
+            .map(|ci| matrix[ci][pair.rel_idx].value)
+            .fold(0.0f32, f32::max);
+
+        let cand = active_candidates[pair.cand_idx];
+        let rel = &releases[pair.rel_idx];
+
+        let is_auto = pair.score.value >= auto_match_min
+            && (pair.score.value - cand_runner_up) >= 0.05
+            && (pair.score.value - rel_runner_up) >= 0.05;
+
+        if is_auto {
+            assigned_cands.insert(pair.cand_idx);
+            assigned_rels.insert(pair.rel_idx);
+
+            let proposal = MatchProposal {
+                release_key: rel.key,
+                release_title: rel.title.clone(),
+                candidate_path: cand.path.clone(),
+                candidate_name: cand.name.clone(),
+                score: pair.score,
+                format_guess: cand.metadata.as_ref().and_then(|m| m.format_guess),
+            };
+
+            // If the release was already downloaded and is marked archived, it is restorable
+            if rel.downloaded && rel.local_status == Some(crate::types::LocalStatus::Archived) {
+                assignment.restorable.push(proposal);
+            } else {
+                assignment.matched.push(proposal);
+            }
+        }
+    }
+
+    // 3. Review items:
+    // Any unassigned release that has candidates with score >= review_match_min
+    for (rel_idx, rel) in releases.iter().enumerate() {
+        if assigned_rels.contains(&rel_idx) || conflicted_rel_indices.contains(&rel_idx) {
+            continue;
+        }
+
+        let mut review_cands = Vec::new();
+        for (cand_idx, cand) in active_candidates.iter().enumerate() {
+            if assigned_cands.contains(&cand_idx) || conflicted_cand_indices.contains(&cand_idx) {
+                continue;
+            }
+            let s = &matrix[cand_idx][rel_idx];
+            if s.value >= review_match_min {
+                review_cands.push(ScoredCandidate {
+                    candidate_path: cand.path.clone(),
+                    candidate_name: cand.name.clone(),
+                    score: s.clone(),
+                    format_guess: cand.metadata.as_ref().and_then(|m| m.format_guess),
+                });
+            }
+        }
+
+        if !review_cands.is_empty() {
+            review_cands.sort_by(|a, b| {
+                b.score
+                    .value
+                    .partial_cmp(&a.score.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            assignment.review.push(ReviewItem {
+                release_key: rel.key,
+                release_title: rel.title.clone(),
+                candidates: review_cands,
+            });
+            assigned_rels.insert(rel_idx);
+        }
+    }
+
+    // 4. Page only: releases with no match and not in review/conflict
+    for (rel_idx, rel) in releases.iter().enumerate() {
+        if !assigned_rels.contains(&rel_idx) && !conflicted_rel_indices.contains(&rel_idx) {
+            assignment.page_only.push(rel.key);
+        }
+    }
+
+    // 5. Local only: candidates with no match and not in review/conflict
+    let review_cand_paths: std::collections::HashSet<std::path::PathBuf> = assignment
+        .review
+        .iter()
+        .flat_map(|r| r.candidates.iter().map(|c| c.candidate_path.clone()))
+        .collect();
+
+    for (cand_idx, cand) in active_candidates.iter().enumerate() {
+        if !assigned_cands.contains(&cand_idx)
+            && !conflicted_cand_indices.contains(&cand_idx)
+            && !review_cand_paths.contains(&cand.path)
+        {
+            assignment.local_only.push(LocalOrphan {
+                path: cand.path.clone(),
+                name: cand.name.clone(),
+                track_count: cand.track_count,
+                format_guess: cand.metadata.as_ref().and_then(|m| m.format_guess),
+            });
+        }
+    }
+
+    assignment
+}
+
 /// Scores a local album candidate against a `ReleaseRow`.
 pub fn score_release(candidate: &AlbumCandidate, release: &ReleaseRow) -> Score {
     let release_year = release
@@ -359,5 +704,119 @@ mod tests {
             normalize_bandcamp_url("http://www.artist.bandcamp.com/album/xyz?ref=test#section"),
             "artist.bandcamp.com/album/xyz"
         );
+    }
+
+    fn make_release(
+        id: i64,
+        title: &str,
+        track_count: u32,
+        local_status: Option<crate::types::LocalStatus>,
+    ) -> ReleaseRow {
+        ReleaseRow {
+            key: crate::types::ItemKey {
+                kind: ItemType::Album,
+                id,
+            },
+            band_id: 100,
+            title: title.to_string(),
+            artist_name: "Aphex Twin".to_string(),
+            url: format!(
+                "https://aphextwin.bandcamp.com/album/{}",
+                title.to_lowercase().replace(' ', "-")
+            ),
+            cover_url: None,
+            art_id: None,
+            classification: crate::types::Classification::Free,
+            is_preorder: false,
+            track_count: Some(track_count),
+            published_at: None,
+            modified_at: None,
+            downloaded: local_status.is_some(),
+            downloaded_at: None,
+            downloaded_format: None,
+            local_path: None,
+            local_status,
+            origin: None,
+            has_remote_update: false,
+            remote_update_reason: None,
+        }
+    }
+
+    #[test]
+    fn assigns_auto_page_only_and_local_only() {
+        let c1 = make_candidate(
+            "Aphex Twin - Selected Ambient Works",
+            13,
+            Some("Selected Ambient Works"),
+            None,
+            None,
+        );
+        let c2 = make_candidate("Unrelated Bootleg", 5, None, None, None);
+
+        let r1 = make_release(1, "Selected Ambient Works", 13, None);
+        let r2 = make_release(2, "Drukqs", 30, None);
+
+        let ignored = std::collections::HashSet::new();
+        let res = assign_matches(&[c1, c2], &[r1, r2], 0.85, 0.70, &ignored);
+
+        assert_eq!(res.matched.len(), 1);
+        assert_eq!(res.matched[0].release_key.id, 1);
+
+        assert_eq!(res.page_only.len(), 1);
+        assert_eq!(res.page_only[0].id, 2);
+
+        assert_eq!(res.local_only.len(), 1);
+        assert_eq!(res.local_only[0].name, "Unrelated Bootleg");
+    }
+
+    #[test]
+    fn duplicate_formats_detected_as_conflict() {
+        let c_flac = make_candidate(
+            "Selected Ambient Works [FLAC]",
+            13,
+            Some("Selected Ambient Works"),
+            None,
+            None,
+        );
+        let c_mp3 = make_candidate(
+            "Selected Ambient Works [MP3]",
+            13,
+            Some("Selected Ambient Works"),
+            None,
+            None,
+        );
+
+        let r = make_release(1, "Selected Ambient Works", 13, None);
+
+        let ignored = std::collections::HashSet::new();
+        let res = assign_matches(&[c_flac, c_mp3], &[r], 0.85, 0.70, &ignored);
+
+        assert_eq!(res.matched.len(), 0);
+        assert_eq!(res.conflicts.len(), 1);
+        assert_eq!(res.conflicts[0].candidate_paths.len(), 2);
+    }
+
+    #[test]
+    fn archived_release_matched_goes_to_restorable() {
+        let c = make_candidate(
+            "Selected Ambient Works",
+            13,
+            Some("Selected Ambient Works"),
+            None,
+            None,
+        );
+        let r = make_release(
+            1,
+            "Selected Ambient Works",
+            13,
+            Some(crate::types::LocalStatus::Archived),
+        );
+
+        let ignored = std::collections::HashSet::new();
+        let res = assign_matches(&[c], &[r], 0.85, 0.70, &ignored);
+
+        assert_eq!(res.matched.len(), 0);
+        assert_eq!(res.restorable.len(), 1);
+        assert_eq!(res.restorable[0].release_key.id, 1);
     }
 }
