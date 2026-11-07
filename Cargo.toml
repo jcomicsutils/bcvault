@@ -39,6 +39,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 directories = "6"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 lofty = "0.25"
+dunce = "1.0"
 
 # Errors / logging
 thiserror = "2"
