@@ -154,6 +154,8 @@ const REQUIRED_MAIN_TABLES: &[(&str, &[&str])] = &[
             "local_path",
             "has_remote_update",
             "remote_update_reason",
+            "local_status",
+            "origin",
         ],
     ),
     ("artists", &["band_id", "slug", "name", "url"]),
@@ -170,6 +172,7 @@ const REQUIRED_MAIN_TABLES: &[(&str, &[&str])] = &[
             "bytes_size",
         ],
     ),
+    ("artist_folders", &["band_id", "path", "path_key"]),
 ];
 
 pub fn verify_main_schema_contract(conn: &Connection) -> Result<(), DbError> {
@@ -1003,6 +1006,31 @@ mod tests {
         .unwrap();
         let err = verify_main_schema_contract(&conn).unwrap_err();
         assert!(matches!(err, DbError::SchemaMismatch(_)));
+
+        // Test specifically missing local_status on an otherwise valid releases table
+        let conn2 = Connection::open_in_memory().unwrap();
+        conn2
+            .execute_batch(
+                "ATTACH DATABASE ':memory:' AS m;
+                 CREATE TABLE m.artists (band_id INTEGER, slug TEXT, name TEXT, url TEXT);
+                 CREATE TABLE m.download_history (id INTEGER, item_type TEXT, item_id INTEGER, band_id INTEGER, format TEXT, status TEXT, downloaded_at INTEGER, bytes_size INTEGER);
+                 CREATE TABLE m.artist_folders (band_id INTEGER, path TEXT, path_key TEXT);
+                 CREATE TABLE m.releases (
+                     item_type TEXT, item_id INTEGER, band_id INTEGER, title TEXT,
+                     artist_name TEXT, url TEXT, cover_url TEXT, art_id INTEGER,
+                     classification TEXT, is_preorder INTEGER, track_count INTEGER,
+                     published_at INTEGER, modified_at INTEGER, first_seen_at INTEGER,
+                     downloaded INTEGER, downloaded_at INTEGER, downloaded_format TEXT,
+                     local_path TEXT, has_remote_update INTEGER, remote_update_reason TEXT
+                 );",
+            )
+            .unwrap();
+        let err2 = verify_main_schema_contract(&conn2).unwrap_err();
+        if let DbError::SchemaMismatch(msg) = err2 {
+            assert!(msg.contains("local_status"));
+        } else {
+            panic!("Expected SchemaMismatch with local_status, got {err2:?}");
+        }
     }
 
     #[tokio::test]
