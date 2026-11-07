@@ -639,6 +639,44 @@ pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, 
     Ok(summary)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LibraryTimelineEvent {
+    pub id: i64,
+    pub batch_id: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub old_json: Option<String>,
+    pub new_json: Option<String>,
+}
+
+pub fn get_item_timeline(
+    conn: &Connection,
+    key: ItemKey,
+) -> Result<Vec<LibraryTimelineEvent>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT le.id, le.batch_id, lb.ts, le.kind, le.old_json, le.new_json
+         FROM library_events le
+         JOIN library_batches lb ON lb.id = le.batch_id
+         WHERE le.item_type = ?1 AND le.item_id = ?2
+         ORDER BY le.id ASC",
+    )?;
+    let rows = stmt.query_map(params![key.kind.as_str(), key.id], |r| {
+        Ok(LibraryTimelineEvent {
+            id: r.get(0)?,
+            batch_id: r.get(1)?,
+            ts: r.get(2)?,
+            kind: r.get(3)?,
+            old_json: r.get(4)?,
+            new_json: r.get(5)?,
+        })
+    })?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+    Ok(events)
+}
+
 pub fn assert_library_invariants(conn: &Connection) -> Result<(), DbError> {
     let violated: i64 = conn.query_row(
         "SELECT COUNT(*) FROM releases WHERE downloaded = 0 AND local_status IS NOT NULL",
@@ -903,6 +941,11 @@ mod tests {
         assert!(snap_restored.downloaded);
         assert_eq!(snap_restored.local_status, Some(LocalStatus::Present));
         assert_library_invariants(&conn).unwrap();
+
+        // Check timeline events for key100
+        let timeline = get_item_timeline(&conn, key100).unwrap();
+        assert!(!timeline.is_empty());
+        assert_eq!(timeline[0].kind, "adopted");
 
         // 7. Undo adopt (b1) - restores release 100 back to downloaded = 0
         undo_batch(&mut conn, b1).unwrap();

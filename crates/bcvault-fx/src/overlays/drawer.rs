@@ -294,6 +294,52 @@ pub fn show_drawer(
                                             },
                                         );
                                     }
+
+                                    if !detail.timeline.is_empty() {
+                                        ui.add_space(8.0);
+                                        ui.collapsing(
+                                            RichText::new("LIBRARY HISTORY")
+                                                .monospace()
+                                                .color(th.text_dim),
+                                            |ui| {
+                                                for ev in &detail.timeline {
+                                                    ui.horizontal(|ui| {
+                                                        let (dot_r, _) = ui.allocate_exact_size(
+                                                            Vec2::splat(6.0),
+                                                            Sense::hover(),
+                                                        );
+                                                        paint::rect_filled(
+                                                            ui.painter(),
+                                                            dot_r,
+                                                            th.accent,
+                                                        );
+                                                        let dt = chrono::DateTime::from_timestamp(
+                                                            ev.ts, 0,
+                                                        )
+                                                        .map(|d| {
+                                                            d.format("%Y-%m-%d %H:%M").to_string()
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            "Unknown date".to_string()
+                                                        });
+                                                        ui.label(
+                                                            RichText::new(dt)
+                                                                .size(11.0)
+                                                                .monospace()
+                                                                .color(th.text_dim),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(ev.kind.to_uppercase())
+                                                                .size(11.0)
+                                                                .monospace()
+                                                                .strong()
+                                                                .color(th.text),
+                                                        );
+                                                    });
+                                                }
+                                            },
+                                        );
+                                    }
                                 } else {
                                     ui.horizontal(|ui| {
                                         let (sq_r, _) = ui

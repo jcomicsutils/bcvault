@@ -331,6 +331,8 @@ pub struct ArtistFolder {
     pub state: FolderState,
 }
 
+pub use crate::db::repo::library::LibraryTimelineEvent;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchSummary {
     pub adopted: u32,

@@ -113,6 +113,8 @@ pub struct ReleaseDetail {
     pub credits: Option<String>,
     pub tags: Vec<String>,
     pub duration_s: Option<u32>,
+    #[serde(default)]
+    pub timeline: Vec<bcvault_core::types::LibraryTimelineEvent>,
 }
 
 #[derive(Clone)]
@@ -404,6 +406,7 @@ pub fn get_release_detail(
                     credits,
                     tags,
                     duration_s,
+                    timeline: Vec::new(),
                 })
             },
         )
@@ -568,6 +571,8 @@ pub fn build_wall_query_sql(query: &FxQuery) -> (String, Vec<Value>) {
             SmartView::Updated => where_parts.push("r.has_remote_update = 1"),
             SmartView::Preorders => where_parts.push("r.is_preorder = 1"),
             SmartView::NeedsMetadata => where_parts.push("r.classification = 'unknown'"),
+            SmartView::Archived => where_parts.push("r.local_status = 'archived'"),
+            SmartView::MissingFiles => where_parts.push("r.local_status = 'missing'"),
         }
     } else {
         match query.base.filter {
@@ -1063,6 +1068,66 @@ mod tests {
                     "per-artist wall query took {} ms (budget 60 ms)",
                     elapsed.as_millis()
                 );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_smart_views_archived_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_path = dir.path().join("bcvault.db");
+        let fx_path = dir.path().join("fx.sqlite");
+
+        let main_pool = DbPool::open(&main_path).unwrap();
+        main_pool
+            .writer
+            .call(|c| {
+                c.execute(
+                    "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'art1', 'Art 1', 'https://art1.bandcamp.com')",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, downloaded, local_status)
+                     VALUES ('album', 1, 1, 'Archived Album', 'Art 1', 'https://art1.bandcamp.com/album/1', 1, 'archived')",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, downloaded, local_status)
+                     VALUES ('album', 2, 1, 'Missing Album', 'Art 1', 'https://art1.bandcamp.com/album/2', 1, 'missing')",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, downloaded, local_status)
+                     VALUES ('album', 3, 1, 'Present Album', 'Art 1', 'https://art1.bandcamp.com/album/3', 1, 'present')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let fx_db = FxDb::open(&fx_path, &main_path).unwrap();
+        fx_db
+            .reader
+            .call(|c| {
+                let q_arch = FxQuery {
+                    smart: Some(SmartView::Archived),
+                    ..Default::default()
+                };
+                let rows_arch = query_wall(c, &q_arch)?;
+                assert_eq!(rows_arch.len(), 1);
+                assert_eq!(rows_arch[0].rel.key.id, 1);
+
+                let q_miss = FxQuery {
+                    smart: Some(SmartView::MissingFiles),
+                    ..Default::default()
+                };
+                let rows_miss = query_wall(c, &q_miss)?;
+                assert_eq!(rows_miss.len(), 1);
+                assert_eq!(rows_miss[0].rel.key.id, 2);
+
                 Ok(())
             })
             .await

@@ -65,12 +65,19 @@ impl DetailService {
     }
 
     async fn fetch_or_load(&self, key: ItemKey) {
-        if let Ok(Some(cached)) = self
+        if let Ok(Some(mut cached)) = self
             .fx_db
             .reader
             .call(move |c| db::get_release_detail(c, key))
             .await
         {
+            let timeline = self
+                .main_db
+                .reader
+                .call(move |c| bcvault_core::db::repo::library::get_item_timeline(c, key))
+                .await
+                .unwrap_or_default();
+            cached.timeline = timeline;
             self.emit(FxEvent::DetailLoaded {
                 key,
                 detail: Box::new(cached),
@@ -95,13 +102,21 @@ impl DetailService {
             return;
         };
 
-        let detail = parse_raw_detail(&raw);
+        let mut detail = parse_raw_detail(&raw);
         let detail_for_db = detail.clone();
         let _ = self
             .fx_db
             .writer
             .call(move |c| db::upsert_release_detail(c, key, &detail_for_db))
             .await;
+
+        let timeline = self
+            .main_db
+            .reader
+            .call(move |c| bcvault_core::db::repo::library::get_item_timeline(c, key))
+            .await
+            .unwrap_or_default();
+        detail.timeline = timeline;
 
         self.emit(FxEvent::DetailLoaded {
             key,
@@ -180,5 +195,6 @@ pub fn parse_raw_detail(raw: &serde_json::Value) -> ReleaseDetail {
         credits,
         tags,
         duration_s: if total_dur > 0 { Some(total_dur) } else { None },
+        timeline: Vec::new(),
     }
 }

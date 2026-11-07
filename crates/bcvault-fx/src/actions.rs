@@ -125,15 +125,19 @@ pub enum SmartView {
     Updated,
     Preorders,
     NeedsMetadata,
+    Archived,
+    MissingFiles,
 }
 
 impl SmartView {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::RecentlyAdded,
         Self::FreeNotDownloaded,
         Self::Updated,
         Self::Preorders,
         Self::NeedsMetadata,
+        Self::Archived,
+        Self::MissingFiles,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -143,6 +147,8 @@ impl SmartView {
             Self::Updated => "Updated remotely",
             Self::Preorders => "Pre-orders",
             Self::NeedsMetadata => "Needs metadata",
+            Self::Archived => "Archived",
+            Self::MissingFiles => "Missing files",
         }
     }
 }
