@@ -1,0 +1,75 @@
+# Fixture manifest for bcvault parser contract tests
+
+[[discography]]
+file = "music_grid_overflow.html"
+base_url = "https://synthlabel.bandcamp.com"
+slug = "synthlabel"
+expected_band_id = 440011
+expected_name = "Synth Label Collective"
+expected_item_count = 4
+
+[[discography]]
+file = "band_id_meta_props.html"
+base_url = "https://metaprops.bandcamp.com"
+slug = "metaprops"
+expected_band_id = 880022
+expected_name = "Meta Props Artist"
+expected_item_count = 1
+
+[[discography]]
+file = "band_id_script_databand.html"
+base_url = "https://databand.bandcamp.com"
+slug = "databand"
+expected_band_id = 990033
+expected_name = "DataBand Project"
+expected_item_count = 1
+
+[[release]]
+file = "release_free.html"
+expected_id = 1001
+expected_type = "album"
+expected_band_id = 440011
+expected_class = "free"
+expected_track_count = 4
+expected_published_at = 1629417600
+expected_is_preorder = false
+
+[[release]]
+file = "release_nyp.html"
+expected_id = 1002
+expected_type = "album"
+expected_band_id = 440011
+expected_class = "nyp"
+expected_track_count = 3
+expected_published_at = 1663200000
+expected_is_preorder = false
+
+[[release]]
+file = "release_email.html"
+expected_id = 1003
+expected_type = "album"
+expected_band_id = 440011
+expected_class = "email_required"
+expected_track_count = 2
+expected_published_at = 1672531200
+expected_is_preorder = false
+
+[[release]]
+file = "release_paid.html"
+expected_id = 1004
+expected_type = "album"
+expected_band_id = 440011
+expected_class = "paid"
+expected_track_count = 5
+expected_published_at = 1704067200
+expected_is_preorder = false
+
+[[release]]
+file = "release_track.html"
+expected_id = 2001
+expected_type = "track"
+expected_band_id = 440011
+expected_class = "free"
+expected_track_count = 1
+expected_published_at = 1706745600
+expected_is_preorder = false

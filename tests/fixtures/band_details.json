@@ -1,0 +1,10 @@
+{
+  "band_id": 440011,
+  "name": "Synth Label Collective",
+  "discography": [
+    {"item_id": 1001, "item_type": "album", "title": "Zero Voltage", "band_name": "Sub Artist One", "art_id": 11223344},
+    {"item_id": 1002, "item_type": "album", "title": "Modular Horizons", "band_name": "Artist Two", "art_id": 11223345},
+    {"item_id": 1003, "item_type": "album", "title": "Signal Gate", "band_name": "Synth Label Collective", "art_id": 11223346},
+    {"item_id": 2001, "item_type": "track", "title": "Pulse Single", "band_name": "Synth Label Collective", "art_id": 11223347}
+  ]
+}

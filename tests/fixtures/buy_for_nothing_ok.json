@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "downloads": {
+    "flac": {
+      "url": "https://popplers5.bandcamp.com/download/album?enc=flac&id=1001&sig=SANITIZED"
+    },
+    "mp3-320": {
+      "url": "https://popplers5.bandcamp.com/download/album?enc=mp3-320&id=1001&sig=SANITIZED"
+    },
+    "mp3-v0": {
+      "url": "https://popplers5.bandcamp.com/download/album?enc=mp3-v0&id=1001&sig=SANITIZED"
+    }
+  }
+}
