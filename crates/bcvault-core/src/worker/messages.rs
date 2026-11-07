@@ -130,6 +130,9 @@ pub enum WorkerToUiEvent {
         new_items: u32,
         updated: u32,
         error: Option<String>,
+        adopted: u32,
+        missing_local: u32,
+        relinked: u32,
     },
     JobQueued(JobView),
     JobState {

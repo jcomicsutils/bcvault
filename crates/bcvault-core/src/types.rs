@@ -407,6 +407,12 @@ pub struct RememberChoice {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RescanOutcome {
+    pub adopted: u32,
+    pub review_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
     pub eligible: u32,

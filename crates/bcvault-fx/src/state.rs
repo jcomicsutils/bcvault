@@ -398,6 +398,7 @@ impl FxState {
                 new_items,
                 updated,
                 error,
+                ..
             } => {
                 self.add_artist_pending = false;
                 self.active_syncs.remove(&band_id);

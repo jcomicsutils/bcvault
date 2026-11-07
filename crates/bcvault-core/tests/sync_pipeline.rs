@@ -9,16 +9,19 @@ use bcvault_core::{
     db::{
         DbPool,
         repo::{
+            artists,
             history::{self, NewHistoryEntry},
-            releases,
+            library as lib_repo, releases,
         },
     },
     error::BcError,
     types::{
-        AudioFormat, Classification, DownloadSource, ItemKey, ItemType, RateLimitStatus,
-        ReleaseQuery, SyncMode, UpdateReason,
+        AudioFormat, Classification, DownloadSource, ItemKey, ItemType, LocalStatus,
+        RateLimitStatus, ReleaseQuery, SyncMode, UpdateReason,
     },
-    worker::{bridge::UiBridge, messages::WorkerToUiEvent, sync::SyncService},
+    worker::{
+        bridge::UiBridge, library::LibraryService, messages::WorkerToUiEvent, sync::SyncService,
+    },
 };
 use std::{
     path::PathBuf,
@@ -520,4 +523,110 @@ async fn wiremock_429_retry_cancel_resume_and_check_downloaded() {
     );
 
     ev_task.abort();
+}
+
+#[tokio::test]
+async fn wiremock_sync_rescan_auto_adopts_certain_match_and_updates_stats() {
+    let server = MockServer::start().await;
+
+    // 1 grid page with 1 album, 1 album page
+    Mock::given(method("GET"))
+        .and(path("/music"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_grid_html(1)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/album/rel-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(make_release_html(1, 0.0, 3)))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("sync_rescan.db");
+    let pool = DbPool::open(&db_path).unwrap();
+
+    let artist_dir = dir.path().join("Artist 777");
+    let album_dir = artist_dir.join("Album 1");
+    std::fs::create_dir_all(&album_dir).unwrap();
+    std::fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+    std::fs::write(album_dir.join("02.mp3"), b"audio").unwrap();
+    std::fs::write(album_dir.join("03.mp3"), b"audio").unwrap();
+
+    let out_dir = dir.path().join("downloads");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(tx, None);
+
+    let gate = BandcampGate::with_delays(10, 10, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let lib_svc = LibraryService::new(pool.clone(), bridge.clone());
+    let svc = SyncService::new(pool.clone(), client, bridge).with_library(lib_svc);
+
+    // Link artist folder for band_id 777 before sync (so it will be queued until sync discovers artist 777)
+    // Or link folder directly
+    let a_dir = artist_dir.clone();
+    let o_dir = out_dir.clone();
+    let s_uri = server.uri();
+    pool.writer
+        .call(move |c| {
+            artists::upsert(
+                c,
+                &artists::UpsertArtist {
+                    band_id: 777,
+                    slug: "artist-777",
+                    name: "Artist 777",
+                    url: &s_uri,
+                    cover_url: None,
+                },
+            )?;
+            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            Ok::<_, bcvault_core::error::DbError>(())
+        })
+        .await
+        .unwrap();
+
+    let outcome = svc
+        .sync_artist(777, SyncMode::Incremental, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.band_id, 777);
+    assert_eq!(outcome.new_items, 1);
+    assert_eq!(outcome.adopted, 1);
+
+    // Verify release is marked downloaded in DB
+    let rel = pool
+        .reader
+        .call(|c| releases::get_release(c, ItemKey::new(ItemType::Album, 1)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rel.downloaded);
+    assert_eq!(rel.local_status, Some(LocalStatus::Present));
+
+    // Verify artist stats reflect downloaded = 1
+    let stats = pool
+        .reader
+        .call(|c| artists::stats_with_quota(c, 777))
+        .await
+        .unwrap();
+    assert_eq!(stats.downloaded, 1);
+
+    // Collect events and check SyncFinished
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    let sync_finished = events.iter().find_map(|e| match e {
+        WorkerToUiEvent::SyncFinished {
+            band_id, adopted, ..
+        } if *band_id == 777 => Some(*adopted),
+        _ => None,
+    });
+    assert_eq!(sync_finished, Some(1));
 }

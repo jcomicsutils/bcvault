@@ -74,7 +74,9 @@ impl Supervisor {
         let sync_cancel = root_cancel.child_token();
         let library_cancel = root_cancel.child_token();
 
-        let sync_service = SyncService::new(pool.clone(), client.clone(), bridge.clone());
+        let library_service = LibraryService::new(pool.clone(), bridge.clone());
+        let sync_service = SyncService::new(pool.clone(), client.clone(), bridge.clone())
+            .with_library(library_service.clone());
         let dl_manager = DownloadManager::new(
             pool.clone(),
             client.clone(),
@@ -88,7 +90,6 @@ impl Supervisor {
             bridge.clone(),
             paths.cover_cache_dir.clone(),
         );
-        let library_service = LibraryService::new(pool.clone(), bridge.clone());
 
         bridge.emit(WorkerToUiEvent::Ready {
             artists: initial_artists,
@@ -121,28 +122,24 @@ impl Supervisor {
             UiToWorkerCommand::AddArtist { input } => {
                 let svc = self.sync_service.clone();
                 let bridge = self.bridge.clone();
-                let lib_svc = self.library_service.clone();
                 let tok = self.sync_cancel.child_token();
-                let lib_tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
-                    match svc.add_and_sync_artist(&input, tok).await {
-                        Ok(outcome) => {
-                            lib_svc.on_artist_synced(outcome.band_id, lib_tok).await;
-                        }
-                        Err(e) => {
-                            bridge.log(
-                                LogLevel::Error,
-                                "sync",
-                                format!("Add artist '{input}' failed: {e}"),
-                                None,
-                            );
-                            bridge.emit(WorkerToUiEvent::SyncFinished {
-                                band_id: 0,
-                                new_items: 0,
-                                updated: 0,
-                                error: Some(e.to_string()),
-                            });
-                        }
+                    if let Err(e) = svc.add_and_sync_artist(&input, tok).await {
+                        bridge.log(
+                            LogLevel::Error,
+                            "sync",
+                            format!("Add artist '{input}' failed: {e}"),
+                            None,
+                        );
+                        bridge.emit(WorkerToUiEvent::SyncFinished {
+                            band_id: 0,
+                            new_items: 0,
+                            updated: 0,
+                            error: Some(e.to_string()),
+                            adopted: 0,
+                            missing_local: 0,
+                            relinked: 0,
+                        });
                     }
                 });
             }
@@ -199,9 +196,7 @@ impl Supervisor {
                 let pool = self.pool.clone();
                 let svc = self.sync_service.clone();
                 let bridge = self.bridge.clone();
-                let lib_svc = self.library_service.clone();
                 let tok = self.sync_cancel.child_token();
-                let lib_tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
                     let ids: Vec<i64> = match scope {
                         SyncScope::Selected(v) => v,
@@ -219,24 +214,22 @@ impl Supervisor {
                         if tok.is_cancelled() {
                             break;
                         }
-                        match svc.sync_artist(band_id, mode, tok.clone()).await {
-                            Ok(_) => {
-                                lib_svc.on_artist_synced(band_id, lib_tok.clone()).await;
-                            }
-                            Err(e) => {
-                                bridge.log(
-                                    LogLevel::Error,
-                                    "sync",
-                                    format!("Sync artist {band_id} failed: {e}"),
-                                    None,
-                                );
-                                bridge.emit(WorkerToUiEvent::SyncFinished {
-                                    band_id,
-                                    new_items: 0,
-                                    updated: 0,
-                                    error: Some(e.to_string()),
-                                });
-                            }
+                        if let Err(e) = svc.sync_artist(band_id, mode, tok.clone()).await {
+                            bridge.log(
+                                LogLevel::Error,
+                                "sync",
+                                format!("Sync artist {band_id} failed: {e}"),
+                                None,
+                            );
+                            bridge.emit(WorkerToUiEvent::SyncFinished {
+                                band_id,
+                                new_items: 0,
+                                updated: 0,
+                                error: Some(e.to_string()),
+                                adopted: 0,
+                                missing_local: 0,
+                                relinked: 0,
+                            });
                         }
                     }
                 });

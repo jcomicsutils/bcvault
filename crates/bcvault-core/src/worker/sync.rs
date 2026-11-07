@@ -9,7 +9,7 @@ use crate::{
     },
     error::{BcError, DbError},
     types::{ItemKey, LogLevel, SyncMode, SyncPhase, SyncProgress},
-    worker::{bridge::UiBridge, messages::WorkerToUiEvent},
+    worker::{bridge::UiBridge, library::LibraryService, messages::WorkerToUiEvent},
 };
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +19,7 @@ pub struct SyncService {
     pub pool: DbPool,
     pub client: BandcampClient,
     pub bridge: UiBridge,
+    pub library: Option<LibraryService>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,6 +27,9 @@ pub struct SyncOutcome {
     pub band_id: i64,
     pub new_items: u32,
     pub updated: u32,
+    pub adopted: u32,
+    pub missing_local: u32,
+    pub relinked: u32,
 }
 
 impl SyncService {
@@ -34,7 +38,13 @@ impl SyncService {
             pool,
             client,
             bridge,
+            library: None,
         }
+    }
+
+    pub fn with_library(mut self, library: LibraryService) -> Self {
+        self.library = Some(library);
+        self
     }
 
     pub async fn add_and_sync_artist(
@@ -98,6 +108,9 @@ impl SyncService {
                 band_id: known_band_id.unwrap_or(0),
                 new_items: 0,
                 updated: 0,
+                adopted: 0,
+                missing_local: 0,
+                relinked: 0,
             });
         }
 
@@ -307,6 +320,14 @@ impl SyncService {
             }
         }
 
+        let mut adopted_count = 0_u32;
+        if !cancel.is_cancelled()
+            && let Some(lib) = &self.library
+        {
+            let outcome = lib.rescan_and_adopt_on_sync(band_id, cancel.clone()).await;
+            adopted_count = outcome.adopted;
+        }
+
         self.bridge
             .emit(WorkerToUiEvent::SyncProgress(SyncProgress {
                 band_id,
@@ -341,12 +362,18 @@ impl SyncService {
             new_items: new_count,
             updated: updated_count,
             error: None,
+            adopted: adopted_count,
+            missing_local: 0,
+            relinked: 0,
         });
 
         Ok(SyncOutcome {
             band_id,
             new_items: new_count,
             updated: updated_count,
+            adopted: adopted_count,
+            missing_local: 0,
+            relinked: 0,
         })
     }
 }

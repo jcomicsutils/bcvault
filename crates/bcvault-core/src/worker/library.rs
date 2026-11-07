@@ -16,7 +16,7 @@ use crate::library::verify::{
 use crate::types::{
     BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus, LogLevel,
     MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem, OnMissing,
-    ReleaseQuery, ReleaseRow, RememberChoice, SyncScope,
+    ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -1060,7 +1060,20 @@ impl LibraryService {
     }
 
     /// Checks if a match was queued for this artist prior to its first sync, and executes it.
-    pub async fn on_artist_synced(&self, band_id: i64, cancel: CancellationToken) {
+    /// Otherwise rescans the linked folder on sync and auto-adopts confident matches into a "sync" batch.
+    pub async fn on_artist_synced(&self, band_id: i64, cancel: CancellationToken) -> RescanOutcome {
+        self.rescan_and_adopt_on_sync(band_id, cancel).await
+    }
+
+    /// Rescans the linked folder for an artist during sync, auto-adopting certain matches
+    /// into a "sync" batch, and updating review items if any.
+    pub async fn rescan_and_adopt_on_sync(
+        &self,
+        band_id: i64,
+        cancel: CancellationToken,
+    ) -> RescanOutcome {
+        let _guard = self.job_lock.lock().await;
+
         let queued_opt = {
             let mut guard = self.pending_first_matches.lock().await;
             guard.remove(&band_id)
@@ -1073,57 +1086,17 @@ impl LibraryService {
                 format!("Artist {band_id} finished first sync; triggering queued match"),
                 None,
             );
-            self.match_artist_folder(band_id, auto_apply_confident, cancel)
+            let adopted = self
+                .match_artist_folder_internal(band_id, auto_apply_confident, cancel)
                 .await;
+            return RescanOutcome {
+                adopted,
+                review_count: 0,
+            };
         }
-    }
 
-    async fn match_artist_folder_internal(
-        &self,
-        band_id: i64,
-        auto_apply_confident: bool,
-        cancel: CancellationToken,
-    ) {
         let pool = self.pool.clone();
         let bridge = self.bridge.clone();
-
-        let folder_opt = pool
-            .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
-            .await;
-        let folder = match folder_opt {
-            Ok(Some(f)) => f,
-            Ok(None) => {
-                bridge.log(
-                    LogLevel::Warn,
-                    "library",
-                    format!("No linked folder for artist {band_id}"),
-                    None,
-                );
-                return;
-            }
-            Err(e) => {
-                bridge.log(
-                    LogLevel::Error,
-                    "library",
-                    format!("Failed to query folder for artist {band_id}: {e}"),
-                    None,
-                );
-                return;
-            }
-        };
-
-        let state = probe_folder(&folder.path);
-        bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
-        if state != FolderState::Ok {
-            bridge.log(
-                LogLevel::Warn,
-                "library",
-                format!("Folder is {state:?}: {}", folder.path.display()),
-                None,
-            );
-            return;
-        }
 
         let st = match pool
             .reader
@@ -1138,9 +1111,34 @@ impl LibraryService {
                     format!("Failed to read settings: {e}"),
                     None,
                 );
-                return;
+                return RescanOutcome::default();
             }
         };
+
+        if !st.rescan_linked_on_sync {
+            return RescanOutcome::default();
+        }
+
+        let folder_opt = pool
+            .reader
+            .call(move |c| lib_repo::get_folder(c, band_id))
+            .await;
+        let folder = match folder_opt {
+            Ok(Some(f)) => f,
+            _ => return RescanOutcome::default(),
+        };
+
+        let state = probe_folder(&folder.path);
+        bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
+        if state != FolderState::Ok {
+            bridge.log(
+                LogLevel::Warn,
+                "library",
+                format!("Folder is {state:?}: {}", folder.path.display()),
+                None,
+            );
+            return RescanOutcome::default();
+        }
 
         bridge.emit(WorkerToUiEvent::LibraryProgress {
             phase: LibraryPhase::Scanning,
@@ -1162,7 +1160,7 @@ impl LibraryService {
                     format!("Failed to scan folder '{}': {e}", folder.path.display()),
                     None,
                 );
-                return;
+                return RescanOutcome::default();
             }
             Err(e) => {
                 bridge.log(
@@ -1171,12 +1169,12 @@ impl LibraryService {
                     format!("Scan task panicked: {e}"),
                     None,
                 );
-                return;
+                return RescanOutcome::default();
             }
         };
 
         if cancel.is_cancelled() {
-            return;
+            return RescanOutcome::default();
         }
 
         let query = ReleaseQuery {
@@ -1201,7 +1199,194 @@ impl LibraryService {
                     format!("Failed to load releases for matching: {e}"),
                     None,
                 );
-                return;
+                return RescanOutcome::default();
+            }
+        };
+
+        bridge.emit(WorkerToUiEvent::LibraryProgress {
+            phase: LibraryPhase::Matching,
+            done: 0,
+            total: scan_report.candidates.len() as u32,
+            current: None,
+        });
+
+        let assignment = assign_matches(
+            &scan_report.candidates,
+            &releases,
+            st.auto_match_min,
+            st.review_match_min,
+            &ignored,
+        );
+
+        let mut adopted_count = 0_u32;
+        if !assignment.matched.is_empty() {
+            let batch_res = pool
+                .writer
+                .call(|c| lib_repo::create_batch(c, "sync", &BatchSummary::default()))
+                .await;
+            if let Ok(b_id) = batch_res {
+                let batch_id = b_id.max(0) as u64;
+                let decisions: Vec<MatchDecision> = assignment
+                    .matched
+                    .iter()
+                    .map(|m| MatchDecision::Adopt {
+                        key: m.release_key,
+                        path: m.candidate_path.clone(),
+                        format: m.format_guess,
+                        folder_mtime: None,
+                    })
+                    .collect();
+                adopted_count = decisions.len() as u32;
+                self.apply_reconcile_internal(batch_id, decisions).await;
+            }
+        }
+
+        let review_count = assignment.review.len() as u32;
+
+        let report = ReconcileReport {
+            batch_id: 0,
+            band_id,
+            matched: assignment.matched,
+            review: assignment.review,
+            page_only: assignment.page_only,
+            local_only: assignment.local_only,
+            conflicts: assignment.conflicts,
+            restorable: assignment.restorable,
+        };
+        bridge.emit(WorkerToUiEvent::ReconcileReport {
+            report: Box::new(report),
+        });
+
+        RescanOutcome {
+            adopted: adopted_count,
+            review_count,
+        }
+    }
+
+    async fn match_artist_folder_internal(
+        &self,
+        band_id: i64,
+        auto_apply_confident: bool,
+        cancel: CancellationToken,
+    ) -> u32 {
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+
+        let folder_opt = pool
+            .reader
+            .call(move |c| lib_repo::get_folder(c, band_id))
+            .await;
+        let folder = match folder_opt {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                bridge.log(
+                    LogLevel::Warn,
+                    "library",
+                    format!("No linked folder for artist {band_id}"),
+                    None,
+                );
+                return 0;
+            }
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to query folder for artist {band_id}: {e}"),
+                    None,
+                );
+                return 0;
+            }
+        };
+
+        let state = probe_folder(&folder.path);
+        bridge.emit(WorkerToUiEvent::FolderStatus { band_id, state });
+        if state != FolderState::Ok {
+            bridge.log(
+                LogLevel::Warn,
+                "library",
+                format!("Folder is {state:?}: {}", folder.path.display()),
+                None,
+            );
+            return 0;
+        }
+
+        let st = match pool
+            .reader
+            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to read settings: {e}"),
+                    None,
+                );
+                return 0;
+            }
+        };
+
+        bridge.emit(WorkerToUiEvent::LibraryProgress {
+            phase: LibraryPhase::Scanning,
+            done: 0,
+            total: 0,
+            current: Some(folder.path.display().to_string()),
+        });
+
+        let scan_path = folder.path.clone();
+        let scan_cancel = cancel.clone();
+        let scan_res =
+            tokio::task::spawn_blocking(move || scan_linked_folder(&scan_path, &scan_cancel)).await;
+        let scan_report = match scan_res {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to scan folder '{}': {e}", folder.path.display()),
+                    None,
+                );
+                return 0;
+            }
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Scan task panicked: {e}"),
+                    None,
+                );
+                return 0;
+            }
+        };
+
+        if cancel.is_cancelled() {
+            return 0;
+        }
+
+        let query = ReleaseQuery {
+            band_id: Some(band_id),
+            ..Default::default()
+        };
+        let rel_res = pool
+            .reader
+            .call(move |c| {
+                let rels = releases::query_releases(c, &query)?;
+                let ign = lib_repo::get_ignored_local(c, band_id)?;
+                Ok::<_, DbError>((rels, ign))
+            })
+            .await;
+
+        let (releases, ignored) = match rel_res {
+            Ok(pair) => pair,
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to load releases for matching: {e}"),
+                    None,
+                );
+                return 0;
             }
         };
 
@@ -1233,7 +1418,7 @@ impl LibraryService {
                     format!("Failed to create batch: {e}"),
                     None,
                 );
-                return;
+                return 0;
             }
         };
 
@@ -1265,6 +1450,7 @@ impl LibraryService {
             None,
         );
 
+        let mut adopted_count = 0_u32;
         if auto_apply_confident && !report.matched.is_empty() {
             let decisions: Vec<MatchDecision> = report
                 .matched
@@ -1276,9 +1462,12 @@ impl LibraryService {
                     folder_mtime: None,
                 })
                 .collect();
+            adopted_count = decisions.len() as u32;
             self.apply_reconcile_internal(report.batch_id, decisions)
                 .await;
         }
+
+        adopted_count
     }
 
     async fn apply_reconcile_internal(&self, batch_id: u64, decisions: Vec<MatchDecision>) {
@@ -2963,5 +3152,320 @@ mod tests {
             .iter()
             .any(|e| matches!(e, WorkerToUiEvent::ReleaseUpdated(..)));
         assert!(updated);
+    }
+
+    #[tokio::test]
+    async fn test_sync_rescan_auto_adopts_certain_match_under_sync_batch() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("rescan_adopt_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 801;
+        let key = ItemKey::new(ItemType::Album, 810);
+
+        let artist_dir = dir.path().join("Artist 801");
+        let album_dir = artist_dir.join("Album One");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+        let out_dir = dir.path().join("downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let a_dir = artist_dir.clone();
+        let o_dir = out_dir.clone();
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-801",
+                        name: "Artist 801",
+                        url: "https://artist801.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Album One",
+                    artist_name: "Artist 801",
+                    url: "https://artist801.bandcamp.com/album/album-one",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+
+                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        let outcome = svc.rescan_and_adopt_on_sync(band_id, cancel).await;
+
+        assert_eq!(outcome.adopted, 1);
+        assert_eq!(outcome.review_count, 0);
+
+        // Check release updated in DB
+        let rel = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rel.downloaded);
+        assert_eq!(rel.local_status, Some(LocalStatus::Present));
+        assert_eq!(rel.origin, Some(crate::types::Origin::Imported));
+        assert_eq!(rel.local_path, Some(album_dir));
+
+        // Check library_batches has kind = "sync"
+        let batches = pool
+            .reader
+            .call(|c| {
+                let mut stmt = c.prepare("SELECT kind FROM library_batches")?;
+                let kinds: Vec<String> = stmt
+                    .query_map([], |r| r.get(0))?
+                    .filter_map(Result::ok)
+                    .collect();
+                Ok::<_, DbError>(kinds)
+            })
+            .await
+            .unwrap();
+        assert!(batches.contains(&"sync".to_string()));
+
+        // Check events emitted
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        let applied = events.iter().any(|e| {
+            matches!(
+                e,
+                WorkerToUiEvent::LibraryApplied { summary, .. } if summary.adopted == 1
+            )
+        });
+        assert!(applied);
+        let updated = events.iter().any(|e| {
+            matches!(
+                e,
+                WorkerToUiEvent::ReleaseUpdated(r) if r.key == key
+            )
+        });
+        assert!(updated);
+    }
+
+    #[tokio::test]
+    async fn test_sync_rescan_uncertain_match_raises_review_count_without_adopting() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("rescan_uncertain_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 802;
+        let key = ItemKey::new(ItemType::Album, 820);
+
+        let artist_dir = dir.path().join("Artist 802");
+        let album_dir = artist_dir.join("Album Two (Deluxe Edition)");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+        let out_dir = dir.path().join("downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let a_dir = artist_dir.clone();
+        let o_dir = out_dir.clone();
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-802",
+                        name: "Artist 802",
+                        url: "https://artist802.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Album Two",
+                    artist_name: "Artist 802",
+                    url: "https://artist802.bandcamp.com/album/album-two",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+
+                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        let outcome = svc.rescan_and_adopt_on_sync(band_id, cancel).await;
+
+        assert_eq!(outcome.adopted, 0);
+        assert_eq!(outcome.review_count, 1);
+
+        // Check release NOT downloaded
+        let rel = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rel.downloaded);
+        assert_eq!(rel.local_status, None);
+
+        // Check no "sync" batch created
+        let batches = pool
+            .reader
+            .call(|c| {
+                let mut stmt =
+                    c.prepare("SELECT count(*) FROM library_batches WHERE kind = 'sync'")?;
+                let count: i64 = stmt.query_row([], |r| r.get(0))?;
+                Ok::<_, DbError>(count)
+            })
+            .await
+            .unwrap();
+        assert_eq!(batches, 0);
+
+        // Check ReconcileReport emitted with review items
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        let report = events
+            .into_iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ReconcileReport { report } => Some(report),
+                _ => None,
+            })
+            .expect("should emit ReconcileReport with review items");
+        assert_eq!(report.review.len(), 1);
+        assert_eq!(report.matched.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_sync_rescan_disabled_by_setting_adopts_nothing() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("rescan_disabled_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 803;
+        let key = ItemKey::new(ItemType::Album, 830);
+
+        let artist_dir = dir.path().join("Artist 803");
+        let album_dir = artist_dir.join("Album Three");
+        fs::create_dir_all(&album_dir).unwrap();
+        fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
+
+        let out_dir = dir.path().join("downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let a_dir = artist_dir.clone();
+        let o_dir = out_dir.clone();
+        pool.writer
+            .call(move |c| {
+                let s = Settings {
+                    rescan_linked_on_sync: false,
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &s)?;
+
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-803",
+                        name: "Artist 803",
+                        url: "https://artist803.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+
+                let disc = DiscoveredRelease {
+                    key,
+                    band_id,
+                    title: "Album Three",
+                    artist_name: "Artist 803",
+                    url: "https://artist803.bandcamp.com/album/album-three",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+
+                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        let outcome = svc.rescan_and_adopt_on_sync(band_id, cancel).await;
+
+        assert_eq!(outcome.adopted, 0);
+        assert_eq!(outcome.review_count, 0);
+
+        let rel = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rel.downloaded);
+    }
+
+    #[tokio::test]
+    async fn test_sync_rescan_unlinked_artist_does_nothing() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("rescan_unlinked_test.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let cancel = CancellationToken::new();
+        let outcome = svc.rescan_and_adopt_on_sync(999, cancel).await;
+        assert_eq!(outcome.adopted, 0);
+        assert_eq!(outcome.review_count, 0);
     }
 }
