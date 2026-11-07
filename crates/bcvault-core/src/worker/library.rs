@@ -1215,6 +1215,7 @@ impl LibraryService {
             band_id: Some(band_id),
             ..Default::default()
         };
+        let root = folder.path.clone();
         let rel_res = pool
             .reader
             .call(move |c| {
@@ -1226,15 +1227,16 @@ impl LibraryService {
                     .filter_map(|r| r.local_path.as_ref())
                     .map(|p| lib_repo::normalize_path_key(p))
                     .collect();
+                let linked = crate::library::service::linked_releases_under(&rels, &root);
                 let adoptable: Vec<ReleaseRow> = rels
                     .into_iter()
                     .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
                     .collect();
-                Ok::<_, DbError>((adoptable, ign, active_linked_keys))
+                Ok::<_, DbError>((adoptable, ign, active_linked_keys, linked))
             })
             .await;
 
-        let (releases, ignored, active_linked_keys) = match rel_res {
+        let (releases, ignored, active_linked_keys, linked) = match rel_res {
             Ok(tuple) => tuple,
             Err(e) => {
                 bridge.log(
@@ -1269,15 +1271,16 @@ impl LibraryService {
         );
 
         let mut adopted_count = 0_u32;
-        if !assignment.matched.is_empty() {
+        let mut linked = linked;
+        let mut matched = assignment.matched;
+        if !matched.is_empty() {
             let batch_res = pool
                 .writer
                 .call(|c| lib_repo::create_batch(c, "sync", &BatchSummary::default()))
                 .await;
             if let Ok(b_id) = batch_res {
                 let batch_id = b_id.max(0) as u64;
-                let decisions: Vec<MatchDecision> = assignment
-                    .matched
+                let decisions: Vec<MatchDecision> = matched
                     .iter()
                     .map(|m| MatchDecision::Adopt {
                         key: m.release_key,
@@ -1288,6 +1291,14 @@ impl LibraryService {
                     .collect();
                 adopted_count = decisions.len() as u32;
                 self.apply_reconcile_internal(batch_id, decisions).await;
+
+                for m in matched.drain(..) {
+                    linked.push(crate::library::service::LinkedRelease {
+                        release_key: m.release_key,
+                        release_title: m.release_title,
+                        path: m.candidate_path,
+                    });
+                }
             }
         }
 
@@ -1300,12 +1311,13 @@ impl LibraryService {
             let report = ReconcileReport {
                 batch_id: 0,
                 band_id,
-                matched: assignment.matched,
+                matched,
                 review: assignment.review,
                 page_only: assignment.page_only,
                 local_only: assignment.local_only,
                 conflicts: assignment.conflicts,
                 restorable: assignment.restorable,
+                linked,
             };
             bridge.emit(WorkerToUiEvent::ReconcileReport {
                 report: Box::new(report),
@@ -1431,6 +1443,7 @@ impl LibraryService {
             band_id: Some(band_id),
             ..Default::default()
         };
+        let root = folder.path.clone();
         let rel_res = pool
             .reader
             .call(move |c| {
@@ -1442,15 +1455,16 @@ impl LibraryService {
                     .filter_map(|r| r.local_path.as_ref())
                     .map(|p| lib_repo::normalize_path_key(p))
                     .collect();
+                let linked = crate::library::service::linked_releases_under(&rels, &root);
                 let adoptable: Vec<ReleaseRow> = rels
                     .into_iter()
                     .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
                     .collect();
-                Ok::<_, DbError>((adoptable, ign, active_linked_keys))
+                Ok::<_, DbError>((adoptable, ign, active_linked_keys, linked))
             })
             .await;
 
-        let (releases, ignored, active_linked_keys) = match rel_res {
+        let (releases, ignored, active_linked_keys, linked) = match rel_res {
             Ok(tuple) => tuple,
             Err(e) => {
                 bridge.log(
@@ -1484,7 +1498,7 @@ impl LibraryService {
             &ignored,
         );
 
-        let batch_id = match pool
+        let mut batch_id = match pool
             .writer
             .call(|c| lib_repo::create_batch(c, "adopt", &crate::types::BatchSummary::default()))
             .await
@@ -1501,15 +1515,51 @@ impl LibraryService {
             }
         };
 
+        let mut matched = assignment.matched;
+        let mut linked = linked;
+        let mut adopted_count = 0_u32;
+        if auto_apply_confident && !matched.is_empty() {
+            let decisions: Vec<MatchDecision> = matched
+                .iter()
+                .map(|m| MatchDecision::Adopt {
+                    key: m.release_key,
+                    path: m.candidate_path.clone(),
+                    format: m.format_guess,
+                    folder_mtime: None,
+                })
+                .collect();
+            adopted_count = decisions.len() as u32;
+            self.apply_reconcile_internal(batch_id, decisions).await;
+
+            for m in matched.drain(..) {
+                linked.push(crate::library::service::LinkedRelease {
+                    release_key: m.release_key,
+                    release_title: m.release_title,
+                    path: m.candidate_path,
+                });
+            }
+
+            if let Ok(new_id) = pool
+                .writer
+                .call(|c| {
+                    lib_repo::create_batch(c, "adopt", &crate::types::BatchSummary::default())
+                })
+                .await
+            {
+                batch_id = new_id.max(0) as u64;
+            }
+        }
+
         let report = ReconcileReport {
             batch_id,
             band_id,
-            matched: assignment.matched,
+            matched,
             review: assignment.review,
             page_only: assignment.page_only,
             local_only: assignment.local_only,
             conflicts: assignment.conflicts,
             restorable: assignment.restorable,
+            linked,
         };
 
         bridge.emit(WorkerToUiEvent::ReconcileReport {
@@ -1529,23 +1579,6 @@ impl LibraryService {
             None,
         );
 
-        let mut adopted_count = 0_u32;
-        if auto_apply_confident && !report.matched.is_empty() {
-            let decisions: Vec<MatchDecision> = report
-                .matched
-                .iter()
-                .map(|m| MatchDecision::Adopt {
-                    key: m.release_key,
-                    path: m.candidate_path.clone(),
-                    format: m.format_guess,
-                    folder_mtime: None,
-                })
-                .collect();
-            adopted_count = decisions.len() as u32;
-            self.apply_reconcile_internal(report.batch_id, decisions)
-                .await;
-        }
-
         adopted_count
     }
 
@@ -1560,6 +1593,11 @@ impl LibraryService {
         let res = pool
             .writer
             .call(move |c| {
+                let actual_batch_id = if batch_id == 0 {
+                    lib_repo::create_batch(c, "adopt", &BatchSummary::default())?
+                } else {
+                    batch_id as i64
+                };
                 let mut summary = BatchSummary::default();
                 let mut touched_keys = Vec::new();
 
@@ -1591,13 +1629,13 @@ impl LibraryService {
                                 format,
                                 crate::types::Origin::Imported,
                                 mtime,
-                                batch_id as i64,
+                                actual_batch_id,
                             )?;
                             summary.adopted += 1;
                             touched_keys.push(key);
                         }
                         MatchDecision::Restore { key, path } => {
-                            lib_repo::restore(c, key, &path, batch_id as i64)?;
+                            lib_repo::restore(c, key, &path, actual_batch_id)?;
                             summary.restored += 1;
                             touched_keys.push(key);
                         }
@@ -1610,7 +1648,7 @@ impl LibraryService {
                     }
                 }
 
-                lib_repo::update_batch_summary(c, batch_id as i64, &summary)?;
+                lib_repo::update_batch_summary(c, actual_batch_id, &summary)?;
 
                 let mut updated_rows = Vec::new();
                 let mut touched_bands = std::collections::HashSet::new();
@@ -1627,24 +1665,27 @@ impl LibraryService {
                     band_stats.push((band_id, stats));
                 }
 
-                Ok::<_, DbError>((summary, updated_rows, band_stats))
+                Ok::<_, DbError>((actual_batch_id as u64, summary, updated_rows, band_stats))
             })
             .await;
 
         match res {
-            Ok((summary, rows, stats_per_band)) => {
+            Ok((actual_batch_id, summary, rows, stats_per_band)) => {
                 for row in rows {
                     bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(row)));
                 }
                 for (band_id, stats) in stats_per_band {
                     bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
                 }
-                bridge.emit(WorkerToUiEvent::LibraryApplied { batch_id, summary });
+                bridge.emit(WorkerToUiEvent::LibraryApplied {
+                    batch_id: actual_batch_id,
+                    summary,
+                });
                 bridge.log(
                     LogLevel::Info,
                     "library",
                     format!(
-                        "Applied batch {batch_id}: {} adopted, {} restored, {} ignored",
+                        "Applied batch {actual_batch_id}: {} adopted, {} restored, {} ignored",
                         summary.adopted, summary.restored, summary.ignored
                     ),
                     None,
@@ -3647,6 +3688,9 @@ mod tests {
         assert_eq!(report.matched.len(), 0);
         assert_eq!(report.review.len(), 0);
         assert_eq!(report.page_only.len(), 0);
+        assert_eq!(report.linked.len(), 1);
+        assert_eq!(report.linked[0].release_key, key);
+        assert_eq!(report.linked[0].release_title, "Album One");
 
         // 2. Calling rescan_and_adopt_on_sync should also produce 0 review and 0 adopted
         let outcome = svc.rescan_and_adopt_on_sync(band_id, cancel).await;

@@ -871,6 +871,7 @@ mod tests {
             local_only: vec![],
             conflicts: vec![],
             restorable: vec![],
+            linked: vec![],
         });
 
         let mut st = UiState::new();

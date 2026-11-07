@@ -770,7 +770,10 @@ fn show_reconcile_report_modal(
                 let tabs = [
                     (
                         FxReportTab::Matched,
-                        format!("Matched ({})", modal.report.matched.len()),
+                        format!(
+                            "Matched ({})",
+                            modal.report.matched.len() + modal.report.linked.len()
+                        ),
                     ),
                     (
                         FxReportTab::Review,
@@ -814,97 +817,151 @@ fn show_reconcile_report_modal(
                 .auto_shrink([false, false])
                 .show(ui, |ui| match modal.active_tab {
                     FxReportTab::Matched => {
-                        ui.horizontal(|ui| {
-                            let all_selected = !modal.report.matched.is_empty()
-                                && modal.selected_matched.len() == modal.report.matched.len();
-                            if paint::sharp_button(
-                                ui,
-                                if all_selected {
-                                    "Deselect All"
-                                } else {
-                                    "Select All"
-                                },
-                            )
-                            .clicked()
-                            {
-                                if all_selected {
-                                    modal.selected_matched.clear();
-                                } else {
-                                    modal.selected_matched =
-                                        modal.report.matched.iter().map(|m| m.release_key).collect();
+                        if !modal.report.matched.is_empty() {
+                            ui.horizontal(|ui| {
+                                let all_selected = !modal.report.matched.is_empty()
+                                    && modal.selected_matched.len() == modal.report.matched.len();
+                                if paint::sharp_button(
+                                    ui,
+                                    if all_selected {
+                                        "Deselect All"
+                                    } else {
+                                        "Select All"
+                                    },
+                                )
+                                .clicked()
+                                {
+                                    if all_selected {
+                                        modal.selected_matched.clear();
+                                    } else {
+                                        modal.selected_matched =
+                                            modal.report.matched.iter().map(|m| m.release_key).collect();
+                                    }
                                 }
-                            }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} of {} proposals selected for adoption",
+                                        modal.selected_matched.len(),
+                                        modal.report.matched.len()
+                                    ))
+                                    .color(th.text_dim),
+                                );
+                            });
+                            ui.add_space(4.0);
+
+                            egui::Grid::new("fx_matched_tab_grid")
+                                .num_columns(5)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for m in &modal.report.matched {
+                                        let mut is_checked =
+                                            modal.selected_matched.contains(&m.release_key);
+                                        if ui.checkbox(&mut is_checked, "").changed() {
+                                            if is_checked {
+                                                modal.selected_matched.insert(m.release_key);
+                                            } else {
+                                                modal.selected_matched.remove(&m.release_key);
+                                            }
+                                        }
+
+                                        let art_id = state
+                                            .rows
+                                            .iter()
+                                            .find(|r| r.rel.key == m.release_key)
+                                            .and_then(|r| r.art_id);
+                                        let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
+                                        paint_cover_slot(
+                                            ui.painter(),
+                                            state,
+                                            art_id,
+                                            m.release_key.id,
+                                            cov_r,
+                                            Tier::T64,
+                                            1.0,
+                                            Vec2::ZERO,
+                                        );
+
+                                        ui.label(RichText::new(&m.release_title).strong());
+
+                                        let fmt_str = m
+                                            .format_guess
+                                            .map(|f| format!("[{}]", f.label()))
+                                            .unwrap_or_default();
+                                        ui.label(
+                                            RichText::new(format!("{} {fmt_str}", m.candidate_name))
+                                                .color(th.text_dim)
+                                                .monospace(),
+                                        )
+                                        .on_hover_text(m.candidate_path.display().to_string());
+
+                                        let tip = format!(
+                                            "Score: {:.2}\nSignals:\n{}",
+                                            m.score.value,
+                                            format_signals(&m.score.signals)
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{:.0}%", m.score.value * 100.0))
+                                                .color(th.accent)
+                                                .monospace(),
+                                        )
+                                        .on_hover_text(tip);
+
+                                        ui.end_row();
+                                    }
+                                });
+                        } else if modal.report.linked.is_empty() {
+                            ui.label(RichText::new("No matched releases.").color(th.text_dim));
+                        }
+
+                        if !modal.report.linked.is_empty() {
+                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new(format!(
-                                    "{} of {} proposals selected for adoption",
-                                    modal.selected_matched.len(),
-                                    modal.report.matched.len()
+                                    "Already linked ({})",
+                                    modal.report.linked.len()
                                 ))
+                                .strong()
                                 .color(th.text_dim),
                             );
-                        });
-                        ui.add_space(4.0);
-
-                        egui::Grid::new("fx_matched_tab_grid")
-                            .num_columns(5)
-                            .spacing([8.0, 6.0])
-                            .show(ui, |ui| {
-                                for m in &modal.report.matched {
-                                    let mut is_checked =
-                                        modal.selected_matched.contains(&m.release_key);
-                                    if ui.checkbox(&mut is_checked, "").changed() {
-                                        if is_checked {
-                                            modal.selected_matched.insert(m.release_key);
-                                        } else {
-                                            modal.selected_matched.remove(&m.release_key);
-                                        }
+                            ui.add_space(4.0);
+                            egui::Grid::new("fx_linked_tab_grid")
+                                .num_columns(3)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for l in &modal.report.linked {
+                                        let art_id = state
+                                            .rows
+                                            .iter()
+                                            .find(|r| r.rel.key == l.release_key)
+                                            .and_then(|r| r.art_id);
+                                        let (cov_r, _) = ui.allocate_exact_size(
+                                            Vec2::splat(26.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        paint_cover_slot(
+                                            ui.painter(),
+                                            state,
+                                            art_id,
+                                            l.release_key.id,
+                                            cov_r,
+                                            Tier::T64,
+                                            1.0,
+                                            Vec2::ZERO,
+                                        );
+                                        ui.label(RichText::new(&l.release_title).strong());
+                                        let name = l
+                                            .path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| l.path.display().to_string());
+                                        ui.label(
+                                            RichText::new(name).color(th.text_dim).monospace(),
+                                        )
+                                        .on_hover_text(l.path.display().to_string());
+                                        ui.end_row();
                                     }
-
-                                    let art_id = state
-                                        .rows
-                                        .iter()
-                                        .find(|r| r.rel.key == m.release_key)
-                                        .and_then(|r| r.art_id);
-                                    let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
-                                    paint_cover_slot(
-                                        ui.painter(),
-                                        state,
-                                        art_id,
-                                        m.release_key.id,
-                                        cov_r,
-                                        Tier::T64,
-                                        1.0,
-                                        Vec2::ZERO,
-                                    );
-
-                                    ui.label(RichText::new(&m.release_title).strong());
-
-                                    let fmt_str = m
-                                        .format_guess
-                                        .map(|f| format!("[{}]", f.label()))
-                                        .unwrap_or_default();
-                                    ui.label(
-                                        RichText::new(format!("{} {fmt_str}", m.candidate_name))
-                                            .color(th.text_dim)
-                                            .monospace(),
-                                    )
-                                    .on_hover_text(m.candidate_path.display().to_string());
-
-                                    let tip = format!(
-                                        "Score: {:.2}\nSignals:\n{}",
-                                        m.score.value,
-                                        format_signals(&m.score.signals)
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("{:.0}%", m.score.value * 100.0))
-                                            .color(th.accent)
-                                            .monospace(),
-                                    )
-                                    .on_hover_text(tip);
-
-                                    ui.end_row();
-                                }
-                            });
+                                });
+                        }
                     }
                     FxReportTab::Review => {
                         if modal.report.review.is_empty() {

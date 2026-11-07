@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use chrono::Datelike;
-use strsim::jaro_winkler;
+use strsim::normalized_levenshtein;
 
 use crate::library::scan::AlbumCandidate;
 use crate::library::textmatch::{name_variant_keys, normalize};
@@ -173,7 +173,11 @@ pub fn assign_matches(
             high_scoring_cands
                 .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             // If top two are close (< 0.05 difference), it's a conflict (e.g. FLAC and MP3 duplicates)
-            if (high_scoring_cands[0].1 - high_scoring_cands[1].1) < 0.05 {
+            // A conflict needs two strong, near-equal candidates (e.g. FLAC and MP3
+            // copies). A weak runner-up is handled by greedy assignment and review.
+            if high_scoring_cands[1].1 >= auto_match_min
+                && (high_scoring_cands[0].1 - high_scoring_cands[1].1) < 0.05
+            {
                 conflicted_rel_indices.insert(rel_idx);
                 let paths: Vec<std::path::PathBuf> = high_scoring_cands
                     .iter()
@@ -211,7 +215,9 @@ pub fn assign_matches(
         if high_scoring_rels.len() > 1 {
             high_scoring_rels
                 .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            if (high_scoring_rels[0].1 - high_scoring_rels[1].1) < 0.05 {
+            if high_scoring_rels[1].1 >= auto_match_min
+                && (high_scoring_rels[0].1 - high_scoring_rels[1].1) < 0.05
+            {
                 conflicted_cand_indices.insert(cand_idx);
                 let rel_keys: Vec<crate::types::ItemKey> = high_scoring_rels
                     .iter()
@@ -441,35 +447,53 @@ pub fn score_candidate(
     let norm_folder = normalize(&candidate.name);
     let variant_keys = name_variant_keys(artist_name, title);
 
-    let mut base_score = 0.0f32;
+    // 2. Folder name. Folders are usually "{artist} - {title}"; comparing the
+    // whole string lets the shared artist prefix dominate any fuzzy metric, so
+    // the title part after the last " - " is compared on its own as well.
+    // Fuzzy similarity uses normalized Levenshtein, which (unlike Jaro-Winkler)
+    // does not reward a common prefix.
+    let folder_title = candidate
+        .name
+        .rsplit_once(" - ")
+        .map(|(_, t)| normalize(t))
+        .unwrap_or_else(|| norm_folder.clone());
 
-    // 2. Folder name match against name variants:
-    // If exact variant match -> base 0.95, else fuzzy Jaro-Winkler
-    if variant_keys.contains(&norm_folder) {
-        base_score = 0.95;
-        signals.insert(Signal::FolderName);
+    let folder_exact = variant_keys.contains(&norm_folder) || folder_title == norm_title;
+    let folder_sim = if folder_exact {
+        1.0
     } else {
-        let best_folder_sim = variant_keys
-            .iter()
-            .map(|k| jaro_winkler(&norm_folder, k) as f32)
-            .fold(0.0f32, f32::max);
-
-        if best_folder_sim >= 0.80 {
-            signals.insert(Signal::FolderName);
-        }
-        base_score = base_score.max(best_folder_sim);
+        title_similarity(&folder_title, &norm_title)
+    };
+    if folder_sim >= 0.80 {
+        signals.insert(Signal::FolderName);
     }
 
-    // 3. Tag album similarity against title
-    if let Some(tag_album) = candidate.metadata.as_ref().and_then(|m| m.album.as_deref()) {
-        let norm_tag_album = normalize(tag_album);
-        let album_sim = jaro_winkler(&norm_tag_album, &norm_title) as f32;
-
-        if album_sim >= 0.80 {
-            signals.insert(Signal::AlbumTag);
-        }
-        base_score = base_score.max(album_sim);
+    // 3. Album tag against title.
+    let album_sim = candidate
+        .metadata
+        .as_ref()
+        .and_then(|m| m.album.as_deref())
+        .map(|a| title_similarity(&normalize(a), &norm_title));
+    let album_exact = album_sim.is_some_and(|s| s >= 1.0);
+    if album_sim.is_some_and(|s| s >= 0.80) {
+        signals.insert(Signal::AlbumTag);
     }
+
+    let mut base_score = match (folder_exact, album_exact) {
+        (true, true) => 1.0,
+        (false, true) => 0.97,
+        (true, false) => 0.95,
+        (false, false) => folder_sim.max(album_sim.unwrap_or(0.0)),
+    };
+    // Two independent signals disagreeing strongly (album tag names another
+    // release) lowers confidence in a folder-name-only match.
+    if folder_exact && album_sim.is_some_and(|s| s < 0.5) {
+        base_score = base_score.min(0.80);
+    }
+
+    // Track count and year only refine a name-based match; on their own they
+    // say nothing (every single has one track, many releases share a year).
+    let name_evidence = base_score >= 0.60;
 
     // 4. Track count signal
     // For single tracks: audio_count == 1 is treated as match
@@ -479,7 +503,7 @@ pub fn score_candidate(
         track_count.map(|c| c as usize)
     };
 
-    if let Some(expected) = expected_tracks {
+    if let Some(expected) = expected_tracks.filter(|_| name_evidence) {
         if candidate.track_count == expected {
             base_score += 0.05;
             signals.insert(Signal::TrackCount);
@@ -489,13 +513,14 @@ pub fn score_candidate(
     }
 
     // 5. Release year match
-    let year_matches = release_year.is_some_and(|ry| {
-        candidate
-            .metadata
-            .as_ref()
-            .and_then(|m| m.year)
-            .is_some_and(|ty| ry == ty)
-    });
+    let year_matches = name_evidence
+        && release_year.is_some_and(|ry| {
+            candidate
+                .metadata
+                .as_ref()
+                .and_then(|m| m.year)
+                .is_some_and(|ty| ry == ty)
+        });
     if year_matches {
         base_score += 0.02;
         signals.insert(Signal::Year);
@@ -521,6 +546,31 @@ pub fn score_candidate(
         value: base_score.clamp(0.0, 1.0),
         signals: signals.into_iter().collect(),
     }
+}
+
+/// Similarity of two normalized titles in `[0, 1]`: the better of character-level
+/// normalized Levenshtein and token-set overlap (handles reordered words).
+fn title_similarity(a: &str, b: &str) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if a == b {
+        return 1.0;
+    }
+    let lev = normalized_levenshtein(a, b) as f32;
+    let ta: BTreeSet<&str> = a.split_whitespace().collect();
+    let tb: BTreeSet<&str> = b.split_whitespace().collect();
+    let inter = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    let jac = if union > 0.0 { inter / union } else { 0.0 };
+    // One title fully contained in the other ("Album" vs "Album (Deluxe)") is a
+    // likely but not certain match: high enough for review, below auto.
+    let contained = if ta.is_subset(&tb) || tb.is_subset(&ta) {
+        0.85
+    } else {
+        0.0
+    };
+    lev.max(jac).max(contained).min(0.99)
 }
 
 /// Normalizes a Bandcamp URL by lowercasing, stripping scheme, www, query parameters and trailing slashes.
@@ -647,6 +697,76 @@ mod tests {
         assert!(score.signals.contains(&Signal::AlbumTag));
         assert!(score.signals.contains(&Signal::TrackCount));
         assert!(score.signals.contains(&Signal::Year));
+    }
+
+    #[test]
+    fn shared_artist_prefix_singles_match_one_to_one_without_conflicts() {
+        use crate::types::{Classification, ItemKey};
+        let titles = [
+            "Une nouvelle étoile",
+            "Crevée",
+            "L'heure du choix",
+            "Sous les décombres",
+            "Quand la danseuse tourne",
+            "Le son des corps agonisants",
+            "Born Again",
+            "Split w/ Gvillotina",
+            "Hurler sur les sourds",
+            "La mue d'une danseuse",
+        ];
+        let candidates: Vec<AlbumCandidate> = titles
+            .iter()
+            .map(|t| {
+                let folder = format!("Deaf Ballerina - {}", t.replace('/', "-"));
+                make_candidate(&folder, 1, Some(t), Some(2017), None)
+            })
+            .collect();
+        let releases: Vec<ReleaseRow> = titles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| ReleaseRow {
+                key: ItemKey {
+                    kind: ItemType::Album,
+                    id: i as i64 + 1,
+                },
+                band_id: 1,
+                title: t.to_string(),
+                artist_name: "Deaf Ballerina".to_string(),
+                url: format!("https://deafballerina.bandcamp.com/album/a{i}"),
+                cover_url: None,
+                art_id: None,
+                classification: Classification::Free,
+                is_preorder: false,
+                track_count: Some(1),
+                published_at: None,
+                modified_at: None,
+                downloaded: false,
+                downloaded_at: None,
+                downloaded_format: None,
+                local_path: None,
+                local_status: None,
+                origin: None,
+                missing_ack_at: None,
+                has_remote_update: false,
+                remote_update_reason: None,
+            })
+            .collect();
+
+        let res = assign_matches(
+            &candidates,
+            &releases,
+            0.92,
+            0.75,
+            &std::collections::HashSet::new(),
+        );
+        assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+        assert!(res.page_only.is_empty());
+        assert!(res.review.is_empty());
+        assert_eq!(res.matched.len(), titles.len());
+        for m in &res.matched {
+            let rel = releases.iter().find(|r| r.key == m.release_key).unwrap();
+            assert!(m.candidate_name.ends_with(&rel.title.replace('/', "-")));
+        }
     }
 
     #[test]

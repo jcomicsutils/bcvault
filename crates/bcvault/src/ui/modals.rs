@@ -839,7 +839,10 @@ fn show_reconcile_report_modal(
                 let tabs = [
                     (
                         ReportTab::Matched,
-                        format!("Matched ({})", modal.report.matched.len()),
+                        format!(
+                            "Matched ({})",
+                            modal.report.matched.len() + modal.report.linked.len()
+                        ),
                     ),
                     (
                         ReportTab::Review,
@@ -884,80 +887,115 @@ fn show_reconcile_report_modal(
                 .auto_shrink([false, false])
                 .show(ui, |ui| match modal.active_tab {
                     ReportTab::Matched => {
-                        ui.horizontal(|ui| {
-                            let all_selected = !modal.report.matched.is_empty()
-                                && modal.selected_matched.len() == modal.report.matched.len();
-                            if sharp_small_button(
-                                ui,
-                                if all_selected {
-                                    "Deselect All"
-                                } else {
-                                    "Select All"
-                                },
-                            )
-                            .clicked()
-                            {
-                                if all_selected {
-                                    modal.selected_matched.clear();
-                                } else {
-                                    modal.selected_matched =
-                                        modal.report.matched.iter().map(|m| m.release_key).collect();
+                        if !modal.report.matched.is_empty() {
+                            ui.horizontal(|ui| {
+                                let all_selected = !modal.report.matched.is_empty()
+                                    && modal.selected_matched.len() == modal.report.matched.len();
+                                if sharp_small_button(
+                                    ui,
+                                    if all_selected {
+                                        "Deselect All"
+                                    } else {
+                                        "Select All"
+                                    },
+                                )
+                                .clicked()
+                                {
+                                    if all_selected {
+                                        modal.selected_matched.clear();
+                                    } else {
+                                        modal.selected_matched =
+                                            modal.report.matched.iter().map(|m| m.release_key).collect();
+                                    }
                                 }
-                            }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} of {} proposals selected for adoption",
+                                        modal.selected_matched.len(),
+                                        modal.report.matched.len()
+                                    ))
+                                    .color(pal::TEXT_DIM),
+                                );
+                            });
+                            ui.add_space(4.0);
+
+                            egui::Grid::new("matched_tab_grid")
+                                .num_columns(4)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for m in &modal.report.matched {
+                                        let mut is_checked =
+                                            modal.selected_matched.contains(&m.release_key);
+                                        if ui.checkbox(&mut is_checked, "").changed() {
+                                            if is_checked {
+                                                modal.selected_matched.insert(m.release_key);
+                                            } else {
+                                                modal.selected_matched.remove(&m.release_key);
+                                            }
+                                        }
+
+                                        ui.label(RichText::new(&m.release_title).strong());
+
+                                        let fmt_str = m
+                                            .format_guess
+                                            .map(|f| format!("[{}]", f.label()))
+                                            .unwrap_or_default();
+                                        ui.label(
+                                            RichText::new(format!("{} {fmt_str}", m.candidate_name))
+                                                .color(pal::TEXT_DIM)
+                                                .monospace(),
+                                        )
+                                        .on_hover_text(m.candidate_path.display().to_string());
+
+                                        let tip = format!(
+                                            "Score: {:.2}\nSignals:\n{}",
+                                            m.score.value,
+                                            format_signals(&m.score.signals)
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("{:.0}%", m.score.value * 100.0))
+                                                .color(pal::OK)
+                                                .monospace(),
+                                        )
+                                        .on_hover_text(tip);
+
+                                        ui.end_row();
+                                    }
+                                });
+                        } else if modal.report.linked.is_empty() {
+                            ui.label(RichText::new("No matched releases.").color(pal::TEXT_DIM));
+                        }
+
+                        if !modal.report.linked.is_empty() {
+                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new(format!(
-                                    "{} of {} proposals selected for adoption",
-                                    modal.selected_matched.len(),
-                                    modal.report.matched.len()
+                                    "Already linked ({})",
+                                    modal.report.linked.len()
                                 ))
+                                .strong()
                                 .color(pal::TEXT_DIM),
                             );
-                        });
-                        ui.add_space(4.0);
-
-                        egui::Grid::new("matched_tab_grid")
-                            .num_columns(4)
-                            .spacing([8.0, 6.0])
-                            .show(ui, |ui| {
-                                for m in &modal.report.matched {
-                                    let mut is_checked =
-                                        modal.selected_matched.contains(&m.release_key);
-                                    if ui.checkbox(&mut is_checked, "").changed() {
-                                        if is_checked {
-                                            modal.selected_matched.insert(m.release_key);
-                                        } else {
-                                            modal.selected_matched.remove(&m.release_key);
-                                        }
+                            ui.add_space(4.0);
+                            egui::Grid::new("linked_tab_grid")
+                                .num_columns(2)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for l in &modal.report.linked {
+                                        ui.label(RichText::new(&l.release_title).strong());
+                                        let name = l
+                                            .path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| l.path.display().to_string());
+                                        ui.label(
+                                            RichText::new(name).color(pal::TEXT_DIM).monospace(),
+                                        )
+                                        .on_hover_text(l.path.display().to_string());
+                                        ui.end_row();
                                     }
-
-                                    ui.label(RichText::new(&m.release_title).strong());
-
-                                    let fmt_str = m
-                                        .format_guess
-                                        .map(|f| format!("[{}]", f.label()))
-                                        .unwrap_or_default();
-                                    ui.label(
-                                        RichText::new(format!("{} {fmt_str}", m.candidate_name))
-                                            .color(pal::TEXT_DIM)
-                                            .monospace(),
-                                    )
-                                    .on_hover_text(m.candidate_path.display().to_string());
-
-                                    let tip = format!(
-                                        "Score: {:.2}\nSignals:\n{}",
-                                        m.score.value,
-                                        format_signals(&m.score.signals)
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("{:.0}%", m.score.value * 100.0))
-                                            .color(pal::OK)
-                                            .monospace(),
-                                    )
-                                    .on_hover_text(tip);
-
-                                    ui.end_row();
-                                }
-                            });
+                                });
+                        }
                     }
                     ReportTab::Review => {
                         if modal.report.review.is_empty() {

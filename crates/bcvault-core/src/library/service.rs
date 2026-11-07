@@ -25,6 +25,38 @@ pub struct ReconcileReport {
     pub conflicts: Vec<Conflict>,
     /// Previously archived releases whose files reappeared.
     pub restorable: Vec<MatchProposal>,
+    /// Releases already linked to a folder inside the linked artist folder.
+    /// Informational only: nothing is applied for them.
+    pub linked: Vec<LinkedRelease>,
+}
+
+/// A release that is already downloaded and linked to a local path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedRelease {
+    pub release_key: ItemKey,
+    pub release_title: String,
+    pub path: std::path::PathBuf,
+}
+
+/// Releases whose active `local_path` lies inside `root`.
+pub fn linked_releases_under(
+    releases: &[crate::types::ReleaseRow],
+    root: &std::path::Path,
+) -> Vec<LinkedRelease> {
+    let root_key = lib_repo::normalize_path_key(root);
+    releases
+        .iter()
+        .filter(|r| r.downloaded && r.local_status != Some(crate::types::LocalStatus::Archived))
+        .filter_map(|r| {
+            let p = r.local_path.as_ref()?;
+            let k = lib_repo::normalize_path_key(p);
+            (k == root_key || k.starts_with(&format!("{root_key}/"))).then(|| LinkedRelease {
+                release_key: r.key,
+                release_title: r.title.clone(),
+                path: p.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Callback invoked for library progress updates: (phase, done, total, current item/path).
@@ -80,6 +112,8 @@ pub fn run_scan_and_match(
         .map(|p| lib_repo::normalize_path_key(p))
         .collect();
 
+    let linked = linked_releases_under(&all_releases, &folder.path);
+
     let adoptable: Vec<_> = all_releases
         .into_iter()
         .filter(|r| !r.downloaded || r.local_status == Some(crate::types::LocalStatus::Archived))
@@ -119,6 +153,7 @@ pub fn run_scan_and_match(
         local_only: assignment.local_only,
         conflicts: assignment.conflicts,
         restorable: assignment.restorable,
+        linked,
     }))
 }
 
