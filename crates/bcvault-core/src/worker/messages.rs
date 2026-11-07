@@ -52,6 +52,20 @@ pub enum UiToWorkerCommand {
     PauseQueue,
     ResumeQueue,
     ClearFinished,
+    // library
+    LinkArtistFolder {
+        band_id: i64,
+        path: PathBuf,
+        auto_apply_confident: bool,
+    },
+    UnlinkArtistFolder {
+        band_id: i64,
+    },
+    MatchArtistFolder {
+        band_id: i64,
+        auto_apply_confident: bool,
+    },
+    CancelLibrary,
     // misc
     UpdateSettings(Settings),
     Shutdown,
@@ -114,6 +128,19 @@ pub enum WorkerToUiEvent {
     ThumbReady {
         key: ItemKey,
         path: PathBuf,
+    },
+    LibraryProgress {
+        phase: crate::types::LibraryPhase,
+        done: u32,
+        total: u32,
+        current: Option<String>,
+    },
+    ReconcileReport {
+        report: Box<crate::library::ReconcileReport>,
+    },
+    FolderStatus {
+        band_id: i64,
+        state: crate::types::FolderState,
     },
     Log(LogEntry),
 }

@@ -1,12 +1,15 @@
 pub mod bridge;
 pub mod downloads;
 pub mod extract;
+pub mod library;
 pub mod messages;
 pub mod quota;
 pub mod stream;
 pub mod supervisor;
 pub mod sync;
 pub mod thumbs;
+
+pub use library::LibraryService;
 
 use crate::{
     bandcamp::{BandcampClient, gate::BandcampGate},

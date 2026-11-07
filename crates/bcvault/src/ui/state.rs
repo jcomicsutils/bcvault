@@ -393,6 +393,9 @@ impl UiState {
             WorkerToUiEvent::ThumbReady { key, path } => {
                 self.thumbs.on_thumb_ready(key, path);
             }
+            WorkerToUiEvent::LibraryProgress { .. }
+            | WorkerToUiEvent::ReconcileReport { .. }
+            | WorkerToUiEvent::FolderStatus { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }

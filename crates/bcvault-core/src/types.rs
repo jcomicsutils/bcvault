@@ -296,6 +296,34 @@ pub enum FolderState {
     Unreadable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LibraryPhase {
+    Scanning,
+    Matching,
+    Verifying,
+    Applying,
+}
+
+impl LibraryPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scanning => "scanning",
+            Self::Matching => "matching",
+            Self::Verifying => "verifying",
+            Self::Applying => "applying",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Scanning => "Scanning folder",
+            Self::Matching => "Matching releases",
+            Self::Verifying => "Verifying files",
+            Self::Applying => "Applying changes",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtistFolder {
     pub band_id: i64,
@@ -870,6 +898,16 @@ mod tests {
             assert_eq!(DeletedPolicy::parse(dp.as_str()), Some(dp));
         }
         assert_eq!(DeletedPolicy::default(), DeletedPolicy::KeepMarked);
+
+        for phase in [
+            LibraryPhase::Scanning,
+            LibraryPhase::Matching,
+            LibraryPhase::Verifying,
+            LibraryPhase::Applying,
+        ] {
+            assert!(!phase.as_str().is_empty());
+            assert!(!phase.label().is_empty());
+        }
 
         let folder = ArtistFolder {
             band_id: 42,

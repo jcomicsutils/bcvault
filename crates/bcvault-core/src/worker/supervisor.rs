@@ -10,6 +10,7 @@ use crate::{
     worker::{
         bridge::UiBridge,
         downloads::DownloadManager,
+        library::LibraryService,
         messages::{UiToWorkerCommand, WorkerToUiEvent},
         stream::sweep_part_files,
         sync::SyncService,
@@ -25,8 +26,10 @@ pub struct Supervisor {
     sync_service: SyncService,
     dl_manager: DownloadManager,
     thumb_service: ThumbService,
+    library_service: LibraryService,
     root_cancel: CancellationToken,
     sync_cancel: CancellationToken,
+    library_cancel: CancellationToken,
 }
 
 impl Supervisor {
@@ -69,6 +72,7 @@ impl Supervisor {
 
         let root_cancel = CancellationToken::new();
         let sync_cancel = root_cancel.child_token();
+        let library_cancel = root_cancel.child_token();
 
         let sync_service = SyncService::new(pool.clone(), client.clone(), bridge.clone());
         let dl_manager = DownloadManager::new(
@@ -84,6 +88,7 @@ impl Supervisor {
             bridge.clone(),
             paths.cover_cache_dir.clone(),
         );
+        let library_service = LibraryService::new(pool.clone(), bridge.clone());
 
         bridge.emit(WorkerToUiEvent::Ready {
             artists: initial_artists,
@@ -96,8 +101,10 @@ impl Supervisor {
             sync_service,
             dl_manager,
             thumb_service,
+            library_service,
             root_cancel,
             sync_cancel,
+            library_cancel,
         };
 
         while let Some(cmd) = cmd_rx.recv().await {
@@ -320,6 +327,40 @@ impl Supervisor {
                 self.dl_manager.resume();
             }
             UiToWorkerCommand::ClearFinished => {}
+            UiToWorkerCommand::LinkArtistFolder {
+                band_id,
+                path,
+                auto_apply_confident,
+            } => {
+                let svc = self.library_service.clone();
+                let tok = self.library_cancel.child_token();
+                tokio::spawn(async move {
+                    svc.link_artist_folder(band_id, path, auto_apply_confident, tok)
+                        .await;
+                });
+            }
+            UiToWorkerCommand::UnlinkArtistFolder { band_id } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.unlink_artist_folder(band_id).await;
+                });
+            }
+            UiToWorkerCommand::MatchArtistFolder {
+                band_id,
+                auto_apply_confident,
+            } => {
+                let svc = self.library_service.clone();
+                let tok = self.library_cancel.child_token();
+                tokio::spawn(async move {
+                    svc.match_artist_folder(band_id, auto_apply_confident, tok)
+                        .await;
+                });
+            }
+            UiToWorkerCommand::CancelLibrary => {
+                self.library_service.cancel();
+                self.library_cancel.cancel();
+                self.library_cancel = self.root_cancel.child_token();
+            }
             UiToWorkerCommand::UpdateSettings(mut new_settings) => {
                 new_settings.batch_limit = new_settings.batch_limit.min(new_settings.quota_hard);
                 self.sync_service

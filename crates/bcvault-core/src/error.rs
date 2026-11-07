@@ -14,6 +14,8 @@ pub enum DbError {
     InvalidEnum(String),
     #[error("Schema contract mismatch: {0}")]
     SchemaMismatch(String),
+    #[error("Folder link error: {0}")]
+    LinkFolder(#[from] LinkFolderError),
 }
 
 #[derive(Debug, Error)]
