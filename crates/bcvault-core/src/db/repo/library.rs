@@ -13,16 +13,54 @@ use std::{
 };
 
 pub fn normalize_path_key(path: &Path) -> String {
-    path.to_string_lossy().to_lowercase()
+    let simplified = dunce::simplified(path);
+    let s = simplified.to_string_lossy();
+    let s_clean = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    let s_fwd = s_clean.replace('\\', "/").to_lowercase();
+    s_fwd.trim_end_matches('/').to_string()
+}
+
+pub fn find_drive_or_root(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    let first = components.next()?;
+    match first {
+        std::path::Component::Prefix(prefix) => {
+            let mut root = PathBuf::from(prefix.as_os_str());
+            if let Some(std::path::Component::RootDir) = components.next() {
+                root.push(std::path::MAIN_SEPARATOR.to_string());
+            }
+            Some(root)
+        }
+        std::path::Component::RootDir => Some(PathBuf::from(std::path::MAIN_SEPARATOR.to_string())),
+        _ => None,
+    }
 }
 
 pub fn probe_folder_state(path: &Path) -> FolderState {
-    if !path.exists() {
-        FolderState::Missing
-    } else if std::fs::read_dir(path).is_err() {
-        FolderState::Unreadable
-    } else {
-        FolderState::Ok
+    let simplified = dunce::simplified(path);
+    match std::fs::metadata(simplified) {
+        Ok(m) => {
+            if !m.is_dir() {
+                FolderState::Missing
+            } else if std::fs::read_dir(simplified).is_err() {
+                FolderState::Unreadable
+            } else {
+                FolderState::Ok
+            }
+        }
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.kind() == std::io::ErrorKind::TimedOut
+            {
+                return FolderState::Unreadable;
+            }
+            if let Some(root) = find_drive_or_root(simplified)
+                && (!root.exists() || std::fs::read_dir(&root).is_err())
+            {
+                return FolderState::Unreadable;
+            }
+            FolderState::Missing
+        }
     }
 }
 
@@ -42,13 +80,12 @@ pub fn link_folder(
         return Err(LinkFolderError::Unreadable(path.to_path_buf()));
     }
 
-    let canon = path
-        .canonicalize()
-        .map_err(|_| LinkFolderError::NotFound(path.to_path_buf()))?;
+    let canon =
+        dunce::canonicalize(path).map_err(|_| LinkFolderError::NotFound(path.to_path_buf()))?;
     let path_key = normalize_path_key(&canon);
 
     // Validate against out_dir
-    if let Ok(out_canon) = out_dir.canonicalize() {
+    if let Ok(out_canon) = dunce::canonicalize(out_dir) {
         let out_key = normalize_path_key(&out_canon);
         if path_key == out_key || canon.starts_with(&out_canon) || out_canon.starts_with(&canon) {
             return Err(LinkFolderError::OverlapsOutDir(canon));

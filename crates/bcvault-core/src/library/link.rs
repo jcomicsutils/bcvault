@@ -43,9 +43,14 @@ pub fn probe_folder(path: &Path) -> FolderState {
     probe_folder_state(path)
 }
 
-/// Normalizes a filesystem path to a canonical lowercase key with forward slashes.
+/// Normalizes a filesystem path to a canonical lowercase key with forward slashes,
+/// stripping any Windows extended-length prefixes (`\\?\`).
 pub fn normalize_path_key(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/").to_lowercase()
+    let simplified = dunce::simplified(path);
+    let s = simplified.to_string_lossy();
+    let s_clean = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    let s_fwd = s_clean.replace('\\', "/").to_lowercase();
+    s_fwd.trim_end_matches('/').to_string()
 }
 
 /// Validates that a folder is suitable for linking to an artist according to §5.1:
@@ -314,6 +319,26 @@ mod tests {
             let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000));
             assert_eq!(probe_folder(&unreadable), FolderState::Unreadable);
             let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[test]
+    fn windows_extended_paths_and_normalization() {
+        let p1 = Path::new(r"\\?\C:\Music\Artist\");
+        let p2 = Path::new(r"c:/music/artist");
+        let p3 = Path::new(r"C:\MUSIC\ARTIST");
+
+        assert_eq!(normalize_path_key(p1), "c:/music/artist");
+        assert_eq!(normalize_path_key(p2), "c:/music/artist");
+        assert_eq!(normalize_path_key(p3), "c:/music/artist");
+    }
+
+    #[test]
+    fn drive_root_probe_unmounted_returns_unreadable() {
+        #[cfg(windows)]
+        {
+            let z_path = Path::new(r"Z:\Music\Artist");
+            assert_eq!(probe_folder(z_path), FolderState::Unreadable);
         }
     }
 }
