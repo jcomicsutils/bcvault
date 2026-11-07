@@ -12,6 +12,8 @@ pub enum DbError {
     Json(#[from] serde_json::Error),
     #[error("Invalid enum value in database: {0}")]
     InvalidEnum(String),
+    #[error("Schema contract mismatch: {0}")]
+    SchemaMismatch(String),
 }
 
 #[derive(Debug, Error)]

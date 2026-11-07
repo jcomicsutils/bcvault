@@ -259,19 +259,32 @@ name = "bcvault"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bcvault-core",
  "chrono",
- "directories",
  "eframe",
  "egui",
  "egui_extras",
- "futures-util",
  "image",
  "open",
+ "rfd",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bcvault-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "directories",
+ "futures-util",
  "percent-encoding",
  "pretty_assertions",
  "rand 0.9.5",
  "reqwest",
- "rfd",
  "rusqlite",
  "scraper",
  "serde",
@@ -282,7 +295,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "url",
  "wiremock",
  "zip",

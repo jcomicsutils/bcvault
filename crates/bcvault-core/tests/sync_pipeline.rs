@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use bcvault::{
+use bcvault_core::{
     bandcamp::{
         BandcampClient, discography::parse_discography_html,
         download_api::parse_buy_for_nothing_json, gate::BandcampGate, redeem::parse_redeem_html,

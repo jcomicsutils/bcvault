@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use bcvault::{
+use bcvault_core::{
     db::{
         Db, DbPool, Role,
         repo::{

@@ -277,6 +277,43 @@ impl BandcampGate {
             None
         }
     }
+
+    pub async fn fetch_bytes(
+        &self,
+        client: &reqwest::Client,
+        class: GateClass,
+        url: &str,
+    ) -> Result<Vec<u8>, crate::error::BcError> {
+        let mut last_wait = Duration::from_secs(30);
+        for attempt in 0..=5 {
+            let _permit = self.acquire(class, None).await;
+            let resp = client.get(url).send().await?;
+            let status = resp.status();
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after);
+
+            if let Some(wait_dur) = self.report(status, retry_after) {
+                last_wait = wait_dur;
+                if attempt == 5 {
+                    return Err(crate::error::BcError::RateLimited {
+                        retry_after_s: last_wait.as_secs().max(1),
+                    });
+                }
+                continue;
+            }
+
+            let resp = resp.error_for_status()?;
+            let bytes = resp.bytes().await?;
+            return Ok(bytes.to_vec());
+        }
+
+        Err(crate::error::BcError::RateLimited {
+            retry_after_s: last_wait.as_secs().max(1),
+        })
+    }
 }
 
 pub fn parse_retry_after(header_val: &str) -> Option<Duration> {

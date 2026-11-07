@@ -141,6 +141,50 @@ pub fn parse_release_html(html_text: &str) -> Result<ParsedReleasePage, BcError>
     parse_tralbum_json_with_dom(raw_attr, has_nyp_badge)
 }
 
+pub fn parse_release_raw_json(html_text: &str) -> Result<serde_json::Value, BcError> {
+    let doc = Html::parse_document(html_text);
+    let sel = Selector::parse("script[data-tralbum]")
+        .map_err(|e| BcError::UnexpectedResponse(format!("selector err: {e:?}")))?;
+
+    let raw_attr = doc
+        .select(&sel)
+        .find_map(|el| el.value().attr("data-tralbum"))
+        .ok_or(BcError::TralbumNotFound)?;
+
+    let mut val: serde_json::Value = serde_json::from_str(raw_attr)?;
+
+    if let Some(obj) = val.as_object_mut() {
+        if let Ok(tag_sel) = Selector::parse("a.tag") {
+            let tags: Vec<String> = doc
+                .select(&tag_sel)
+                .map(|el| el.text().collect::<String>().trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !tags.is_empty() {
+                obj.insert("_dom_tags".to_string(), serde_json::json!(tags));
+            }
+        }
+        if let Ok(about_sel) = Selector::parse(".tralbumData.tralbum-about")
+            && let Some(el) = doc.select(&about_sel).next()
+        {
+            let text = el.text().collect::<String>().trim().to_string();
+            if !text.is_empty() {
+                obj.insert("_dom_about".to_string(), serde_json::Value::String(text));
+            }
+        }
+        if let Ok(cred_sel) = Selector::parse(".tralbumData.tralbum-credits")
+            && let Some(el) = doc.select(&cred_sel).next()
+        {
+            let text = el.text().collect::<String>().trim().to_string();
+            if !text.is_empty() {
+                obj.insert("_dom_credits".to_string(), serde_json::Value::String(text));
+            }
+        }
+    }
+
+    Ok(val)
+}
+
 pub fn parse_tralbum_json(json_str: &str) -> Result<ParsedReleasePage, BcError> {
     parse_tralbum_json_with_dom(json_str, false)
 }

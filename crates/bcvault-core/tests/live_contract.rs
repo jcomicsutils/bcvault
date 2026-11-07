@@ -1,7 +1,7 @@
 #![cfg(feature = "live-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use bcvault::bandcamp::{BandcampClient, gate::BandcampGate, input::normalize_artist_input};
+use bcvault_core::bandcamp::{BandcampClient, gate::BandcampGate, input::normalize_artist_input};
 
 #[tokio::test]
 async fn live_contract_smoke_test() {

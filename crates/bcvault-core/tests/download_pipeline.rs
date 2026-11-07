@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use bcvault::{
+use bcvault_core::{
     bandcamp::{BUY_FOR_NOTHING_PATH, BandcampClient, gate::BandcampGate},
     db::{
         DbPool,

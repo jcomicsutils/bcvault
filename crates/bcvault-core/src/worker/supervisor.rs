@@ -1,5 +1,5 @@
 use crate::{
-    bandcamp::{BandcampClient, gate::BandcampGate},
+    bandcamp::BandcampClient,
     db::{
         DbPool,
         repo::{artists, history, releases, settings},
@@ -16,7 +16,6 @@ use crate::{
         thumbs::ThumbService,
     },
 };
-use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +33,7 @@ impl Supervisor {
     pub async fn run(
         paths: AppPaths,
         pool: DbPool,
+        client: BandcampClient,
         bridge: UiBridge,
         mut cmd_rx: UnboundedReceiver<UiToWorkerCommand>,
     ) {
@@ -62,29 +62,10 @@ impl Supervisor {
         };
 
         sweep_part_files(&initial_settings.out_dir);
-
-        let bridge_for_gate = bridge.clone();
-        let gate = BandcampGate::new(
+        client.gate.update_config(
             initial_settings.page_delay_ms,
             initial_settings.page_jitter_pct,
-            initial_settings.max_concurrent_downloads,
-            Some(Arc::new(move |st| {
-                bridge_for_gate.emit(WorkerToUiEvent::RateLimit(st));
-            })),
         );
-
-        let client = match BandcampClient::new(gate, &initial_settings.user_agent) {
-            Ok(c) => c,
-            Err(e) => {
-                bridge.log(
-                    LogLevel::Error,
-                    "boot",
-                    format!("Failed to initialize HTTP client: {e}"),
-                    None,
-                );
-                return;
-            }
-        };
 
         let root_cancel = CancellationToken::new();
         let sync_cancel = root_cancel.child_token();

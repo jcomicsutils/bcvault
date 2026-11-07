@@ -1,5 +1,5 @@
 use bcvault::{app::App, paths::AppPaths, worker::spawn_worker};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
@@ -12,6 +12,7 @@ fn main() -> anyhow::Result<()> {
     let paths = AppPaths::resolve()
         .ok_or_else(|| anyhow::anyhow!("Could not resolve project directories"))?;
     paths.ensure_dirs()?;
+    let _instance_lock = paths.acquire_instance_lock()?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -31,7 +32,12 @@ fn main() -> anyhow::Result<()> {
         "bcvault",
         native_options,
         Box::new(move |cc| {
-            let worker = spawn_worker(&handle, paths, Some(cc.egui_ctx.clone()))?;
+            let ctx = cc.egui_ctx.clone();
+            let worker = spawn_worker(
+                &handle,
+                paths,
+                Some(Arc::new(move || ctx.request_repaint())),
+            )?;
             Ok(Box::new(App::new(cc, handle, worker)))
         }),
     );

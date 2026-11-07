@@ -16,7 +16,7 @@ use crate::{
         },
         gate::{BandcampGate, GateClass, parse_retry_after},
         redeem::{RedeemItem, parse_redeem_html, validate_redeem_url},
-        tralbum::{ParsedReleasePage, parse_release_html},
+        tralbum::{ParsedReleasePage, parse_release_html, parse_release_raw_json},
     },
     error::BcError,
 };
@@ -202,6 +202,21 @@ impl BandcampClient {
             .get_text_gated(release_url, GateClass::Page, band_id)
             .await?;
         parse_release_html(&html_text)
+    }
+
+    pub async fn fetch_release_raw(
+        &self,
+        release_url: &str,
+        band_id: Option<i64>,
+    ) -> Result<serde_json::Value, BcError> {
+        let (html_text, _) = self
+            .get_text_gated(release_url, GateClass::Page, band_id)
+            .await?;
+        parse_release_raw_json(&html_text)
+    }
+
+    pub async fn fetch_bytes_gated(&self, class: GateClass, url: &str) -> Result<Vec<u8>, BcError> {
+        self.gate.fetch_bytes(&self.page_client, class, url).await
     }
 
     pub async fn fetch_redeem_page(&self, redeem_url: &str) -> Result<Vec<RedeemItem>, BcError> {

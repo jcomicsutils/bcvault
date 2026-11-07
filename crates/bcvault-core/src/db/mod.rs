@@ -3,8 +3,8 @@ pub mod repo;
 pub mod seed;
 
 use crate::error::DbError;
-use rusqlite::Connection;
-use std::path::Path;
+use rusqlite::{Connection, OpenFlags};
+use std::path::{Path, PathBuf};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -22,7 +22,20 @@ pub struct Db {
 impl Db {
     /// Spawns the owning thread, applies PRAGMAs for the role, then loops over jobs.
     pub fn open(path: &Path, role: Role) -> Result<Self, DbError> {
+        Self::open_with(path, role, "", &[], migrations::MIGRATIONS, true)
+    }
+
+    pub fn open_with(
+        path: &Path,
+        role: Role,
+        extra_pragmas: &str,
+        attach: &[(PathBuf, String)],
+        migrations: &'static [(i32, &'static str)],
+        reclassify_main: bool,
+    ) -> Result<Self, DbError> {
         let path_buf = path.to_path_buf();
+        let extra = extra_pragmas.to_string();
+        let attach_owned = attach.to_vec();
         let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<(), DbError>>(1);
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
 
@@ -34,7 +47,14 @@ impl Db {
         let spawn_res = std::thread::Builder::new()
             .name(thread_name.to_string())
             .spawn(move || {
-                let mut conn = match Self::init_conn(&path_buf, role) {
+                let mut conn = match Self::init_conn(
+                    &path_buf,
+                    role,
+                    &extra,
+                    &attach_owned,
+                    migrations,
+                    reclassify_main,
+                ) {
                     Ok(c) => {
                         let _ = init_tx.send(Ok(()));
                         c
@@ -58,8 +78,19 @@ impl Db {
         Ok(Self { tx })
     }
 
-    fn init_conn(path: &Path, role: Role) -> Result<Connection, DbError> {
-        let mut conn = Connection::open(path)?;
+    fn init_conn(
+        path: &Path,
+        role: Role,
+        extra_pragmas: &str,
+        attach: &[(PathBuf, String)],
+        migrations: &[(i32, &str)],
+        reclassify_main: bool,
+    ) -> Result<Connection, DbError> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut conn = Connection::open_with_flags(path, flags)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous  = NORMAL;
@@ -69,10 +100,25 @@ impl Db {
              PRAGMA cache_size   = -20000;",
         )?;
 
+        for (attach_path, schema_alias) in attach {
+            let escaped = attach_path.to_string_lossy().replace('\'', "''");
+            let uri = format!("file:{escaped}?mode=ro");
+            conn.execute(
+                "ATTACH DATABASE ?1 AS ?2",
+                rusqlite::params![uri, schema_alias],
+            )?;
+        }
+
+        if !extra_pragmas.trim().is_empty() {
+            conn.execute_batch(extra_pragmas)?;
+        }
+
         match role {
             Role::Writer => {
-                migrations::run(&mut conn)?;
-                repo::releases::reclassify_from_pricing_json(&mut conn)?;
+                migrations::run_with(&mut conn, migrations)?;
+                if reclassify_main {
+                    repo::releases::reclassify_from_pricing_json(&mut conn)?;
+                }
             }
             Role::Reader => {
                 conn.execute_batch("PRAGMA query_only = ON;")?;

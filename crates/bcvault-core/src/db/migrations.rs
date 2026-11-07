@@ -13,15 +13,20 @@ pub const MIGRATIONS: &[(i32, &str)] = &[
 pub const MAX_VERSION: i32 = 3;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
+    run_with(conn, MIGRATIONS)
+}
+
+pub fn run_with(conn: &mut Connection, migrations: &[(i32, &str)]) -> Result<(), DbError> {
+    let max_version = migrations.iter().map(|(v, _)| *v).max().unwrap_or(0);
     let current_version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if current_version > MAX_VERSION {
+    if current_version > max_version {
         return Err(DbError::TooNew {
             found: current_version,
-            max_supported: MAX_VERSION,
+            max_supported: max_version,
         });
     }
 
-    for &(version, sql) in MIGRATIONS {
+    for &(version, sql) in migrations {
         if version > current_version {
             let tx = conn.transaction()?;
             tx.execute_batch(sql)?;
