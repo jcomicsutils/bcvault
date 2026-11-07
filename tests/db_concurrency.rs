@@ -284,6 +284,16 @@ async fn discovery_upsert_and_remote_update_lifecycle() {
             assert!(!row3.has_remote_update);
             assert_eq!(row3.remote_update_reason, None);
 
+            // Manual mark/unmark downloaded
+            releases::set_downloaded_manual(c, key, false)?;
+            let row4 = releases::get_release(c, key)?.unwrap();
+            assert!(!row4.downloaded);
+            assert_eq!(row4.local_path, None);
+
+            releases::set_downloaded_manual(c, key, true)?;
+            let row5 = releases::get_release(c, key)?.unwrap();
+            assert!(row5.downloaded);
+
             Ok(())
         })
         .await

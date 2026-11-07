@@ -126,6 +126,41 @@ pub fn set_classification(
     Ok(())
 }
 
+pub fn set_downloaded_manual(
+    conn: &Connection,
+    key: ItemKey,
+    downloaded: bool,
+) -> Result<(), DbError> {
+    if downloaded {
+        conn.execute(
+            "UPDATE releases SET
+                 downloaded = 1,
+                 downloaded_at = COALESCE(downloaded_at, unixepoch()),
+                 downloaded_track_count = COALESCE(downloaded_track_count, track_count),
+                 downloaded_modified_at = COALESCE(downloaded_modified_at, modified_at),
+                 has_remote_update = 0,
+                 remote_update_reason = NULL
+             WHERE item_type = ?1 AND item_id = ?2",
+            params![key.kind.as_str(), key.id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE releases SET
+                 downloaded = 0,
+                 downloaded_at = NULL,
+                 downloaded_format = NULL,
+                 downloaded_track_count = NULL,
+                 downloaded_modified_at = NULL,
+                 local_path = NULL,
+                 has_remote_update = 0,
+                 remote_update_reason = NULL
+             WHERE item_type = ?1 AND item_id = ?2",
+            params![key.kind.as_str(), key.id],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn commit_download(
     conn: &mut Connection,
     key: ItemKey,

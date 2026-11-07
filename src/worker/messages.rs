@@ -42,6 +42,10 @@ pub enum UiToWorkerCommand {
         url: String,
         opts: DownloadOpts,
     },
+    SetReleaseDownloaded {
+        key: ItemKey,
+        downloaded: bool,
+    },
     CancelJob(JobId),
     RetryJob(JobId),
     CancelAllJobs,

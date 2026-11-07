@@ -46,7 +46,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
         .column(Column::exact(56.0)) // tracks
         .column(Column::exact(110.0)) // classification
         .column(Column::exact(96.0)) // downloaded format
-        .column(Column::remainder().at_least(170.0)) // actions
+        .column(Column::remainder().at_least(230.0)) // actions
         .header(24.0, |mut h| {
             h.col(|ui| {
                 if ui.checkbox(&mut header_check, "").clicked() {
@@ -199,6 +199,27 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                 });
 
                 let row_resp = row.response();
+                row_resp.context_menu(|ui| {
+                    if r.downloaded {
+                        if sharp_small_button(ui, "Unmark Downloaded").clicked() {
+                            let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
+                                key,
+                                downloaded: false,
+                            });
+                            ui.close();
+                        }
+                    } else if sharp_small_button(ui, "Mark Downloaded").clicked() {
+                        let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
+                            key,
+                            downloaded: true,
+                        });
+                        ui.close();
+                    }
+                    if sharp_small_button(ui, "Open in Browser").clicked() {
+                        let _ = open::that_detached(&r.url);
+                        ui.close();
+                    }
+                });
                 let modifiers = row_resp.ctx.input(|i| i.modifiers);
 
                 if check_changed || row_resp.clicked() {
@@ -322,6 +343,26 @@ fn draw_row_actions(
             let _ = open::that_detached(target_dir);
         }
 
+        if r.classification == Classification::EmailRequired {
+            if sharp_small_button(ui, "Open in Browser").clicked() {
+                let _ = open::that_detached(&r.url);
+            }
+            if sharp_small_button(ui, "Redeem URL...").clicked() {
+                state.redeem_modal = Some(RedeemModalState {
+                    target: r.key,
+                    title: format!("{} - {}", r.artist_name, r.title),
+                    url_input: String::new(),
+                    error: None,
+                });
+            }
+            if sharp_small_button(ui, "Unmark").clicked() {
+                let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
+                    key: r.key,
+                    downloaded: false,
+                });
+            }
+        }
+
         if r.classification.auto_downloadable()
             && !r.is_preorder
             && sharp_small_button(ui, "Re-download").clicked()
@@ -363,6 +404,12 @@ fn draw_row_actions(
                     title: format!("{} - {}", r.artist_name, r.title),
                     url_input: String::new(),
                     error: None,
+                });
+            }
+            if sharp_small_button(ui, "Mark Downloaded").clicked() {
+                let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseDownloaded {
+                    key: r.key,
+                    downloaded: true,
                 });
             }
         }

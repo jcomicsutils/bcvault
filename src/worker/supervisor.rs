@@ -285,6 +285,44 @@ impl Supervisor {
                     mgr.enqueue_redeem(target, url, opts).await;
                 });
             }
+            UiToWorkerCommand::SetReleaseDownloaded { key, downloaded } => {
+                let pool = self.pool.clone();
+                let bridge = self.bridge.clone();
+                tokio::spawn(async move {
+                    let res = pool
+                        .writer
+                        .call(move |c| {
+                            releases::set_downloaded_manual(c, key, downloaded)?;
+                            let row = releases::get_release(c, key)?;
+                            let stats = match row.as_ref() {
+                                Some(r) => {
+                                    Some((r.band_id, artists::stats_with_quota(c, r.band_id)?))
+                                }
+                                None => None,
+                            };
+                            Ok::<_, DbError>((row, stats))
+                        })
+                        .await;
+                    match res {
+                        Ok((row_opt, stats_opt)) => {
+                            if let Some(r) = row_opt {
+                                bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(r)));
+                            }
+                            if let Some((band_id, stats)) = stats_opt {
+                                bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                            }
+                        }
+                        Err(e) => {
+                            bridge.log(
+                                LogLevel::Error,
+                                "db",
+                                format!("Failed to update downloaded status for {key:?}: {e}"),
+                                Some(key),
+                            );
+                        }
+                    }
+                });
+            }
             UiToWorkerCommand::CancelJob(job_id) => {
                 self.dl_manager.cancel_job(job_id);
             }
