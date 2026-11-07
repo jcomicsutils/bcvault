@@ -72,6 +72,7 @@ impl Db {
         match role {
             Role::Writer => {
                 migrations::run(&mut conn)?;
+                repo::releases::reclassify_from_pricing_json(&mut conn)?;
             }
             Role::Reader => {
                 conn.execute_batch("PRAGMA query_only = ON;")?;

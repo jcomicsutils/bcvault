@@ -76,6 +76,8 @@ pub struct Current {
     pub is_set_price: Flag,
     #[serde(default)]
     pub require_email: Flag,
+    #[serde(default, deserialize_with = "deserialize_lenient_i64")]
+    pub download_pref: Option<i64>,
     #[serde(default)]
     pub publish_date: Option<String>,
     #[serde(default)]
@@ -127,16 +129,26 @@ pub fn parse_release_html(html_text: &str) -> Result<ParsedReleasePage, BcError>
     let doc = Html::parse_document(html_text);
     let sel = Selector::parse("script[data-tralbum]")
         .map_err(|e| BcError::UnexpectedResponse(format!("selector err: {e:?}")))?;
+    let nyp_sel = Selector::parse(".buyItemNyp")
+        .map_err(|e| BcError::UnexpectedResponse(format!("selector err: {e:?}")))?;
 
     let raw_attr = doc
         .select(&sel)
         .find_map(|el| el.value().attr("data-tralbum"))
         .ok_or(BcError::TralbumNotFound)?;
+    let has_nyp_badge = doc.select(&nyp_sel).next().is_some();
 
-    parse_tralbum_json(raw_attr)
+    parse_tralbum_json_with_dom(raw_attr, has_nyp_badge)
 }
 
 pub fn parse_tralbum_json(json_str: &str) -> Result<ParsedReleasePage, BcError> {
+    parse_tralbum_json_with_dom(json_str, false)
+}
+
+fn parse_tralbum_json_with_dom(
+    json_str: &str,
+    has_nyp_badge: bool,
+) -> Result<ParsedReleasePage, BcError> {
     let tr: Tralbum = serde_json::from_str(json_str)?;
 
     let item_id = tr.id.or(tr.current.id);
@@ -181,6 +193,8 @@ pub fn parse_tralbum_json(json_str: &str) -> Result<ParsedReleasePage, BcError> 
         is_set_price: tr.current.is_set_price.0,
         require_email: tr.current.require_email.0,
         has_free_download_page,
+        download_pref: tr.current.download_pref,
+        has_nyp_badge,
     };
 
     let pricing_json = serde_json::to_string(&signals)?;
@@ -254,5 +268,49 @@ mod tests {
         assert_eq!(parsed.classification, Classification::EmailRequired);
         assert_eq!(parsed.published_at, Some(1_629_417_600));
         assert!(!parsed.is_preorder);
+    }
+
+    #[test]
+    fn nyp_html_with_free_download_page_classifies_as_nyp() {
+        let html = r#"<!doctype html>
+<html>
+<head>
+  <script data-tralbum='{
+    "FREE": 1,
+    "PAID": 2,
+    "id": 1112467332,
+    "item_type": "album",
+    "freeDownloadPage": "https://bandcamp.com/download?fsig=abc&id=1112467332&ts=1775866775&type=album",
+    "art_id": 236863520,
+    "artist": "Bird Watcher",
+    "trackinfo": [{"title": "Acanthiza chrysorrhoa"}],
+    "current": {
+      "id": 1112467332,
+      "type": "album",
+      "band_id": 2847952267,
+      "title": "Acanthiza chrysorrhoa",
+      "download_pref": 2,
+      "minimum_price": 0.0,
+      "set_price": 9.0,
+      "is_set_price": null,
+      "require_email": null,
+      "publish_date": "13 Feb 2023 09:05:31 GMT",
+      "mod_date": "23 Feb 2023 23:25:34 GMT",
+      "is_preorder": null
+    }
+  }'></script>
+</head>
+<body>
+  <h4 class="ft compound-button main-button">
+    <button class="download-link buy-link" type="button">Buy Digital Album</button>
+    <span class="buyItemExtra buyItemNyp secondaryText">name your price</span>
+  </h4>
+</body>
+</html>"#;
+        let parsed = parse_release_html(html).unwrap();
+        assert_eq!(parsed.item_id, Some(1_112_467_332));
+        assert_eq!(parsed.classification, Classification::Nyp);
+        assert_eq!(parsed.signals.download_pref, Some(2));
+        assert!(parsed.signals.has_nyp_badge);
     }
 }

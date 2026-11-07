@@ -261,12 +261,52 @@ fn parse_key_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemKey> {
     Ok(ItemKey { kind, id })
 }
 
+pub fn reclassify_from_pricing_json(conn: &mut Connection) -> Result<(), DbError> {
+    let rows: Vec<(String, i64, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT item_type, item_id, classification, pricing_json
+             FROM releases
+             WHERE pricing_json IS NOT NULL AND classification IN ('free', 'nyp')",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut v = Vec::new();
+        for row in mapped {
+            v.push(row?);
+        }
+        v
+    };
+
+    let tx = conn.transaction()?;
+    for (item_type, item_id, old_class, pricing_json) in rows {
+        if let Ok(signals) =
+            serde_json::from_str::<crate::bandcamp::classify::PricingSignals>(&pricing_json)
+        {
+            let new_class = crate::bandcamp::classify::classify(&signals);
+            if new_class.as_str() != old_class {
+                tx.execute(
+                    "UPDATE releases SET classification = ?3 WHERE item_type = ?1 AND item_id = ?2",
+                    params![item_type, item_id, new_class.as_str()],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT band_id,
                 COUNT(*) AS total,
                 COALESCE(SUM(downloaded), 0) AS downloaded,
-                COALESCE(SUM(classification IN ('free','nyp')), 0) AS eligible,
+                COALESCE(SUM(classification IN ('free','nyp','email_required')), 0) AS eligible,
                 COALESCE(SUM(classification = 'email_required'), 0) AS email_required,
                 COALESCE(SUM(classification = 'unknown'), 0) AS unknown
          FROM releases
@@ -299,7 +339,7 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
         .query_row(
             "SELECT COUNT(*) AS total,
                     COALESCE(SUM(downloaded), 0) AS downloaded,
-                    COALESCE(SUM(classification IN ('free','nyp')), 0) AS eligible,
+                    COALESCE(SUM(classification IN ('free','nyp','email_required')), 0) AS eligible,
                     COALESCE(SUM(classification = 'email_required'), 0) AS email_required,
                     COALESCE(SUM(classification = 'unknown'), 0) AS unknown
              FROM releases

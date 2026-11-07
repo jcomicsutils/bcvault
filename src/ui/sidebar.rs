@@ -279,7 +279,7 @@ fn draw_artist_row(
     }
 
     resp.on_hover_text(format!(
-        "Downloaded: {}\nEligible (Free + NYP): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}",
+        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}",
         stats.downloaded,
         stats.eligible,
         stats.total,
