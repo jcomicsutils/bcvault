@@ -1,13 +1,13 @@
 # bcvault Progress
 
 ## Current Task
-- **Phase 3**: Async download engine (Tasks 3.1 - 3.9)
+- **Phase 4**: Zero-radius `egui` table and state wiring (Tasks 4.1 - 4.9)
 
 ## Milestones
 - [x] Phase 0: Scaffold
 - [x] Phase 1: Database and core types
 - [x] Phase 2: Scraper and API client
-- [ ] Phase 3: Async download engine
+- [x] Phase 3: Async download engine
 - [ ] Phase 4: Zero-radius `egui` table and state wiring
 - [ ] Phase 5: Hardening and release
 
