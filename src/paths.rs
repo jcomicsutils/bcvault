@@ -43,6 +43,41 @@ impl AppPaths {
         std::fs::create_dir_all(&self.cache_dir)?;
         std::fs::create_dir_all(&self.cover_cache_dir)?;
         std::fs::create_dir_all(&self.log_dir)?;
+        self.rotate_logs(5 * 1024 * 1024, 5)?;
         Ok(())
     }
+
+    pub fn rotate_logs(&self, max_bytes: u64, keep_files: usize) -> std::io::Result<()> {
+        let current = self.log_dir.join("bcvault.log");
+        if let Ok(meta) = std::fs::metadata(&current)
+            && meta.len() >= max_bytes
+        {
+            for idx in (1..keep_files).rev() {
+                let src = self.log_dir.join(format!("bcvault.log.{idx}"));
+                let dst = self.log_dir.join(format!("bcvault.log.{}", idx + 1));
+                if src.exists() {
+                    let _ = std::fs::rename(src, dst);
+                }
+            }
+            let first_rot = self.log_dir.join("bcvault.log.1");
+            let _ = std::fs::rename(&current, first_rot);
+        }
+        Ok(())
+    }
+}
+
+/// Converts a path to an extended-length path on Windows when needed so long artist/release
+/// paths do not fail MAX_PATH (260 chars). On non-Windows platforms returns the path unchanged.
+pub fn to_os_safe_path(path: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            return canon;
+        }
+        let s = path.to_string_lossy();
+        if s.len() >= 240 && !s.starts_with(r"\\?\") {
+            return PathBuf::from(format!(r"\\?\{s}"));
+        }
+    }
+    path.to_path_buf()
 }

@@ -281,6 +281,11 @@ fn show_settings_modal(
                     let _ = cmd_tx.send(UiToWorkerCommand::UpdateSettings(draft.clone()));
                     keep_open = false;
                 }
+                if sharp_button(ui, "Copy Settings JSON").clicked()
+                    && let Ok(json) = serde_json::to_string_pretty(&draft)
+                {
+                    ui.ctx().copy_text(json);
+                }
                 if sharp_button(ui, "Cancel").clicked() {
                     keep_open = false;
                 }

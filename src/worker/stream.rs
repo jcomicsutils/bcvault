@@ -1,6 +1,7 @@
 use crate::{
     bandcamp::{BandcampClient, filenames::resolve_download_filename, gate::GateClass},
     error::{BcError, DownloadError},
+    paths::to_os_safe_path,
     types::{ItemType, JobId},
     worker::{bridge::UiBridge, messages::WorkerToUiEvent},
 };
@@ -79,9 +80,10 @@ pub async fn stream_download(
         req.fallback_ext,
     );
 
-    let part_path = req
-        .dest_dir
-        .join(format!("{file_name}.part.{job}", job = req.job_id));
+    let part_path = to_os_safe_path(
+        &req.dest_dir
+            .join(format!("{file_name}.part.{job}", job = req.job_id)),
+    );
     let file = tokio::fs::File::create(&part_path).await?;
     let mut writer = BufWriter::with_capacity(64 * 1024, file);
 
@@ -176,7 +178,7 @@ pub async fn stream_download(
         bytes_per_sec: ema_bps,
     });
 
-    let final_path = unique_dest_path(req.dest_dir, &file_name).await;
+    let final_path = to_os_safe_path(&unique_dest_path(req.dest_dir, &file_name).await);
     if let Err(e) = tokio::fs::rename(&part_path, &final_path).await {
         let _ = tokio::fs::remove_file(&part_path).await;
         return Err(DownloadError::Io(e));
