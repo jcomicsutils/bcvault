@@ -369,7 +369,7 @@ fn show_settings_modal(
                             ui.end_row();
 
                             ui.label("Auto-Match Min Score:")
-                                .on_hover_text("Score threshold (0.50 - 1.00) required to adopt matches automatically.");
+                                .on_hover_text("Score threshold (0.50 - 1.00) required to adopt non-exact (fuzzy) matches automatically.");
                             ui.add(
                                 egui::Slider::new(&mut draft.auto_match_min, 0.50..=1.00)
                                     .step_by(0.01)
@@ -378,7 +378,7 @@ fn show_settings_modal(
                             ui.end_row();
 
                             ui.label("Review Min Score:")
-                                .on_hover_text("Minimum score threshold (0.50 - 1.00) to propose matches for review.");
+                                .on_hover_text("Minimum score threshold (0.50 - 1.00) to propose non-exact (fuzzy) matches for review.");
                             ui.add(
                                 egui::Slider::new(&mut draft.review_match_min, 0.50..=1.00)
                                     .step_by(0.01)
@@ -386,6 +386,118 @@ fn show_settings_modal(
                             );
                             ui.end_row();
                         });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new("Folder Naming").strong());
+                    ui.label(
+                        RichText::new(
+                            "Declare how your folders are named using placeholders: {title} (required), \
+                            {artist}, {year}, and {noise}. Punctuation/brackets are ignored during matching.",
+                        )
+                        .color(pal::TEXT_DIM)
+                        .size(11.5),
+                    );
+
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Templates:").size(12.0));
+
+                    let mut remove_tmpl = None;
+                    let can_remove_tmpl = draft.folder_style.templates.len() > 1;
+                    for (idx, tmpl) in draft.folder_style.templates.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(tmpl).desired_width(260.0));
+                            if can_remove_tmpl && sharp_small_button(ui, "✕").clicked() {
+                                remove_tmpl = Some(idx);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_tmpl {
+                        draft.folder_style.templates.remove(idx);
+                    }
+
+                    ui.horizontal(|ui| {
+                        if draft.folder_style.templates.len() < 8
+                            && sharp_small_button(ui, "+ Add Template").clicked()
+                        {
+                            draft.folder_style.templates.push("{title}".to_string());
+                        }
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Presets:").color(pal::TEXT_DIM).size(11.5));
+                        let presets = [
+                            "{title}",
+                            "{artist} - {title}",
+                            "{year} - {title}",
+                            "{title} ({year})",
+                            "{title} ({noise})",
+                            "{artist} - {year} - {title}",
+                        ];
+                        for p in presets {
+                            if sharp_small_button(ui, p).clicked()
+                                && !draft.folder_style.templates.iter().any(|t| t == p)
+                                && draft.folder_style.templates.len() < 8
+                            {
+                                draft.folder_style.templates.push(p.to_string());
+                            }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Noise List ({noise} tokens):").size(12.0));
+                    ui.label(
+                        RichText::new("Noise decorations are only recognized through the {noise} placeholder.")
+                            .color(pal::TEXT_DIM)
+                            .size(11.5),
+                    );
+
+                    let mut remove_noise = None;
+                    for (idx, entry) in draft.folder_style.noise.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(entry).desired_width(180.0));
+                            if sharp_small_button(ui, "✕").clicked() {
+                                remove_noise = Some(idx);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_noise {
+                        draft.folder_style.noise.remove(idx);
+                    }
+
+                    ui.horizontal(|ui| {
+                        if draft.folder_style.noise.len() < 32
+                            && sharp_small_button(ui, "+ Add Noise").clicked()
+                        {
+                            draft.folder_style.noise.push(String::new());
+                        }
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Quick-add:").color(pal::TEXT_DIM).size(11.5));
+                        let quick_adds = [
+                            "FLAC", "MP3", "V0", "320", "WAV", "AAC", "OGG", "ALAC", "24bit",
+                        ];
+                        for q in quick_adds {
+                            if sharp_small_button(ui, q).clicked()
+                                && !draft
+                                    .folder_style
+                                    .noise
+                                    .iter()
+                                    .any(|n| n.eq_ignore_ascii_case(q))
+                                && draft.folder_style.noise.len() < 32
+                            {
+                                draft.folder_style.noise.push(q.to_string());
+                            }
+                        }
+                    });
+
+                    if let Err(err) = draft.folder_style.validate() {
+                        ui.label(RichText::new(format!("⚠ {}", err)).color(pal::ERR));
+                    }
+                    for hint in draft.folder_style.hints() {
+                        ui.label(RichText::new(format!("ℹ {}", hint)).color(pal::WARN));
+                    }
 
                     ui.add_space(8.0);
                     ui.separator();
@@ -456,6 +568,7 @@ fn show_settings_modal(
                     draft.quota_soft = draft.quota_soft.min(draft.quota_hard);
                     draft.batch_limit = draft.batch_limit.min(draft.quota_hard);
                     draft.review_match_min = draft.review_match_min.min(draft.auto_match_min);
+                    draft.folder_style.sanitize();
                     state.settings = draft.clone();
                     let _ = cmd_tx.send(UiToWorkerCommand::UpdateSettings(draft.clone()));
                     keep_open = false;
