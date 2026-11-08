@@ -146,6 +146,7 @@ pub fn run_scan_and_match(
     );
 
     let batch_id = lib_repo::create_batch(conn, "adopt", &crate::types::BatchSummary::default())?;
+    lib_repo::update_folder_local_only_count(conn, band_id, assignment.local_only.len() as u32)?;
 
     Ok(Some(ReconcileReport {
         batch_id: batch_id.max(0) as u64,

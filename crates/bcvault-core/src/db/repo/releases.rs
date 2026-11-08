@@ -307,20 +307,34 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
              SELECT band_id, MAX(last_seen_at) AS latest_seen
              FROM releases
              GROUP BY band_id
+         ),
+         rel_stats AS (
+             SELECT r.band_id,
+                    COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
+                    COALESCE(SUM(r.downloaded), 0) AS downloaded,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) AS non_eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
+                    COALESCE(SUM(CASE WHEN r.local_status = 'archived' THEN 1 ELSE 0 END), 0) AS archived,
+                    COALESCE(SUM(CASE WHEN r.local_status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_files
+             FROM releases r
+             JOIN max_seen m ON m.band_id = r.band_id
+             GROUP BY r.band_id
          )
-         SELECT r.band_id,
-                COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
-                COALESCE(SUM(r.downloaded), 0) AS downloaded,
-                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
-                COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) AS non_eligible_downloaded,
-                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
-                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
-                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
-                COALESCE(SUM(CASE WHEN r.local_status = 'archived' THEN 1 ELSE 0 END), 0) AS archived,
-                COALESCE(SUM(CASE WHEN r.local_status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_files
-         FROM releases r
-         JOIN max_seen m ON m.band_id = r.band_id
-         GROUP BY r.band_id",
+         SELECT s.band_id,
+                s.total,
+                s.downloaded + COALESCE(af.local_only_count, 0) AS downloaded,
+                s.eligible_downloaded,
+                s.non_eligible_downloaded + COALESCE(af.local_only_count, 0) AS non_eligible_downloaded,
+                s.eligible,
+                s.email_required,
+                s.unknown,
+                s.archived,
+                s.missing_files
+         FROM rel_stats s
+         LEFT JOIN artist_folders af ON af.band_id = s.band_id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -357,9 +371,9 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
                  WHERE band_id = ?1
              )
              SELECT COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
-                    COALESCE(SUM(r.downloaded), 0) AS downloaded,
+                    COALESCE(SUM(r.downloaded), 0) + COALESCE((SELECT local_only_count FROM artist_folders WHERE band_id = ?1), 0) AS downloaded,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
-                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) AS non_eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) + COALESCE((SELECT local_only_count FROM artist_folders WHERE band_id = ?1), 0) AS non_eligible_downloaded,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
@@ -684,9 +698,9 @@ mod tests {
         assert_eq!(nfc_stats.eligible_downloaded, 2);
         assert_eq!(nfc_stats.non_eligible_downloaded, 1);
         assert_eq!(nfc_stats.downloaded, 3);
-        assert_eq!(nfc_stats.format_sidebar_badge(), "2 (+ 1)/2/3");
+        assert_eq!(nfc_stats.format_sidebar_badge(), "2 (+1)/2/3");
 
-        // Artist 20: Leichen (40 on page all free & downloaded; 2 extra off-page downloaded)
+        // Artist 20: Leichen (40 on page all free & downloaded; 2 extra local-only album folders)
         conn.execute(
             "INSERT INTO artists (band_id, slug, name, url) VALUES (20, 'leichen', 'Leichen', 'https://leichen.bandcamp.com')",
             [],
@@ -703,13 +717,11 @@ mod tests {
             .unwrap();
         }
 
-        // 2 extra albums not on current page (older last_seen_at) but downloaded
-        let t_older = t_page_leichen - 500;
+        // 2 extra albums not on current page that exist as local-only folders in linked folder
         conn.execute(
-            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
-             VALUES ('album', 301, 20, 'Extra 1', 'Leichen', 'https://leichen.bandcamp.com/album/301', 'free', 1, ?1),
-                    ('album', 302, 20, 'Extra 2', 'Leichen', 'https://leichen.bandcamp.com/album/302', 'free', 1, ?1)",
-            params![t_older],
+            "INSERT INTO artist_folders (band_id, path, path_key, added_at, local_only_count)
+             VALUES (20, '/music/Leichen', 'leichen', 1_000, 2)",
+            [],
         )
         .unwrap();
 
@@ -719,7 +731,7 @@ mod tests {
         assert_eq!(leichen_stats.eligible_downloaded, 40);
         assert_eq!(leichen_stats.non_eligible_downloaded, 2);
         assert_eq!(leichen_stats.downloaded, 42);
-        assert_eq!(leichen_stats.format_sidebar_badge(), "40 (+ 2)/40/40");
+        assert_eq!(leichen_stats.format_sidebar_badge(), "40 (+2)/40/40");
 
         // Artist 30: Standard clean artist (5 on page: 3 free, 2 paid; 2 free downloaded)
         conn.execute(

@@ -135,7 +135,8 @@ pub fn link_folder(
          ON CONFLICT(band_id) DO UPDATE SET
              path = excluded.path,
              path_key = excluded.path_key,
-             added_at = unixepoch()",
+             added_at = unixepoch(),
+             local_only_count = 0",
         params![band_id, path_str, path_key],
     )?;
     tx.commit()?;
@@ -556,19 +557,43 @@ pub fn restore(
     Ok(())
 }
 
-pub fn ignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result<(), DbError> {
+pub fn update_folder_local_only_count(
+    conn: &Connection,
+    band_id: i64,
+    count: u32,
+) -> Result<(), DbError> {
     conn.execute(
-        "INSERT OR IGNORE INTO artist_folder_ignored (band_id, path_key) VALUES (?1, ?2)",
-        params![band_id, path_key],
+        "UPDATE artist_folders SET local_only_count = ?1, last_scan_at = unixepoch() WHERE band_id = ?2",
+        params![count, band_id],
     )?;
     Ok(())
 }
 
+pub fn ignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result<(), DbError> {
+    let affected = conn.execute(
+        "INSERT OR IGNORE INTO artist_folder_ignored (band_id, path_key) VALUES (?1, ?2)",
+        params![band_id, path_key],
+    )?;
+    if affected > 0 {
+        conn.execute(
+            "UPDATE artist_folders SET local_only_count = MAX(0, local_only_count - 1) WHERE band_id = ?1",
+            params![band_id],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn unignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result<(), DbError> {
-    conn.execute(
+    let affected = conn.execute(
         "DELETE FROM artist_folder_ignored WHERE band_id = ?1 AND path_key = ?2",
         params![band_id, path_key],
     )?;
+    if affected > 0 {
+        conn.execute(
+            "UPDATE artist_folders SET local_only_count = local_only_count + 1 WHERE band_id = ?1",
+            params![band_id],
+        )?;
+    }
     Ok(())
 }
 

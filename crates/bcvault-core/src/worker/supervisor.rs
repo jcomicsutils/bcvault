@@ -6,7 +6,7 @@ use crate::{
     },
     error::DbError,
     paths::AppPaths,
-    types::{LogLevel, SyncScope},
+    types::{FolderState, LogLevel, SyncScope},
     worker::{
         bridge::UiBridge,
         downloads::DownloadManager,
@@ -100,8 +100,21 @@ impl Supervisor {
         bridge.emit(WorkerToUiEvent::Ready {
             artists: initial_artists,
             settings: initial_settings,
-            folders: initial_folders,
+            folders: initial_folders.clone(),
         });
+
+        if !initial_folders.is_empty() {
+            let lib = library_service.clone();
+            let tok = library_cancel.child_token();
+            let folders = initial_folders;
+            tokio::spawn(async move {
+                for af in folders {
+                    if af.state == FolderState::Ok && !tok.is_cancelled() {
+                        lib.rescan_and_adopt_on_sync(af.band_id, tok.clone()).await;
+                    }
+                }
+            });
+        }
 
         let mut sup = Self {
             pool,

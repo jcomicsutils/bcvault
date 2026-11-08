@@ -200,6 +200,13 @@ impl LibraryService {
                 {
                     bridge.emit(WorkerToUiEvent::ArtistUpserted(av));
                 }
+                if let Ok(stats) = pool
+                    .reader
+                    .call(move |c| artists::stats_with_quota(c, band_id))
+                    .await
+                {
+                    bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                }
             }
             Ok(false) => {
                 bridge.log(
@@ -543,16 +550,22 @@ impl LibraryService {
                     let key = crate::library::link::normalize_path_key(p);
                     lib_repo::ignore_local(c, band_id, &key)?;
                 }
-                Ok::<_, DbError>(())
+                let stats = artists::stats_with_quota(c, band_id)?;
+                Ok::<_, DbError>(stats)
             })
             .await;
-        if let Err(e) = res {
-            bridge.log(
-                LogLevel::Error,
-                "library",
-                format!("Failed to ignore paths for artist {band_id}: {e}"),
-                None,
-            );
+        match res {
+            Ok(stats) => {
+                bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+            }
+            Err(e) => {
+                bridge.log(
+                    LogLevel::Error,
+                    "library",
+                    format!("Failed to ignore paths for artist {band_id}: {e}"),
+                    None,
+                );
+            }
         }
     }
 
@@ -1305,6 +1318,20 @@ impl LibraryService {
         }
 
         let review_count = assignment.review.len() as u32;
+        let local_only_count = assignment.local_only.len() as u32;
+
+        let _ = pool
+            .writer
+            .call(move |c| lib_repo::update_folder_local_only_count(c, band_id, local_only_count))
+            .await;
+
+        if let Ok(stats) = pool
+            .reader
+            .call(move |c| artists::stats_with_quota(c, band_id))
+            .await
+        {
+            bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+        }
 
         if !assignment.review.is_empty()
             || !assignment.conflicts.is_empty()
@@ -1569,6 +1596,20 @@ impl LibraryService {
             report: Box::new(report.clone()),
         });
 
+        let local_only_count = report.local_only.len() as u32;
+        let _ = pool
+            .writer
+            .call(move |c| lib_repo::update_folder_local_only_count(c, band_id, local_only_count))
+            .await;
+
+        if let Ok(stats) = pool
+            .reader
+            .call(move |c| artists::stats_with_quota(c, band_id))
+            .await
+        {
+            bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+        }
+
         bridge.log(
             LogLevel::Info,
             "library",
@@ -1603,6 +1644,7 @@ impl LibraryService {
                 };
                 let mut summary = BatchSummary::default();
                 let mut touched_keys = Vec::new();
+                let mut touched_bands = std::collections::HashSet::new();
 
                 for decision in decisions {
                     match decision {
@@ -1647,6 +1689,7 @@ impl LibraryService {
                                 crate::library::scan::normalize_candidate_path_key(&path);
                             lib_repo::ignore_local(c, band_id, &path_key)?;
                             summary.ignored += 1;
+                            touched_bands.insert(band_id);
                         }
                     }
                 }
@@ -1654,7 +1697,6 @@ impl LibraryService {
                 lib_repo::update_batch_summary(c, actual_batch_id, &summary)?;
 
                 let mut updated_rows = Vec::new();
-                let mut touched_bands = std::collections::HashSet::new();
                 for key in touched_keys {
                     if let Some(row) = releases::get_release(c, key)? {
                         touched_bands.insert(row.band_id);
@@ -1842,6 +1884,135 @@ mod tests {
             .await
             .unwrap();
         assert!(folder_after_unlink.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_library_service_local_only_updates_stats_badge() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("local_only_stats.db");
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 9999;
+        pool.writer
+            .call(move |c| {
+                let mut st = Settings::default();
+                st.folder_style.templates =
+                    vec!["{artist} - {title}".to_string(), "{title}".to_string()];
+                settings::set_settings(c, &st)?;
+
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "leichen-test",
+                        name: "Leichen",
+                        url: "https://leichen.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+
+                // 1 release on page, free & not yet downloaded
+                c.execute(
+                    "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+                     VALUES ('album', 101, ?1, 'Free 1', 'Leichen', 'https://leichen.bandcamp.com/album/101', 'free', 0, 1000)",
+                    rusqlite::params![band_id],
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        // Local artist folder has Free 1, plus 2 extra local-only album folders
+        let artist_dir = dir.path().join("Leichen");
+        let album_free = artist_dir.join("Leichen - Free 1");
+        let album_extra1 = artist_dir.join("Leichen - Extra Bootleg 1");
+        let album_extra2 = artist_dir.join("Leichen - Extra Bootleg 2");
+        fs::create_dir_all(&album_free).unwrap();
+        fs::write(album_free.join("01.mp3"), b"audio").unwrap();
+        fs::create_dir_all(&album_extra1).unwrap();
+        fs::write(album_extra1.join("01.mp3"), b"audio").unwrap();
+        fs::create_dir_all(&album_extra2).unwrap();
+        fs::write(album_extra2.join("01.mp3"), b"audio").unwrap();
+
+        let cancel = CancellationToken::new();
+
+        // 1. Link artist folder with auto_apply_confident true
+        svc.link_artist_folder(band_id, artist_dir.clone(), true, cancel.clone())
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // Verify ReconcileReport emitted with 2 local_only
+        let report_opt = events.iter().find_map(|e| match e {
+            WorkerToUiEvent::ReconcileReport { report } => Some(report),
+            _ => None,
+        });
+        let report = report_opt.expect("should have emitted ReconcileReport");
+        assert_eq!(report.local_only.len(), 2);
+
+        // Verify local_only_count in artist_folders table
+        let count_in_db: u32 = pool
+            .reader
+            .call(move |c| {
+                Ok(c.query_row(
+                    "SELECT local_only_count FROM artist_folders WHERE band_id = ?1",
+                    rusqlite::params![band_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count_in_db, 2);
+
+        // Verify stats query reflects the 2 local_only in non_eligible_downloaded and downloaded
+        let stats = pool
+            .reader
+            .call(move |c| releases::artist_stats_for_one(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.eligible, 1);
+        assert_eq!(stats.eligible_downloaded, 1);
+        assert_eq!(stats.non_eligible_downloaded, 2);
+        assert_eq!(stats.downloaded, 3);
+        assert_eq!(stats.format_sidebar_badge(), "1 (+2)/1/1");
+
+        // 2. Ignore 1 local-only path
+        svc.ignore_local(band_id, vec![album_extra1]).await;
+
+        let stats_after_ignore = pool
+            .reader
+            .call(move |c| releases::artist_stats_for_one(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(stats_after_ignore.non_eligible_downloaded, 1);
+        assert_eq!(stats_after_ignore.downloaded, 2);
+        assert_eq!(stats_after_ignore.format_sidebar_badge(), "1 (+1)/1/1");
+
+        // 3. Unlink folder: local_only_count disappears and stats revert to 0 non-eligible
+        svc.unlink_artist_folder(band_id).await;
+
+        let stats_after_unlink = pool
+            .reader
+            .call(move |c| releases::artist_stats_for_one(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(stats_after_unlink.non_eligible_downloaded, 0);
+        assert_eq!(stats_after_unlink.downloaded, 1);
+        assert_eq!(stats_after_unlink.format_sidebar_badge(), "1/1/1");
     }
 
     #[tokio::test]

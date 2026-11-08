@@ -9,9 +9,13 @@ pub const MIGRATIONS: &[(i32, &str)] = &[
         include_str!("../../migrations/0003_custom_artist_name.sql"),
     ),
     (4, include_str!("../../migrations/0004_library.sql")),
+    (
+        5,
+        include_str!("../../migrations/0005_artist_folder_local_only.sql"),
+    ),
 ];
 
-pub const MAX_VERSION: i32 = 4;
+pub const MAX_VERSION: i32 = 5;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     run_with(conn, MIGRATIONS)
@@ -51,14 +55,14 @@ mod tests {
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
 
         // Re-running is a no-op
         run(&mut conn).unwrap();
         let v2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v2, 4);
+        assert_eq!(v2, 5);
 
         // Bump to version 99 and verify TooNew
         conn.pragma_update(None, "user_version", 99).unwrap();
@@ -67,7 +71,7 @@ mod tests {
             err,
             DbError::TooNew {
                 found: 99,
-                max_supported: 4
+                max_supported: 5
             }
         ));
     }
@@ -125,5 +129,46 @@ mod tests {
         assert!(tables.contains(&"artist_folder_ignored".to_string()));
         assert!(tables.contains(&"library_batches".to_string()));
         assert!(tables.contains(&"library_events".to_string()));
+    }
+
+    #[test]
+    fn migration_0005_adds_local_only_count_to_artist_folders() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Run migrations 1..=4 first
+        run_with(&mut conn, &MIGRATIONS[..4]).unwrap();
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'artist1', 'Artist 1', 'https://artist1.bandcamp.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO artist_folders (band_id, path, path_key, added_at) VALUES (1, '/music/artist1', 'artist1', 1000)",
+            [],
+        ).unwrap();
+
+        // Run migration 5
+        run(&mut conn).unwrap();
+
+        let count: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+
+        conn.execute(
+            "UPDATE artist_folders SET local_only_count = 5 WHERE band_id = 1",
+            [],
+        )
+        .unwrap();
+        let updated: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated, 5);
     }
 }

@@ -439,7 +439,7 @@ impl ArtistStats {
     pub fn format_sidebar_badge(&self) -> String {
         if self.non_eligible_downloaded > 0 {
             format!(
-                "{} (+ {})/{}/{}",
+                "{} (+{})/{}/{}",
                 self.eligible_downloaded, self.non_eligible_downloaded, self.eligible, self.total
             )
         } else {
@@ -1127,7 +1127,7 @@ mod tests {
             total: 3,
             ..Default::default()
         };
-        assert_eq!(nfc_stats.format_sidebar_badge(), "2 (+ 1)/2/3");
+        assert_eq!(nfc_stats.format_sidebar_badge(), "2 (+1)/2/3");
 
         // Case 3: Leichen (40 free on page, all downloaded + 2 extra downloaded off-page)
         let leichen_stats = ArtistStats {
@@ -1138,7 +1138,7 @@ mod tests {
             total: 40,
             ..Default::default()
         };
-        assert_eq!(leichen_stats.format_sidebar_badge(), "40 (+ 2)/40/40");
+        assert_eq!(leichen_stats.format_sidebar_badge(), "40 (+2)/40/40");
     }
 
     #[test]

@@ -426,7 +426,7 @@ fn draw_artist_row(
             .round() as u32;
 
         let badge_str = if non_el_dl_tween > 0 {
-            format!("{el_dl_tween} (+ {non_el_dl_tween})/{el_tween}/{tot_tween}")
+            format!("{el_dl_tween} (+{non_el_dl_tween})/{el_tween}/{tot_tween}")
         } else {
             format!("{el_dl_tween}/{el_tween}/{tot_tween}")
         };
