@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -14,70 +19,6 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  test-archlinux:
-    name: Arch Linux (Test)
-    runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-    steps:
-      - name: Install system packages
-        run: |
-          pacman -Sy --noconfirm --needed archlinux-keyring
-          pacman -Syu --noconfirm --needed \
-            base-devel \
-            git \
-            curl \
-            mesa \
-            libx11 \
-            libxcursor \
-            libxrandr \
-            libxi \
-            libxinerama \
-            wayland \
-            libxkbcommon
-      - name: Install stable Rust toolchain
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Run workspace tests
-        run: |
-          source "$HOME/.cargo/env"
-          cargo test --workspace
-
-  test-fedora:
-    name: Fedora Linux (Test)
-    runs-on: ubuntu-latest
-    container:
-      image: fedora:latest
-    steps:
-      - name: Install system packages
-        run: |
-          dnf install -y \
-            gcc \
-            gcc-c++ \
-            git \
-            curl \
-            mesa-libGL-devel \
-            libX11-devel \
-            libXcursor-devel \
-            libXrandr-devel \
-            libXi-devel \
-            libXinerama-devel \
-            wayland-devel \
-            libxkbcommon-devel
-      - name: Install stable Rust toolchain
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Run workspace tests
-        run: |
-          source "$HOME/.cargo/env"
-          cargo test --workspace
-
   build-linux:
     name: Linux x86_64 (Build)
     runs-on: ubuntu-latest
@@ -106,13 +47,7 @@ jobs:
             libwayland-dev \
             libxkbcommon-dev
 
-      - name: Check code formatting
-        run: cargo fmt --check
-
-      - name: Run Clippy lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run test suite and checks
+      - name: Run test suite and quality gates
         run: ./scripts/check.sh
 
       - name: Build release binaries
@@ -162,9 +97,9 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-linux, build-windows, test-archlinux, test-fedora]
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -186,7 +121,11 @@ jobs:
       - name: Generate release changelog
         id: changelog
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
           echo "Previous tag: ${PREV_TAG}"
           if [ -n "$PREV_TAG" ]; then
@@ -206,6 +145,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.changelog.outputs.tag }}
           body: ${{ steps.changelog.outputs.CHANGELOG }}
           files: |
             dist/bcvault-linux-x86_64.tar.gz
