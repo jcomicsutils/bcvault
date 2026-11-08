@@ -177,6 +177,8 @@ pub fn show(
     let mut total_stats = ArtistStats::default();
     for a in &state.artists {
         total_stats.downloaded += a.stats.downloaded;
+        total_stats.eligible_downloaded += a.stats.eligible_downloaded;
+        total_stats.non_eligible_downloaded += a.stats.non_eligible_downloaded;
         total_stats.eligible += a.stats.eligible;
         total_stats.total += a.stats.total;
         total_stats.email_required += a.stats.email_required;
@@ -503,6 +505,8 @@ mod tests {
                 last_synced_at: None,
                 stats: ArtistStats {
                     downloaded: 17,
+                    eligible_downloaded: 17,
+                    non_eligible_downloaded: 0,
                     eligible: 17,
                     total: 17,
                     email_required: 1,
@@ -521,6 +525,8 @@ mod tests {
                 last_synced_at: None,
                 stats: ArtistStats {
                     downloaded: 11,
+                    eligible_downloaded: 11,
+                    non_eligible_downloaded: 0,
                     eligible: 11,
                     total: 11,
                     email_required: 0,

@@ -320,6 +320,8 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
             ArtistStats {
                 total: r.get::<_, u32>(1)?,
                 downloaded: r.get::<_, u32>(2)?,
+                eligible_downloaded: 0,
+                non_eligible_downloaded: 0,
                 eligible: r.get::<_, u32>(3)?,
                 email_required: r.get::<_, u32>(4)?,
                 unknown: r.get::<_, u32>(5)?,
@@ -355,6 +357,8 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
                 Ok(ArtistStats {
                     total: r.get::<_, u32>(0)?,
                     downloaded: r.get::<_, u32>(1)?,
+                    eligible_downloaded: 0,
+                    non_eligible_downloaded: 0,
                     eligible: r.get::<_, u32>(2)?,
                     email_required: r.get::<_, u32>(3)?,
                     unknown: r.get::<_, u32>(4)?,

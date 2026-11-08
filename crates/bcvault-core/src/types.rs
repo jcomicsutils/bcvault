@@ -424,6 +424,8 @@ pub struct VerifyOutcome {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ArtistStats {
     pub downloaded: u32,
+    pub eligible_downloaded: u32,
+    pub non_eligible_downloaded: u32,
     pub eligible: u32,
     pub total: u32, // eligible = free + nyp
     pub email_required: u32,
@@ -431,6 +433,22 @@ pub struct ArtistStats {
     pub quota_used_30d: u32,
     pub archived: u32,
     pub missing_files: u32,
+}
+
+impl ArtistStats {
+    pub fn format_sidebar_badge(&self) -> String {
+        if self.non_eligible_downloaded > 0 {
+            format!(
+                "{} (+ {})/{}/{}",
+                self.eligible_downloaded, self.non_eligible_downloaded, self.eligible, self.total
+            )
+        } else {
+            format!(
+                "{}/{}/{}",
+                self.eligible_downloaded, self.eligible, self.total
+            )
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1085,6 +1103,42 @@ mod tests {
         assert!(!artist.matches_input("otherartist"));
         assert!(!artist.matches_input("https://otherartist.bandcamp.com"));
         assert!(!artist.matches_input(""));
+    }
+
+    #[test]
+    fn test_artist_stats_format_sidebar_badge() {
+        // Case 1: Standard clean badge with zero non-eligible downloads
+        let clean_stats = ArtistStats {
+            downloaded: 10,
+            eligible_downloaded: 10,
+            non_eligible_downloaded: 0,
+            eligible: 15,
+            total: 20,
+            ..Default::default()
+        };
+        assert_eq!(clean_stats.format_sidebar_badge(), "10/15/20");
+
+        // Case 2: Nigeria Futebol Clube (3 on page, 2 free, 1 paid, all 3 downloaded)
+        let nfc_stats = ArtistStats {
+            downloaded: 3,
+            eligible_downloaded: 2,
+            non_eligible_downloaded: 1,
+            eligible: 2,
+            total: 3,
+            ..Default::default()
+        };
+        assert_eq!(nfc_stats.format_sidebar_badge(), "2 (+ 1)/2/3");
+
+        // Case 3: Leichen (40 free on page, all downloaded + 2 extra downloaded off-page)
+        let leichen_stats = ArtistStats {
+            downloaded: 42,
+            eligible_downloaded: 40,
+            non_eligible_downloaded: 2,
+            eligible: 40,
+            total: 40,
+            ..Default::default()
+        };
+        assert_eq!(leichen_stats.format_sidebar_badge(), "40 (+ 2)/40/40");
     }
 
     #[test]

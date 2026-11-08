@@ -264,6 +264,8 @@ fn aggregate_all_stats(state: &UiState) -> ArtistStats {
     let mut out = ArtistStats::default();
     for a in &state.artists {
         out.downloaded += a.stats.downloaded;
+        out.eligible_downloaded += a.stats.eligible_downloaded;
+        out.non_eligible_downloaded += a.stats.non_eligible_downloaded;
         out.eligible += a.stats.eligible;
         out.total += a.stats.total;
         out.email_required += a.stats.email_required;
