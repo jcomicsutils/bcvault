@@ -1,4 +1,4 @@
-use crate::library::FolderStyle;
+pub use crate::library::FolderStyle;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

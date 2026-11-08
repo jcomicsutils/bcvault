@@ -1,23 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::Datelike;
 use strsim::normalized_levenshtein;
 
+use crate::library::folder_style::FolderStyle;
 use crate::library::scan::AlbumCandidate;
-use crate::library::textmatch::{name_variant_keys, normalize};
+use crate::library::textmatch::key;
 use crate::types::{ItemType, ReleaseRow};
-
-/// Known version tokens that distinguish special editions from standard releases.
-const VERSION_WORDS: &[&str] = &[
-    "deluxe",
-    "remaster",
-    "remastered",
-    "edition",
-    "live",
-    "anniversary",
-    "expanded",
-    "reissue",
-];
 
 /// Matching signal observed between a local candidate and a Bandcamp release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -105,17 +94,301 @@ pub struct MatchAssignment {
     pub restorable: Vec<MatchProposal>,
 }
 
-/// Greedy 1-to-1 candidate assignment according to §6 rules:
-/// - A pair is auto if score >= auto_match_min and it beats runner-up for both sides by >= 0.05
-/// - Review if score >= review_match_min or ambiguous
-/// - Conflicts if duplicate local copies (e.g. FLAC and MP3) or multiple releases match same folder
-/// - Otherwise page_only or local_only
+/// An exact-match edge between a local candidate and a Bandcamp release.
+#[derive(Debug, Clone)]
+pub struct ExactEdge {
+    pub cand_idx: usize,
+    pub rel_idx: usize,
+    pub signals: BTreeSet<Signal>,
+}
+
+/// Result of resolving exact matches in the bipartite graph.
+pub struct ExactResolution {
+    pub matched: Vec<(usize, usize, BTreeSet<Signal>)>,
+    pub conflicts: Vec<Conflict>,
+    pub matched_cands: HashSet<usize>,
+    pub matched_rels: HashSet<usize>,
+    pub conflicted_cands: HashSet<usize>,
+    pub conflicted_rels: HashSet<usize>,
+}
+
+struct DisjointSet {
+    parent: Vec<usize>,
+}
+
+impl DisjointSet {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, i: usize) -> usize {
+        let mut root = i;
+        while root != self.parent[root] {
+            root = self.parent[root];
+        }
+        let mut curr = i;
+        while curr != root {
+            let next = self.parent[curr];
+            self.parent[curr] = root;
+            curr = next;
+        }
+        root
+    }
+
+    fn union(&mut self, i: usize, j: usize) {
+        let ri = self.find(i);
+        let rj = self.find(j);
+        if ri != rj {
+            self.parent[ri] = rj;
+        }
+    }
+}
+
+/// Builds exact-match edges between candidates and releases based on:
+/// - Tag URL equals release URL (normalized)
+/// - Any folder name variant equals key(release.title) (or raw string if key is empty)
+/// - Album tag equals key(release.title) (or raw string if key is empty)
+pub fn build_exact_edges(
+    candidates: &[AlbumCandidate],
+    releases: &[ReleaseRow],
+    style: &FolderStyle,
+) -> Vec<ExactEdge> {
+    let refs: Vec<&AlbumCandidate> = candidates.iter().collect();
+    build_exact_edges_refs(&refs, releases, style)
+}
+
+/// Builds exact-match edges for candidate references.
+pub fn build_exact_edges_refs(
+    candidates: &[&AlbumCandidate],
+    releases: &[ReleaseRow],
+    style: &FolderStyle,
+) -> Vec<ExactEdge> {
+    let mut edges = Vec::new();
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        for (rel_idx, rel) in releases.iter().enumerate() {
+            let mut signals = BTreeSet::new();
+
+            // 1. Tag URL equals release URL (normalized host and path)
+            if cand
+                .metadata
+                .as_ref()
+                .and_then(|m| m.bandcamp_url.as_deref())
+                .is_some_and(|u| normalize_bandcamp_url(u) == normalize_bandcamp_url(&rel.url))
+            {
+                signals.insert(Signal::UrlTag);
+            }
+
+            let rel_title_key = key(&rel.title);
+
+            // 2. Folder name equals key(release.title) (or raw fallback for empty keys)
+            let cand_names = style.candidate_names(&cand.name, &rel.artist_name);
+            let folder_exact = if !rel_title_key.is_empty() {
+                cand_names.iter().any(|n| n == &rel_title_key)
+            } else {
+                let cand_trimmed = cand.name.trim();
+                let rel_trimmed = rel.title.trim();
+                !cand_trimmed.is_empty() && cand_trimmed.eq_ignore_ascii_case(rel_trimmed)
+            };
+            if folder_exact {
+                signals.insert(Signal::FolderName);
+            }
+
+            // 3. Album tag equals key(release.title) (or raw fallback for empty keys)
+            if let Some(album_tag) = cand.metadata.as_ref().and_then(|m| m.album.as_deref()) {
+                let tag_key = key(album_tag);
+                let album_exact = if !rel_title_key.is_empty() {
+                    !tag_key.is_empty() && tag_key == rel_title_key
+                } else {
+                    let tag_trimmed = album_tag.trim();
+                    let rel_trimmed = rel.title.trim();
+                    !tag_trimmed.is_empty() && tag_trimmed.eq_ignore_ascii_case(rel_trimmed)
+                };
+                if album_exact {
+                    signals.insert(Signal::AlbumTag);
+                }
+            }
+
+            if !signals.is_empty() {
+                edges.push(ExactEdge {
+                    cand_idx,
+                    rel_idx,
+                    signals,
+                });
+            }
+        }
+    }
+    edges
+}
+
+/// Resolves exact-match edges into 1-to-1 matches and multi-edge conflicts according to §3.4:
+/// 1. URL tags first: authoritative when candidate and release both have exactly one UrlTag edge.
+/// 2. Connected components over remaining edges: single-edge -> matched, multi-edge -> conflict.
+pub fn resolve_exact_matches(
+    candidates: &[&AlbumCandidate],
+    releases: &[ReleaseRow],
+    edges: &[ExactEdge],
+) -> ExactResolution {
+    let mut matched = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut matched_cands = HashSet::new();
+    let mut matched_rels = HashSet::new();
+    let mut conflicted_cands = HashSet::new();
+    let mut conflicted_rels = HashSet::new();
+
+    // 1. URL tags first:
+    let mut cand_url_counts = vec![0usize; candidates.len()];
+    let mut rel_url_counts = vec![0usize; releases.len()];
+    for e in edges {
+        if e.signals.contains(&Signal::UrlTag) {
+            cand_url_counts[e.cand_idx] += 1;
+            rel_url_counts[e.rel_idx] += 1;
+        }
+    }
+
+    for e in edges {
+        if e.signals.contains(&Signal::UrlTag)
+            && cand_url_counts[e.cand_idx] == 1
+            && rel_url_counts[e.rel_idx] == 1
+            && matched_cands.insert(e.cand_idx)
+            && matched_rels.insert(e.rel_idx)
+        {
+            matched.push((e.cand_idx, e.rel_idx, e.signals.clone()));
+        }
+    }
+
+    let mut remaining_edges = Vec::new();
+    for e in edges {
+        if !matched_cands.contains(&e.cand_idx) && !matched_rels.contains(&e.rel_idx) {
+            remaining_edges.push(e.clone());
+        }
+    }
+
+    // 2. Connected components over remaining edges using DisjointSet
+    let total_nodes = candidates.len() + releases.len();
+    let mut ds = DisjointSet::new(total_nodes);
+
+    for e in &remaining_edges {
+        ds.union(e.cand_idx, candidates.len() + e.rel_idx);
+    }
+
+    let mut groups: BTreeMap<usize, Vec<&ExactEdge>> = BTreeMap::new();
+    for e in &remaining_edges {
+        let root = ds.find(e.cand_idx);
+        groups.entry(root).or_default().push(e);
+    }
+
+    for (_root, comp_edges) in groups {
+        let mut comp_cands = BTreeSet::new();
+        let mut comp_rels = BTreeSet::new();
+        for e in &comp_edges {
+            comp_cands.insert(e.cand_idx);
+            comp_rels.insert(e.rel_idx);
+        }
+
+        if comp_edges.len() == 1 {
+            let e = comp_edges[0];
+            matched_cands.insert(e.cand_idx);
+            matched_rels.insert(e.rel_idx);
+            matched.push((e.cand_idx, e.rel_idx, e.signals.clone()));
+        } else if comp_edges.len() > 1 {
+            let cands_sorted: Vec<usize> = comp_cands.into_iter().collect();
+            let rels_sorted: Vec<usize> = comp_rels.into_iter().collect();
+
+            conflicted_cands.extend(cands_sorted.iter().copied());
+            conflicted_rels.extend(rels_sorted.iter().copied());
+
+            let description = if rels_sorted.len() == 1 {
+                format!(
+                    "{} folders match release '{}' exactly",
+                    cands_sorted.len(),
+                    releases[rels_sorted[0]].title
+                )
+            } else if cands_sorted.len() == 1 {
+                let cand_name = &candidates[cands_sorted[0]].name;
+                if rels_sorted.len() == 2 {
+                    let r0 = rels_sorted[0];
+                    let r1 = rels_sorted[1];
+                    let e0 = comp_edges.iter().find(|e| e.rel_idx == r0);
+                    let e1 = comp_edges.iter().find(|e| e.rel_idx == r1);
+                    if let (Some(e0), Some(e1)) = (e0, e1) {
+                        if e0.signals.contains(&Signal::FolderName)
+                            && e1.signals.contains(&Signal::AlbumTag)
+                        {
+                            format!(
+                                "Folder name matches '{}' but album tag matches '{}'",
+                                releases[r0].title, releases[r1].title
+                            )
+                        } else if e1.signals.contains(&Signal::FolderName)
+                            && e0.signals.contains(&Signal::AlbumTag)
+                        {
+                            format!(
+                                "Folder name matches '{}' but album tag matches '{}'",
+                                releases[r1].title, releases[r0].title
+                            )
+                        } else {
+                            format!(
+                                "Folder '{}' matches {} releases exactly",
+                                cand_name,
+                                rels_sorted.len()
+                            )
+                        }
+                    } else {
+                        format!(
+                            "Folder '{}' matches {} releases exactly",
+                            cand_name,
+                            rels_sorted.len()
+                        )
+                    }
+                } else {
+                    format!(
+                        "Folder '{}' matches {} releases exactly",
+                        cand_name,
+                        rels_sorted.len()
+                    )
+                }
+            } else {
+                format!(
+                    "{} folders and {} releases collide exactly",
+                    cands_sorted.len(),
+                    rels_sorted.len()
+                )
+            };
+
+            let release_keys: Vec<crate::types::ItemKey> =
+                rels_sorted.iter().map(|&ri| releases[ri].key).collect();
+            let candidate_paths: Vec<std::path::PathBuf> = cands_sorted
+                .iter()
+                .map(|&ci| candidates[ci].path.clone())
+                .collect();
+
+            conflicts.push(Conflict {
+                description,
+                release_keys,
+                candidate_paths,
+            });
+        }
+    }
+
+    ExactResolution {
+        matched,
+        conflicts,
+        matched_cands,
+        matched_rels,
+        conflicted_cands,
+        conflicted_rels,
+    }
+}
+
+/// Matches candidates to releases using an exact-first pass followed by fuzzy scoring for leftovers.
 pub fn assign_matches(
     candidates: &[AlbumCandidate],
     releases: &[ReleaseRow],
     auto_match_min: f32,
     review_match_min: f32,
-    ignored_path_keys: &std::collections::HashSet<String>,
+    ignored_path_keys: &HashSet<String>,
+    style: &FolderStyle,
 ) -> MatchAssignment {
     let mut assignment = MatchAssignment::default();
 
@@ -144,130 +417,130 @@ pub fn assign_matches(
         return assignment;
     }
 
-    // Compute pairwise score matrix
-    // matrix[cand_idx][rel_idx] = Score
-    let mut matrix: Vec<Vec<Score>> = Vec::with_capacity(active_candidates.len());
-    for c in &active_candidates {
+    // 1. Exact Pass
+    let exact_edges = build_exact_edges_refs(&active_candidates, releases, style);
+    let resolution = resolve_exact_matches(&active_candidates, releases, &exact_edges);
+
+    assignment.conflicts = resolution.conflicts;
+
+    for (cand_idx, rel_idx, signals) in resolution.matched {
+        let cand = active_candidates[cand_idx];
+        let rel = &releases[rel_idx];
+        let proposal = MatchProposal {
+            release_key: rel.key,
+            release_title: rel.title.clone(),
+            candidate_path: cand.path.clone(),
+            candidate_name: cand.name.clone(),
+            score: Score {
+                value: 1.00,
+                signals: signals.into_iter().collect(),
+            },
+            format_guess: cand.metadata.as_ref().and_then(|m| m.format_guess),
+        };
+
+        if rel.downloaded && rel.local_status == Some(crate::types::LocalStatus::Archived) {
+            assignment.restorable.push(proposal);
+        } else {
+            assignment.matched.push(proposal);
+        }
+    }
+
+    let mut matched_cands = resolution.matched_cands;
+    let mut matched_rels = resolution.matched_rels;
+    let conflicted_cands = resolution.conflicted_cands;
+    let conflicted_rels = resolution.conflicted_rels;
+
+    // 2. Fuzzy Pass (only for leftovers)
+    let leftover_cands: Vec<usize> = (0..active_candidates.len())
+        .filter(|ci| !matched_cands.contains(ci) && !conflicted_cands.contains(ci))
+        .collect();
+    let leftover_rels: Vec<usize> = (0..releases.len())
+        .filter(|ri| !matched_rels.contains(ri) && !conflicted_rels.contains(ri))
+        .collect();
+
+    if leftover_cands.is_empty() || leftover_rels.is_empty() {
+        for &ri in &leftover_rels {
+            assignment.page_only.push(releases[ri].key);
+        }
+        for &ci in &leftover_cands {
+            let cand = active_candidates[ci];
+            assignment.local_only.push(LocalOrphan {
+                path: cand.path.clone(),
+                name: cand.name.clone(),
+                track_count: cand.track_count,
+                format_guess: cand.metadata.as_ref().and_then(|m| m.format_guess),
+            });
+        }
+        return assignment;
+    }
+
+    // Compute pairwise score matrix for leftovers
+    let mut matrix: Vec<Vec<(Score, bool)>> = Vec::with_capacity(active_candidates.len());
+    for (cand_idx, cand) in active_candidates.iter().enumerate() {
         let mut row = Vec::with_capacity(releases.len());
-        for r in releases {
-            row.push(score_release(c, r));
+        if !leftover_cands.contains(&cand_idx) {
+            row.resize(
+                releases.len(),
+                (
+                    Score {
+                        value: 0.0,
+                        signals: Vec::new(),
+                    },
+                    false,
+                ),
+            );
+        } else {
+            for (rel_idx, rel) in releases.iter().enumerate() {
+                if !leftover_rels.contains(&rel_idx) {
+                    row.push((
+                        Score {
+                            value: 0.0,
+                            signals: Vec::new(),
+                        },
+                        false,
+                    ));
+                } else {
+                    let release_year = rel.published_at.and_then(|ts| {
+                        chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.year() as u32)
+                    });
+                    row.push(score_candidate_internal(
+                        cand,
+                        &rel.artist_name,
+                        &rel.title,
+                        &rel.url,
+                        &rel.key.kind,
+                        rel.track_count,
+                        release_year,
+                        style,
+                    ));
+                }
+            }
         }
         matrix.push(row);
     }
 
-    // 1. Detect conflicts:
-    // Check if multiple candidates score >= review_match_min on the same release with close scores (difference < 0.05)
-    let mut conflicted_rel_indices = std::collections::HashSet::new();
-    let mut conflicted_cand_indices = std::collections::HashSet::new();
-
-    for (rel_idx, r) in releases.iter().enumerate() {
-        let mut high_scoring_cands = Vec::new();
-        for (cand_idx, _) in active_candidates.iter().enumerate() {
-            let score_val = matrix[cand_idx][rel_idx].value;
-            if score_val >= review_match_min {
-                high_scoring_cands.push((cand_idx, score_val));
-            }
-        }
-
-        if high_scoring_cands.len() > 1 {
-            high_scoring_cands
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            // If top two are close (< 0.05 difference), it's a conflict (e.g. FLAC and MP3 duplicates)
-            // A conflict needs two strong, near-equal candidates (e.g. FLAC and MP3
-            // copies). A weak runner-up is handled by greedy assignment and review.
-            if high_scoring_cands[1].1 >= auto_match_min
-                && (high_scoring_cands[0].1 - high_scoring_cands[1].1) < 0.05
-            {
-                conflicted_rel_indices.insert(rel_idx);
-                let paths: Vec<std::path::PathBuf> = high_scoring_cands
-                    .iter()
-                    .map(|(ci, _)| {
-                        conflicted_cand_indices.insert(*ci);
-                        active_candidates[*ci].path.clone()
-                    })
-                    .collect();
-
-                assignment.conflicts.push(Conflict {
-                    description: format!(
-                        "Multiple local folders match release '{}' (duplicate formats or identical titles)",
-                        r.title
-                    ),
-                    release_keys: vec![r.key],
-                    candidate_paths: paths,
-                });
-            }
-        }
-    }
-
-    // Check if one candidate matches multiple releases with close scores
-    for (cand_idx, c) in active_candidates.iter().enumerate() {
-        if conflicted_cand_indices.contains(&cand_idx) {
-            continue;
-        }
-        let mut high_scoring_rels = Vec::new();
-        for (rel_idx, _) in releases.iter().enumerate() {
-            let score_val = matrix[cand_idx][rel_idx].value;
-            if score_val >= review_match_min {
-                high_scoring_rels.push((rel_idx, score_val));
-            }
-        }
-
-        if high_scoring_rels.len() > 1 {
-            high_scoring_rels
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            if high_scoring_rels[1].1 >= auto_match_min
-                && (high_scoring_rels[0].1 - high_scoring_rels[1].1) < 0.05
-            {
-                conflicted_cand_indices.insert(cand_idx);
-                let rel_keys: Vec<crate::types::ItemKey> = high_scoring_rels
-                    .iter()
-                    .map(|(ri, _)| {
-                        conflicted_rel_indices.insert(*ri);
-                        releases[*ri].key
-                    })
-                    .collect();
-
-                assignment.conflicts.push(Conflict {
-                    description: format!(
-                        "Folder '{}' matches multiple releases with equal confidence",
-                        c.name
-                    ),
-                    release_keys: rel_keys,
-                    candidate_paths: vec![c.path.clone()],
-                });
-            }
-        }
-    }
-
-    // 2. Greedy assignment of non-conflicted pairs
-    // Collect all valid pairs (cand_idx, rel_idx, score)
     struct Pair {
         cand_idx: usize,
         rel_idx: usize,
         score: Score,
+        auto_eligible: bool,
     }
 
     let mut pairs = Vec::new();
-    for (cand_idx, _) in active_candidates.iter().enumerate() {
-        if conflicted_cand_indices.contains(&cand_idx) {
-            continue;
-        }
-        for (rel_idx, _) in releases.iter().enumerate() {
-            if conflicted_rel_indices.contains(&rel_idx) {
-                continue;
-            }
-            let s = matrix[cand_idx][rel_idx].clone();
+    for &cand_idx in &leftover_cands {
+        for &rel_idx in &leftover_rels {
+            let (ref s, auto_el) = matrix[cand_idx][rel_idx];
             if s.value >= review_match_min {
                 pairs.push(Pair {
                     cand_idx,
                     rel_idx,
-                    score: s,
+                    score: s.clone(),
+                    auto_eligible: auto_el,
                 });
             }
         }
     }
 
-    // Sort descending by score value
     pairs.sort_by(|a, b| {
         b.score
             .value
@@ -275,36 +548,36 @@ pub fn assign_matches(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut assigned_cands = std::collections::HashSet::new();
-    let mut assigned_rels = std::collections::HashSet::new();
-
     for pair in pairs {
-        if assigned_cands.contains(&pair.cand_idx) || assigned_rels.contains(&pair.rel_idx) {
+        if matched_cands.contains(&pair.cand_idx) || matched_rels.contains(&pair.rel_idx) {
             continue;
         }
 
-        // Runner up check for cand_idx
-        let cand_runner_up = (0..releases.len())
-            .filter(|&ri| ri != pair.rel_idx && !conflicted_rel_indices.contains(&ri))
-            .map(|ri| matrix[pair.cand_idx][ri].value)
+        let cand_runner_up = leftover_rels
+            .iter()
+            .copied()
+            .filter(|&ri| ri != pair.rel_idx)
+            .map(|ri| matrix[pair.cand_idx][ri].0.value)
             .fold(0.0f32, f32::max);
 
-        // Runner up check for rel_idx
-        let rel_runner_up = (0..active_candidates.len())
-            .filter(|&ci| ci != pair.cand_idx && !conflicted_cand_indices.contains(&ci))
-            .map(|ci| matrix[ci][pair.rel_idx].value)
+        let rel_runner_up = leftover_cands
+            .iter()
+            .copied()
+            .filter(|&ci| ci != pair.cand_idx)
+            .map(|ci| matrix[ci][pair.rel_idx].0.value)
             .fold(0.0f32, f32::max);
 
         let cand = active_candidates[pair.cand_idx];
         let rel = &releases[pair.rel_idx];
 
-        let is_auto = pair.score.value >= auto_match_min
+        let is_auto = pair.auto_eligible
+            && pair.score.value >= auto_match_min
             && (pair.score.value - cand_runner_up) >= 0.05
             && (pair.score.value - rel_runner_up) >= 0.05;
 
         if is_auto {
-            assigned_cands.insert(pair.cand_idx);
-            assigned_rels.insert(pair.rel_idx);
+            matched_cands.insert(pair.cand_idx);
+            matched_rels.insert(pair.rel_idx);
 
             let proposal = MatchProposal {
                 release_key: rel.key,
@@ -315,7 +588,6 @@ pub fn assign_matches(
                 format_guess: cand.metadata.as_ref().and_then(|m| m.format_guess),
             };
 
-            // If the release was already downloaded and is marked archived, it is restorable
             if rel.downloaded && rel.local_status == Some(crate::types::LocalStatus::Archived) {
                 assignment.restorable.push(proposal);
             } else {
@@ -324,20 +596,21 @@ pub fn assign_matches(
         }
     }
 
-    // 3. Review items:
-    // Any unassigned release that has candidates with score >= review_match_min
-    for (rel_idx, rel) in releases.iter().enumerate() {
-        if assigned_rels.contains(&rel_idx) || conflicted_rel_indices.contains(&rel_idx) {
+    // 3. Review items
+    for &rel_idx in &leftover_rels {
+        if matched_rels.contains(&rel_idx) {
             continue;
         }
 
+        let rel = &releases[rel_idx];
         let mut review_cands = Vec::new();
-        for (cand_idx, cand) in active_candidates.iter().enumerate() {
-            if assigned_cands.contains(&cand_idx) || conflicted_cand_indices.contains(&cand_idx) {
+        for &cand_idx in &leftover_cands {
+            if matched_cands.contains(&cand_idx) {
                 continue;
             }
-            let s = &matrix[cand_idx][rel_idx];
+            let (ref s, _) = matrix[cand_idx][rel_idx];
             if s.value >= review_match_min {
+                let cand = active_candidates[cand_idx];
                 review_cands.push(ScoredCandidate {
                     candidate_path: cand.path.clone(),
                     candidate_name: cand.name.clone(),
@@ -359,29 +632,27 @@ pub fn assign_matches(
                 release_title: rel.title.clone(),
                 candidates: review_cands,
             });
-            assigned_rels.insert(rel_idx);
+            matched_rels.insert(rel_idx);
         }
     }
 
-    // 4. Page only: releases with no match and not in review/conflict
-    for (rel_idx, rel) in releases.iter().enumerate() {
-        if !assigned_rels.contains(&rel_idx) && !conflicted_rel_indices.contains(&rel_idx) {
-            assignment.page_only.push(rel.key);
+    // 4. Page only: releases with no match and not in review
+    for &rel_idx in &leftover_rels {
+        if !matched_rels.contains(&rel_idx) {
+            assignment.page_only.push(releases[rel_idx].key);
         }
     }
 
-    // 5. Local only: candidates with no match and not in review/conflict
-    let review_cand_paths: std::collections::HashSet<std::path::PathBuf> = assignment
+    // 5. Local only: candidates with no match and not in review
+    let review_cand_paths: HashSet<std::path::PathBuf> = assignment
         .review
         .iter()
         .flat_map(|r| r.candidates.iter().map(|c| c.candidate_path.clone()))
         .collect();
 
-    for (cand_idx, cand) in active_candidates.iter().enumerate() {
-        if !assigned_cands.contains(&cand_idx)
-            && !conflicted_cand_indices.contains(&cand_idx)
-            && !review_cand_paths.contains(&cand.path)
-        {
+    for &cand_idx in &leftover_cands {
+        let cand = active_candidates[cand_idx];
+        if !matched_cands.contains(&cand_idx) && !review_cand_paths.contains(&cand.path) {
             assignment.local_only.push(LocalOrphan {
                 path: cand.path.clone(),
                 name: cand.name.clone(),
@@ -395,7 +666,11 @@ pub fn assign_matches(
 }
 
 /// Scores a local album candidate against a `ReleaseRow`.
-pub fn score_release(candidate: &AlbumCandidate, release: &ReleaseRow) -> Score {
+pub fn score_release(
+    candidate: &AlbumCandidate,
+    release: &ReleaseRow,
+    style: &FolderStyle,
+) -> Score {
     let release_year = release
         .published_at
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.year() as u32));
@@ -408,16 +683,12 @@ pub fn score_release(candidate: &AlbumCandidate, release: &ReleaseRow) -> Score 
         &release.key.kind,
         release.track_count,
         release_year,
+        style,
     )
 }
 
-/// Scores a local candidate against release attributes according to §6 rules:
-/// - URL tag match: score 1.00 (certain)
-/// - Tag album ≈ title: Jaro-Winkler on normalized string
-/// - Folder/zip name matches name_variants: 0.95 (exact), else fuzzy similarity
-/// - Track count match: +0.05; mismatch > 2 tracks: -0.10
-/// - Year match: +0.02
-/// - Version word in only one side (e.g. deluxe, live, remastered): capped at 0.80
+/// Scores a local candidate against release attributes.
+#[allow(clippy::too_many_arguments)]
 pub fn score_candidate(
     candidate: &AlbumCandidate,
     artist_name: &str,
@@ -426,10 +697,98 @@ pub fn score_candidate(
     item_type: &ItemType,
     track_count: Option<u32>,
     release_year: Option<u32>,
+    style: &FolderStyle,
 ) -> Score {
+    score_candidate_internal(
+        candidate,
+        artist_name,
+        title,
+        url,
+        item_type,
+        track_count,
+        release_year,
+        style,
+    )
+    .0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SimResult {
+    sim: f32,
+    is_contained: bool,
+}
+
+fn digit_tokens(s: &str) -> Vec<&str> {
+    s.split_whitespace()
+        .filter(|tok| tok.chars().any(|c| c.is_ascii_digit()))
+        .collect()
+}
+
+/// Computes fuzzy similarity between two normalized strings with the digit guard:
+/// if both contain numeric tokens and their multisets differ, returns 0.0.
+fn fuzzy_sim(a: &str, b: &str) -> SimResult {
+    if a.is_empty() || b.is_empty() {
+        return SimResult {
+            sim: 0.0,
+            is_contained: false,
+        };
+    }
+    if a == b {
+        return SimResult {
+            sim: 1.0,
+            is_contained: false,
+        };
+    }
+
+    let mut da = digit_tokens(a);
+    let mut db = digit_tokens(b);
+    da.sort_unstable();
+    db.sort_unstable();
+    if !da.is_empty() && !db.is_empty() && da != db {
+        return SimResult {
+            sim: 0.0,
+            is_contained: false,
+        };
+    }
+
+    let lev = normalized_levenshtein(a, b) as f32;
+    let ta: BTreeSet<&str> = a.split_whitespace().collect();
+    let tb: BTreeSet<&str> = b.split_whitespace().collect();
+    let inter = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    let jac = if union > 0.0 { inter / union } else { 0.0 };
+
+    let is_subset = (ta.is_subset(&tb) || tb.is_subset(&ta)) && ta != tb;
+    let contained = if is_subset { 0.85 } else { 0.0 };
+
+    let non_contained = lev.max(jac);
+    if contained > non_contained {
+        SimResult {
+            sim: contained.min(0.99),
+            is_contained: true,
+        }
+    } else {
+        SimResult {
+            sim: non_contained.min(0.99),
+            is_contained: false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_candidate_internal(
+    candidate: &AlbumCandidate,
+    artist_name: &str,
+    title: &str,
+    url: &str,
+    item_type: &ItemType,
+    track_count: Option<u32>,
+    release_year: Option<u32>,
+    style: &FolderStyle,
+) -> (Score, bool) {
     let mut signals = BTreeSet::new();
 
-    // 1. Tag URL equals the release URL (normalised host and path) -> score 1.00, certain
+    // 1. Tag URL equals release URL (normalized host and path) -> 1.00, certain
     let tag_url_matches = candidate
         .metadata
         .as_ref()
@@ -437,66 +796,86 @@ pub fn score_candidate(
         .is_some_and(|u| normalize_bandcamp_url(u) == normalize_bandcamp_url(url));
 
     if tag_url_matches {
-        return Score {
-            value: 1.00,
-            signals: vec![Signal::UrlTag],
-        };
+        return (
+            Score {
+                value: 1.00,
+                signals: vec![Signal::UrlTag],
+            },
+            true,
+        );
     }
 
-    let norm_title = normalize(title);
-    let norm_folder = normalize(&candidate.name);
-    let variant_keys = name_variant_keys(artist_name, title);
+    let rel_title_key = key(title);
+    let cand_folder_names = style.candidate_names(&candidate.name, artist_name);
 
-    // 2. Folder name. Folders are usually "{artist} - {title}"; comparing the
-    // whole string lets the shared artist prefix dominate any fuzzy metric, so
-    // the title part after the last " - " is compared on its own as well.
-    // Fuzzy similarity uses normalized Levenshtein, which (unlike Jaro-Winkler)
-    // does not reward a common prefix.
-    let folder_title = candidate
-        .name
-        .rsplit_once(" - ")
-        .map(|(_, t)| normalize(t))
-        .unwrap_or_else(|| norm_folder.clone());
-
-    let folder_exact = variant_keys.contains(&norm_folder) || folder_title == norm_title;
-    let folder_sim = if folder_exact {
-        1.0
-    } else {
-        title_similarity(&folder_title, &norm_title)
+    // Folder similarity: max over candidate names
+    let mut best_folder_sim = SimResult {
+        sim: 0.0,
+        is_contained: false,
     };
-    if folder_sim >= 0.80 {
-        signals.insert(Signal::FolderName);
+    if !rel_title_key.is_empty() {
+        for fn_key in &cand_folder_names {
+            let sim = fuzzy_sim(fn_key, &rel_title_key);
+            if sim.sim > best_folder_sim.sim {
+                best_folder_sim = sim;
+            }
+        }
+    } else {
+        let cand_trimmed = candidate.name.trim();
+        let rel_trimmed = title.trim();
+        if !cand_trimmed.is_empty() && cand_trimmed.eq_ignore_ascii_case(rel_trimmed) {
+            best_folder_sim = SimResult {
+                sim: 1.0,
+                is_contained: false,
+            };
+        }
     }
 
-    // 3. Album tag against title.
+    // Album tag similarity
     let album_sim = candidate
         .metadata
         .as_ref()
         .and_then(|m| m.album.as_deref())
-        .map(|a| title_similarity(&normalize(a), &norm_title));
-    let album_exact = album_sim.is_some_and(|s| s >= 1.0);
-    if album_sim.is_some_and(|s| s >= 0.80) {
+        .map(|a| {
+            if !rel_title_key.is_empty() {
+                fuzzy_sim(&key(a), &rel_title_key)
+            } else {
+                let tag_trimmed = a.trim();
+                let rel_trimmed = title.trim();
+                if !tag_trimmed.is_empty() && tag_trimmed.eq_ignore_ascii_case(rel_trimmed) {
+                    SimResult {
+                        sim: 1.0,
+                        is_contained: false,
+                    }
+                } else {
+                    SimResult {
+                        sim: 0.0,
+                        is_contained: false,
+                    }
+                }
+            }
+        });
+
+    if best_folder_sim.sim >= 0.80 {
+        signals.insert(Signal::FolderName);
+    }
+    if album_sim.as_ref().is_some_and(|s| s.sim >= 0.80) {
         signals.insert(Signal::AlbumTag);
     }
 
-    let mut base_score = match (folder_exact, album_exact) {
-        (true, true) => 1.0,
-        (false, true) => 0.97,
-        (true, false) => 0.95,
-        (false, false) => folder_sim.max(album_sim.unwrap_or(0.0)),
-    };
-    // Two independent signals disagreeing strongly (album tag names another
-    // release) lowers confidence in a folder-name-only match.
-    if folder_exact && album_sim.is_some_and(|s| s < 0.5) {
-        base_score = base_score.min(0.80);
-    }
+    let folder_val = best_folder_sim.sim;
+    let album_val = album_sim.as_ref().map(|s| s.sim).unwrap_or(0.0);
+    let mut base_score = folder_val.max(album_val);
 
-    // Track count and year only refine a name-based match; on their own they
-    // say nothing (every single has one track, many releases share a year).
+    let is_contained_winner = if folder_val >= album_val {
+        best_folder_sim.is_contained
+    } else {
+        album_sim.as_ref().is_some_and(|s| s.is_contained)
+    };
+    let auto_eligible = !is_contained_winner;
+
     let name_evidence = base_score >= 0.60;
 
-    // 4. Track count signal
-    // For single tracks: audio_count == 1 is treated as match
     let expected_tracks = if *item_type == ItemType::Track {
         Some(1)
     } else {
@@ -512,65 +891,24 @@ pub fn score_candidate(
         }
     }
 
-    // 5. Release year match
-    let year_matches = name_evidence
-        && release_year.is_some_and(|ry| {
-            candidate
-                .metadata
-                .as_ref()
-                .and_then(|m| m.year)
-                .is_some_and(|ty| ry == ty)
-        });
+    let cand_year = style
+        .extracted_year(&candidate.name, artist_name)
+        .or_else(|| candidate.metadata.as_ref().and_then(|m| m.year));
+
+    let year_matches =
+        name_evidence && release_year.is_some_and(|ry| cand_year.is_some_and(|cy| ry == cy));
     if year_matches {
         base_score += 0.02;
         signals.insert(Signal::Year);
     }
 
-    // 6. Version word mismatch check:
-    // If a version word exists on only one side (e.g. "deluxe", "remastered"), cap at 0.80
-    let candidate_text = format!(
-        "{} {}",
-        candidate.name,
-        candidate
-            .metadata
-            .as_ref()
-            .and_then(|m| m.album.as_deref())
-            .unwrap_or("")
-    );
-
-    if has_version_word_mismatch(&candidate_text, title) {
-        base_score = base_score.min(0.80);
-    }
-
-    Score {
-        value: base_score.clamp(0.0, 1.0),
-        signals: signals.into_iter().collect(),
-    }
-}
-
-/// Similarity of two normalized titles in `[0, 1]`: the better of character-level
-/// normalized Levenshtein and token-set overlap (handles reordered words).
-fn title_similarity(a: &str, b: &str) -> f32 {
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    if a == b {
-        return 1.0;
-    }
-    let lev = normalized_levenshtein(a, b) as f32;
-    let ta: BTreeSet<&str> = a.split_whitespace().collect();
-    let tb: BTreeSet<&str> = b.split_whitespace().collect();
-    let inter = ta.intersection(&tb).count() as f32;
-    let union = ta.union(&tb).count() as f32;
-    let jac = if union > 0.0 { inter / union } else { 0.0 };
-    // One title fully contained in the other ("Album" vs "Album (Deluxe)") is a
-    // likely but not certain match: high enough for review, below auto.
-    let contained = if ta.is_subset(&tb) || tb.is_subset(&ta) {
-        0.85
-    } else {
-        0.0
-    };
-    lev.max(jac).max(contained).min(0.99)
+    (
+        Score {
+            value: base_score.clamp(0.0, 1.0),
+            signals: signals.into_iter().collect(),
+        },
+        auto_eligible,
+    )
 }
 
 /// Normalizes a Bandcamp URL by lowercasing, stripping scheme, www, query parameters and trailing slashes.
@@ -593,32 +931,13 @@ pub fn normalize_bandcamp_url(raw: &str) -> String {
     s.trim_end_matches('/').to_lowercase()
 }
 
-/// Detects if version words exist on one side of a match but not on the other.
-fn has_version_word_mismatch(local_text: &str, remote_text: &str) -> bool {
-    let local_v = extract_version_words(local_text);
-    let remote_v = extract_version_words(remote_text);
-
-    local_v.iter().any(|w| !remote_v.contains(w)) || remote_v.iter().any(|w| !local_v.contains(w))
-}
-
-fn extract_version_words(text: &str) -> Vec<&'static str> {
-    let norm = text.to_lowercase();
-    let words: Vec<&str> = norm.split(|c: char| !c.is_alphanumeric()).collect();
-    let mut found = Vec::new();
-    for v in VERSION_WORDS {
-        if words.contains(v) {
-            found.push(*v);
-        }
-    }
-    found
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::library::scan::CandidateKind;
     use crate::library::tags::AudioMetadata;
+    use crate::types::{Classification, ItemKey};
     use std::path::PathBuf;
 
     fn make_candidate(
@@ -647,6 +966,696 @@ mod tests {
         }
     }
 
+    fn make_release(
+        id: i64,
+        title: &str,
+        track_count: u32,
+        local_status: Option<crate::types::LocalStatus>,
+    ) -> ReleaseRow {
+        ReleaseRow {
+            key: ItemKey {
+                kind: ItemType::Album,
+                id,
+            },
+            band_id: 100,
+            title: title.to_string(),
+            artist_name: "Aphex Twin".to_string(),
+            url: format!(
+                "https://aphextwin.bandcamp.com/album/{}",
+                title.to_lowercase().replace(' ', "-")
+            ),
+            cover_url: None,
+            art_id: None,
+            classification: Classification::Free,
+            is_preorder: false,
+            track_count: Some(track_count),
+            published_at: None,
+            modified_at: None,
+            downloaded: local_status.is_some(),
+            downloaded_at: None,
+            downloaded_format: None,
+            local_path: None,
+            local_status,
+            origin: None,
+            missing_ack_at: None,
+            has_remote_update: false,
+            remote_update_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_01_leiche_regression() {
+        for variant in &["tag_is_title", "tag_is_folder", "no_tag"] {
+            let mut candidates = Vec::new();
+            let mut releases = Vec::new();
+
+            for (idx, i) in (1..=75).step_by(2).enumerate() {
+                let j = i + 1;
+                let bc_title = format!("Leiche {} / Leiche {}", i, j);
+                let folder_name = format!("Leiche {} - Leiche {}", i, j);
+
+                let album_tag = match *variant {
+                    "tag_is_title" => Some(bc_title.as_str()),
+                    "tag_is_folder" => Some(folder_name.as_str()),
+                    "no_tag" => None,
+                    _ => unreachable!(),
+                };
+
+                let mut cand = make_candidate(&folder_name, 2, album_tag, Some(2020), None);
+                if let Some(m) = cand.metadata.as_mut() {
+                    m.artist = Some("Leichen".to_string());
+                }
+                candidates.push(cand);
+
+                releases.push(ReleaseRow {
+                    key: ItemKey {
+                        kind: ItemType::Album,
+                        id: (idx + 1) as i64,
+                    },
+                    band_id: 10,
+                    title: bc_title,
+                    artist_name: "Leichen".to_string(),
+                    url: format!(
+                        "https://leichen.bandcamp.com/album/leiche-{}-leiche-{}",
+                        i, j
+                    ),
+                    cover_url: None,
+                    art_id: None,
+                    classification: Classification::Free,
+                    is_preorder: false,
+                    track_count: Some(2),
+                    published_at: Some(1577836800), // 2020
+                    modified_at: None,
+                    downloaded: false,
+                    downloaded_at: None,
+                    downloaded_format: None,
+                    local_path: None,
+                    local_status: None,
+                    origin: None,
+                    missing_ack_at: None,
+                    has_remote_update: false,
+                    remote_update_reason: None,
+                });
+            }
+
+            let ignored = HashSet::new();
+            let style = FolderStyle::default();
+            let res = assign_matches(&candidates, &releases, 0.92, 0.75, &ignored, &style);
+
+            assert!(
+                res.conflicts.is_empty(),
+                "variant {} produced conflicts: {:?}",
+                variant,
+                res.conflicts
+            );
+            assert!(res.review.is_empty(), "variant {} produced review", variant);
+            assert!(
+                res.local_only.is_empty(),
+                "variant {} produced local_only",
+                variant
+            );
+            assert!(
+                res.page_only.is_empty(),
+                "variant {} produced page_only",
+                variant
+            );
+            assert_eq!(res.matched.len(), 38, "variant {} matched count", variant);
+        }
+    }
+
+    #[test]
+    fn test_02_leiche_missing_release_is_local_only() {
+        let mut candidates = Vec::new();
+        let mut releases = Vec::new();
+
+        for (idx, i) in (1..=75).step_by(2).enumerate() {
+            let j = i + 1;
+            let bc_title = format!("Leiche {} / Leiche {}", i, j);
+            let folder_name = format!("Leiche {} - Leiche {}", i, j);
+
+            let mut cand = make_candidate(&folder_name, 2, Some(&folder_name), Some(2020), None);
+            if let Some(m) = cand.metadata.as_mut() {
+                m.artist = Some("Leichen".to_string());
+            }
+            candidates.push(cand);
+
+            // Skip the last release (Leiche 75 / Leiche 76)
+            if i < 75 {
+                releases.push(ReleaseRow {
+                    key: ItemKey {
+                        kind: ItemType::Album,
+                        id: (idx + 1) as i64,
+                    },
+                    band_id: 10,
+                    title: bc_title,
+                    artist_name: "Leichen".to_string(),
+                    url: format!(
+                        "https://leichen.bandcamp.com/album/leiche-{}-leiche-{}",
+                        i, j
+                    ),
+                    cover_url: None,
+                    art_id: None,
+                    classification: Classification::Free,
+                    is_preorder: false,
+                    track_count: Some(2),
+                    published_at: Some(1577836800),
+                    modified_at: None,
+                    downloaded: false,
+                    downloaded_at: None,
+                    downloaded_format: None,
+                    local_path: None,
+                    local_status: None,
+                    origin: None,
+                    missing_ack_at: None,
+                    has_remote_update: false,
+                    remote_update_reason: None,
+                });
+            }
+        }
+
+        let ignored = HashSet::new();
+        let style = FolderStyle::default();
+        let res = assign_matches(&candidates, &releases, 0.92, 0.75, &ignored, &style);
+
+        assert!(res.conflicts.is_empty());
+        assert!(res.review.is_empty());
+        assert_eq!(res.matched.len(), 37);
+        assert_eq!(res.local_only.len(), 1);
+        assert_eq!(res.local_only[0].name, "Leiche 75 - Leiche 76");
+    }
+
+    #[test]
+    fn test_03_leiche_missing_folder_is_page_only() {
+        let mut candidates = Vec::new();
+        let mut releases = Vec::new();
+
+        for (idx, i) in (1..=75).step_by(2).enumerate() {
+            let j = i + 1;
+            let bc_title = format!("Leiche {} / Leiche {}", i, j);
+            let folder_name = format!("Leiche {} - Leiche {}", i, j);
+
+            // Skip folder for Leiche 75 - Leiche 76
+            if i < 75 {
+                let mut cand =
+                    make_candidate(&folder_name, 2, Some(&folder_name), Some(2020), None);
+                if let Some(m) = cand.metadata.as_mut() {
+                    m.artist = Some("Leichen".to_string());
+                }
+                candidates.push(cand);
+            }
+
+            releases.push(ReleaseRow {
+                key: ItemKey {
+                    kind: ItemType::Album,
+                    id: (idx + 1) as i64,
+                },
+                band_id: 10,
+                title: bc_title,
+                artist_name: "Leichen".to_string(),
+                url: format!(
+                    "https://leichen.bandcamp.com/album/leiche-{}-leiche-{}",
+                    i, j
+                ),
+                cover_url: None,
+                art_id: None,
+                classification: Classification::Free,
+                is_preorder: false,
+                track_count: Some(2),
+                published_at: Some(1577836800),
+                modified_at: None,
+                downloaded: false,
+                downloaded_at: None,
+                downloaded_format: None,
+                local_path: None,
+                local_status: None,
+                origin: None,
+                missing_ack_at: None,
+                has_remote_update: false,
+                remote_update_reason: None,
+            });
+        }
+
+        let ignored = HashSet::new();
+        let style = FolderStyle::default();
+        let res = assign_matches(&candidates, &releases, 0.92, 0.75, &ignored, &style);
+
+        assert!(res.conflicts.is_empty());
+        assert!(res.review.is_empty());
+        assert_eq!(res.matched.len(), 37);
+        assert_eq!(res.page_only.len(), 1);
+        assert_eq!(res.page_only[0].id, 38);
+    }
+
+    #[test]
+    fn test_04_title_punctuation_and_separators_exact_match() {
+        let cand = make_candidate("Foo - Bar_Baz", 5, None, None, None);
+        let rel = make_release(1, "Foo / Bar: Baz?", 5, None);
+
+        let res = assign_matches(
+            &[cand],
+            &[rel],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 1);
+        assert_eq!(res.matched[0].release_key.id, 1);
+        assert!(res.matched[0].score.signals.contains(&Signal::FolderName));
+    }
+
+    #[test]
+    fn test_05_title_and_artist_folder_style_both_exact() {
+        let style = FolderStyle {
+            templates: vec!["{artist} - {title}".to_string(), "{title}".to_string()],
+            noise: Vec::new(),
+        };
+
+        let cand1 = make_candidate("Artist - Foo - Bar", 5, None, None, None);
+        let cand2 = make_candidate("Foo - Bar", 5, None, None, None);
+
+        let mut rel1 = make_release(1, "Foo - Bar", 5, None);
+        rel1.artist_name = "Artist".to_string();
+
+        let res1 = assign_matches(
+            &[cand1],
+            &[rel1.clone()],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &style,
+        );
+        assert_eq!(res1.matched.len(), 1);
+
+        let res2 = assign_matches(&[cand2], &[rel1], 0.92, 0.75, &HashSet::new(), &style);
+        assert_eq!(res2.matched.len(), 1);
+    }
+
+    #[test]
+    fn test_06_folder_style_artist_does_not_fit_raw_folder_still_matches() {
+        let style = FolderStyle {
+            templates: vec!["{artist} - {title}".to_string()],
+            noise: Vec::new(),
+        };
+
+        let mut cand = make_candidate("Leiche 75 - Leiche 76", 2, None, None, None);
+        cand.metadata.as_mut().unwrap().artist = Some("Leichen".to_string());
+
+        let mut rel = make_release(1, "Leiche 75 / Leiche 76", 2, None);
+        rel.artist_name = "Leichen".to_string();
+
+        let res = assign_matches(&[cand], &[rel], 0.92, 0.75, &HashSet::new(), &style);
+        assert_eq!(res.matched.len(), 1);
+        assert!(res.matched[0].score.signals.contains(&Signal::FolderName));
+    }
+
+    #[test]
+    fn test_07_default_style_album_with_year_fuzzy_containment_review() {
+        let cand = make_candidate("Album (2019)", 8, None, None, None);
+        let mut rel = make_release(1, "Album", 8, None);
+        rel.track_count = None;
+
+        let res = assign_matches(
+            &[cand],
+            &[rel],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert!(res.matched.is_empty(), "containment must not auto-adopt");
+        assert_eq!(res.review.len(), 1);
+        assert_eq!(res.review[0].candidates.len(), 1);
+        assert_eq!(res.review[0].candidates[0].score.value, 0.85);
+    }
+
+    #[test]
+    fn test_08_style_title_year_exact_match_and_year_extracted() {
+        let style = FolderStyle {
+            templates: vec!["{title} ({year})".to_string()],
+            noise: Vec::new(),
+        };
+
+        let cand = make_candidate("Album [2019]", 8, None, None, None);
+        let mut rel = make_release(1, "Album", 8, None);
+        rel.published_at = Some(1577836800); // 2020, but exact pass doesn't check year!
+
+        let res = assign_matches(&[cand], &[rel], 0.92, 0.75, &HashSet::new(), &style);
+        assert_eq!(res.matched.len(), 1);
+        assert!(res.matched[0].score.signals.contains(&Signal::FolderName));
+    }
+
+    #[test]
+    fn test_09_accents_and_special_letters_exact_match() {
+        let cases = [
+            ("Sigur Ros", "Sigur Rós"),
+            ("Cafe", "Caf\u{0065}\u{0301}"), // NFD Cafe
+            ("Bjork", "Björk"),
+            ("Strasse", "Straße"),
+            ("Ornen", "Ørnen"),
+            ("Lodz", "Łódź"),
+        ];
+
+        for (folder, title) in cases {
+            let cand = make_candidate(folder, 5, None, None, None);
+            let rel = make_release(1, title, 5, None);
+
+            let res = assign_matches(
+                &[cand],
+                &[rel],
+                0.92,
+                0.75,
+                &HashSet::new(),
+                &FolderStyle::default(),
+            );
+            assert_eq!(res.matched.len(), 1, "failed for {} vs {}", folder, title);
+        }
+    }
+
+    #[test]
+    fn test_10_flac_and_mp3_duplicate_exact_folders_produce_one_conflict() {
+        let style = FolderStyle {
+            templates: vec!["{title} ({noise})".to_string()],
+            noise: vec!["FLAC".to_string(), "MP3".to_string()],
+        };
+
+        let c_flac = make_candidate("Selected Ambient Works [FLAC]", 13, None, None, None);
+        let c_mp3 = make_candidate("Selected Ambient Works [MP3]", 13, None, None, None);
+        let c_other = make_candidate("Drukqs", 30, None, None, None);
+
+        let r1 = make_release(1, "Selected Ambient Works", 13, None);
+        let r2 = make_release(2, "Drukqs", 30, None);
+
+        let res = assign_matches(
+            &[c_flac, c_mp3, c_other],
+            &[r1, r2],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &style,
+        );
+        assert_eq!(res.matched.len(), 1);
+        assert_eq!(res.matched[0].release_key.id, 2);
+        assert_eq!(res.conflicts.len(), 1);
+        assert_eq!(res.conflicts[0].candidate_paths.len(), 2);
+        assert_eq!(res.conflicts[0].release_keys.len(), 1);
+        assert_eq!(res.conflicts[0].release_keys[0].id, 1);
+        assert!(
+            res.conflicts[0]
+                .description
+                .contains("2 folders match release")
+        );
+    }
+
+    #[test]
+    fn test_11_folder_exact_for_album_and_single_conflict_or_url_tag_resolves() {
+        let cand = make_candidate("Avril 14th", 1, None, None, None);
+        let r_album = make_release(1, "Avril 14th", 1, None);
+        let mut r_single = make_release(2, "Avril 14th", 1, None);
+        r_single.key.kind = ItemType::Track;
+        r_single.url = "https://aphextwin.bandcamp.com/track/avril-14th".to_string();
+
+        // Without URL tag -> conflict
+        let res_no_url = assign_matches(
+            std::slice::from_ref(&cand),
+            &[r_album.clone(), r_single.clone()],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res_no_url.matched.len(), 0);
+        assert_eq!(res_no_url.conflicts.len(), 1);
+        assert!(
+            res_no_url.conflicts[0]
+                .description
+                .contains("matches 2 releases exactly")
+        );
+
+        // With URL tag pointing to single -> resolves to single!
+        let mut cand_with_url = cand;
+        cand_with_url.metadata.as_mut().unwrap().bandcamp_url = Some(r_single.url.clone());
+
+        let res_url = assign_matches(
+            &[cand_with_url],
+            &[r_album, r_single],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res_url.conflicts.len(), 0);
+        assert_eq!(res_url.matched.len(), 1);
+        assert_eq!(res_url.matched[0].release_key.id, 2);
+        assert_eq!(res_url.page_only.len(), 1);
+        assert_eq!(res_url.page_only[0].id, 1);
+    }
+
+    #[test]
+    fn test_12_folder_name_matches_a_album_tag_matches_b_disagreement_conflict() {
+        let cand = make_candidate("Album A", 10, Some("Album B"), None, None);
+        let r_a = make_release(1, "Album A", 10, None);
+        let r_b = make_release(2, "Album B", 10, None);
+
+        let res = assign_matches(
+            &[cand],
+            &[r_a, r_b],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 0);
+        assert_eq!(res.conflicts.len(), 1);
+        assert!(
+            res.conflicts[0]
+                .description
+                .contains("Folder name matches 'Album A' but album tag matches 'Album B'")
+        );
+        assert_eq!(res.conflicts[0].release_keys.len(), 2);
+    }
+
+    #[test]
+    fn test_13_exact_folder_name_junk_album_tag_matches() {
+        let cand = make_candidate("Album A", 10, Some("Random Nonexistent Album"), None, None);
+        let r_a = make_release(1, "Album A", 10, None);
+
+        let res = assign_matches(
+            &[cand],
+            &[r_a],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 1);
+        assert_eq!(res.matched[0].release_key.id, 1);
+        assert!(res.conflicts.is_empty());
+    }
+
+    #[test]
+    fn test_14_symbol_only_titles_match_raw_fallback_never_cross() {
+        let c1 = make_candidate("!!!", 5, None, None, None);
+        let c2 = make_candidate("△", 5, None, None, None);
+
+        let r1 = make_release(1, "!!!", 5, None);
+        let r2 = make_release(2, "△", 5, None);
+
+        let res = assign_matches(
+            &[c1, c2],
+            &[r1, r2],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 2);
+        assert_eq!(res.conflicts.len(), 0);
+        for m in &res.matched {
+            if m.candidate_name == "!!!" {
+                assert_eq!(m.release_key.id, 1);
+            } else if m.candidate_name == "△" {
+                assert_eq!(m.release_key.id, 2);
+            } else {
+                panic!("unexpected match");
+            }
+        }
+    }
+
+    #[test]
+    fn test_15_fuzzy_series_numbers_mismatch_not_a_candidate() {
+        let cand1 = make_candidate("Volume 1", 5, None, None, None);
+        let rel1 = make_release(1, "Volume 2", 5, None);
+
+        let res1 = assign_matches(
+            &[cand1],
+            &[rel1],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert!(res1.matched.is_empty());
+        assert!(res1.review.is_empty());
+        assert_eq!(res1.local_only.len(), 1);
+        assert_eq!(res1.page_only.len(), 1);
+
+        let cand2 = make_candidate("Part 1", 5, None, None, None);
+        let rel2 = make_release(2, "Part 2", 5, None);
+
+        let res2 = assign_matches(
+            &[cand2],
+            &[rel2],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert!(res2.matched.is_empty());
+        assert!(res2.review.is_empty());
+        assert_eq!(res2.local_only.len(), 1);
+        assert_eq!(res2.page_only.len(), 1);
+    }
+
+    #[test]
+    fn test_16_album_vs_album_deluxe_containment_never_auto_even_low_slider() {
+        let cand = make_candidate("Album", 10, None, Some(2020), None);
+        let mut rel = make_release(1, "Album Deluxe", 10, None);
+        rel.published_at = Some(1577836800); // 2020
+
+        // Auto slider lowered to 0.80
+        let res = assign_matches(
+            &[cand],
+            &[rel],
+            0.80,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert!(
+            res.matched.is_empty(),
+            "containment must never be auto-adopted"
+        );
+        assert_eq!(res.review.len(), 1);
+        assert_eq!(res.review[0].release_key.id, 1);
+    }
+
+    #[test]
+    fn test_17_fuzzy_near_tie_produces_review_no_conflict() {
+        let c1 = make_candidate("Live at the Fillmore West", 10, None, None, None);
+        let c2 = make_candidate("Live at the Fillmore East", 10, None, None, None);
+        let rel = make_release(1, "Live at the Fillmore", 10, None);
+
+        let res = assign_matches(
+            &[c1, c2],
+            &[rel],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert!(
+            res.conflicts.is_empty(),
+            "fuzzy near ties must not produce conflicts"
+        );
+        assert_eq!(res.matched.len(), 0);
+        assert_eq!(res.review.len(), 1);
+        assert_eq!(res.review[0].candidates.len(), 2);
+    }
+
+    #[test]
+    fn test_18_archived_downloaded_exact_match_goes_to_restorable() {
+        let c = make_candidate("Selected Ambient Works", 13, None, None, None);
+        let r = make_release(
+            1,
+            "Selected Ambient Works",
+            13,
+            Some(crate::types::LocalStatus::Archived),
+        );
+
+        let res = assign_matches(
+            &[c],
+            &[r],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 0);
+        assert_eq!(res.restorable.len(), 1);
+        assert_eq!(res.restorable[0].release_key.id, 1);
+    }
+
+    #[test]
+    fn test_19_ignored_path_keys_skipped() {
+        let c = make_candidate("Selected Ambient Works", 13, None, None, None);
+        let r = make_release(1, "Selected Ambient Works", 13, None);
+
+        let mut ignored = HashSet::new();
+        ignored.insert(c.path_key.clone());
+
+        let res = assign_matches(&[c], &[r], 0.92, 0.75, &ignored, &FolderStyle::default());
+        assert_eq!(res.matched.len(), 0);
+        assert_eq!(res.page_only.len(), 1);
+        assert_eq!(res.local_only.len(), 0);
+    }
+
+    #[test]
+    fn test_20_zip_candidate_stem_exact_match() {
+        let mut cand = make_candidate("Selected Ambient Works 85-92", 13, None, None, None);
+        cand.kind = CandidateKind::Zip;
+
+        let rel = make_release(1, "Selected Ambient Works 85-92", 13, None);
+
+        let res = assign_matches(
+            &[cand],
+            &[rel],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 1);
+        assert_eq!(res.matched[0].release_key.id, 1);
+    }
+
+    #[test]
+    fn test_32_mixed_flac_mp3_ogg_folder_style_noise_and_fuzzy_fallback() {
+        let style = FolderStyle {
+            templates: vec!["{title} ({noise})".to_string()],
+            noise: vec!["FLAC".to_string(), "MP3".to_string()],
+        };
+
+        let c_flac = make_candidate("Album One [FLAC]", 10, None, None, None);
+        let c_mp3 = make_candidate("Album Two [MP3]", 10, None, None, None);
+        let c_ogg = make_candidate("Album Three [OGG]", 10, None, None, None);
+
+        let r1 = make_release(1, "Album One", 10, None);
+        let r2 = make_release(2, "Album Two", 10, None);
+        let mut r3 = make_release(3, "Album Three", 10, None);
+        r3.track_count = None;
+
+        let res = assign_matches(
+            &[c_flac, c_mp3, c_ogg],
+            &[r1, r2, r3],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &style,
+        );
+
+        assert_eq!(res.matched.len(), 2);
+        assert!(res.matched.iter().any(|m| m.release_key.id == 1));
+        assert!(res.matched.iter().any(|m| m.release_key.id == 2));
+
+        // Album Three [OGG] did not fit the template (OGG not in noise list),
+        // so it fell back to fuzzy containment: in review at 0.85
+        assert_eq!(res.review.len(), 1);
+        assert_eq!(res.review[0].release_key.id, 3);
+        assert_eq!(res.review[0].candidates.len(), 1);
+        assert_eq!(res.review[0].candidates[0].score.value, 0.85);
+    }
+
     #[test]
     fn url_tag_match_yields_certain_score_1() {
         let cand = make_candidate(
@@ -665,6 +1674,7 @@ mod tests {
             &ItemType::Album,
             Some(10),
             Some(1992),
+            &FolderStyle::default(),
         );
 
         assert_eq!(score.value, 1.00);
@@ -681,6 +1691,11 @@ mod tests {
             None,
         );
 
+        let style = FolderStyle {
+            templates: vec!["{artist} - {title}".to_string()],
+            noise: Vec::new(),
+        };
+
         let score = score_candidate(
             &cand,
             "Aphex Twin",
@@ -689,9 +1704,9 @@ mod tests {
             &ItemType::Album,
             Some(13),
             Some(1992),
+            &style,
         );
 
-        // 0.95 (folder) + 0.05 (track count) + 0.02 (year) clamped to 1.0
         assert_eq!(score.value, 1.00);
         assert!(score.signals.contains(&Signal::FolderName));
         assert!(score.signals.contains(&Signal::AlbumTag));
@@ -701,7 +1716,6 @@ mod tests {
 
     #[test]
     fn shared_artist_prefix_singles_match_one_to_one_without_conflicts() {
-        use crate::types::{Classification, ItemKey};
         let titles = [
             "Une nouvelle étoile",
             "Crevée",
@@ -718,7 +1732,9 @@ mod tests {
             .iter()
             .map(|t| {
                 let folder = format!("Deaf Ballerina - {}", t.replace('/', "-"));
-                make_candidate(&folder, 1, Some(t), Some(2017), None)
+                let mut cand = make_candidate(&folder, 1, Some(t), Some(2017), None);
+                cand.metadata.as_mut().unwrap().artist = Some("Deaf Ballerina".to_string());
+                cand
             })
             .collect();
         let releases: Vec<ReleaseRow> = titles
@@ -752,13 +1768,12 @@ mod tests {
             })
             .collect();
 
-        let res = assign_matches(
-            &candidates,
-            &releases,
-            0.92,
-            0.75,
-            &std::collections::HashSet::new(),
-        );
+        let style = FolderStyle {
+            templates: vec!["{artist} - {title}".to_string(), "{title}".to_string()],
+            noise: Vec::new(),
+        };
+
+        let res = assign_matches(&candidates, &releases, 0.92, 0.75, &HashSet::new(), &style);
         assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
         assert!(res.page_only.is_empty());
         assert!(res.review.is_empty());
@@ -767,29 +1782,6 @@ mod tests {
             let rel = releases.iter().find(|r| r.key == m.release_key).unwrap();
             assert!(m.candidate_name.ends_with(&rel.title.replace('/', "-")));
         }
-    }
-
-    #[test]
-    fn version_word_mismatch_caps_score_at_80() {
-        let cand = make_candidate(
-            "Selected Ambient Works 85-92 (Deluxe Edition)",
-            15,
-            Some("Selected Ambient Works 85-92 (Deluxe Edition)"),
-            Some(2021),
-            None,
-        );
-
-        let score = score_candidate(
-            &cand,
-            "Aphex Twin",
-            "Selected Ambient Works 85-92",
-            "https://aphextwin.bandcamp.com/album/selected-ambient-works-85-92",
-            &ItemType::Album,
-            Some(13),
-            Some(1992),
-        );
-
-        assert!(score.value <= 0.80);
     }
 
     #[test]
@@ -809,6 +1801,7 @@ mod tests {
             &ItemType::Album,
             Some(13), // 5 vs 13 is diff > 2 tracks: -0.10 penalty
             None,
+            &FolderStyle::default(),
         );
 
         assert_eq!(score.value, 0.90);
@@ -826,43 +1819,6 @@ mod tests {
         );
     }
 
-    fn make_release(
-        id: i64,
-        title: &str,
-        track_count: u32,
-        local_status: Option<crate::types::LocalStatus>,
-    ) -> ReleaseRow {
-        ReleaseRow {
-            key: crate::types::ItemKey {
-                kind: ItemType::Album,
-                id,
-            },
-            band_id: 100,
-            title: title.to_string(),
-            artist_name: "Aphex Twin".to_string(),
-            url: format!(
-                "https://aphextwin.bandcamp.com/album/{}",
-                title.to_lowercase().replace(' ', "-")
-            ),
-            cover_url: None,
-            art_id: None,
-            classification: crate::types::Classification::Free,
-            is_preorder: false,
-            track_count: Some(track_count),
-            published_at: None,
-            modified_at: None,
-            downloaded: local_status.is_some(),
-            downloaded_at: None,
-            downloaded_format: None,
-            local_path: None,
-            local_status,
-            origin: None,
-            missing_ack_at: None,
-            has_remote_update: false,
-            remote_update_reason: None,
-        }
-    }
-
     #[test]
     fn assigns_auto_page_only_and_local_only() {
         let c1 = make_candidate(
@@ -877,8 +1833,15 @@ mod tests {
         let r1 = make_release(1, "Selected Ambient Works", 13, None);
         let r2 = make_release(2, "Drukqs", 30, None);
 
-        let ignored = std::collections::HashSet::new();
-        let res = assign_matches(&[c1, c2], &[r1, r2], 0.85, 0.70, &ignored);
+        let ignored = HashSet::new();
+        let res = assign_matches(
+            &[c1, c2],
+            &[r1, r2],
+            0.85,
+            0.70,
+            &ignored,
+            &FolderStyle::default(),
+        );
 
         assert_eq!(res.matched.len(), 1);
         assert_eq!(res.matched[0].release_key.id, 1);
@@ -888,56 +1851,5 @@ mod tests {
 
         assert_eq!(res.local_only.len(), 1);
         assert_eq!(res.local_only[0].name, "Unrelated Bootleg");
-    }
-
-    #[test]
-    fn duplicate_formats_detected_as_conflict() {
-        let c_flac = make_candidate(
-            "Selected Ambient Works [FLAC]",
-            13,
-            Some("Selected Ambient Works"),
-            None,
-            None,
-        );
-        let c_mp3 = make_candidate(
-            "Selected Ambient Works [MP3]",
-            13,
-            Some("Selected Ambient Works"),
-            None,
-            None,
-        );
-
-        let r = make_release(1, "Selected Ambient Works", 13, None);
-
-        let ignored = std::collections::HashSet::new();
-        let res = assign_matches(&[c_flac, c_mp3], &[r], 0.85, 0.70, &ignored);
-
-        assert_eq!(res.matched.len(), 0);
-        assert_eq!(res.conflicts.len(), 1);
-        assert_eq!(res.conflicts[0].candidate_paths.len(), 2);
-    }
-
-    #[test]
-    fn archived_release_matched_goes_to_restorable() {
-        let c = make_candidate(
-            "Selected Ambient Works",
-            13,
-            Some("Selected Ambient Works"),
-            None,
-            None,
-        );
-        let r = make_release(
-            1,
-            "Selected Ambient Works",
-            13,
-            Some(crate::types::LocalStatus::Archived),
-        );
-
-        let ignored = std::collections::HashSet::new();
-        let res = assign_matches(&[c], &[r], 0.85, 0.70, &ignored);
-
-        assert_eq!(res.matched.len(), 0);
-        assert_eq!(res.restorable.len(), 1);
-        assert_eq!(res.restorable[0].release_key.id, 1);
     }
 }

@@ -1,6 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::db::repo::{library as lib_repo, releases as rel_repo};
+use crate::library::folder_style::FolderStyle;
 use crate::library::link::probe_folder;
 use crate::library::matcher::{Conflict, LocalOrphan, MatchProposal, ReviewItem, assign_matches};
 use crate::library::scan::scan_linked_folder;
@@ -75,6 +76,7 @@ pub fn run_scan_and_match(
     review_match_min: f32,
     cancel: &CancellationToken,
     progress_fn: Option<LibraryProgressCallback<'_>>,
+    style: &FolderStyle,
 ) -> Result<Option<ReconcileReport>, anyhow::Error> {
     let folder_opt = lib_repo::get_folder(conn, band_id)?;
     let folder = match folder_opt {
@@ -140,6 +142,7 @@ pub fn run_scan_and_match(
         auto_match_min,
         review_match_min,
         &ignored,
+        style,
     );
 
     let batch_id = lib_repo::create_batch(conn, "adopt", &crate::types::BatchSummary::default())?;
@@ -243,6 +246,10 @@ mod tests {
                     .unwrap()
                     .push((phase, done, total, curr));
             }),
+            &FolderStyle {
+                templates: vec!["{artist} - {title}".to_string(), "{title}".to_string()],
+                noise: Vec::new(),
+            },
         )
         .unwrap()
         .expect("report should be returned");

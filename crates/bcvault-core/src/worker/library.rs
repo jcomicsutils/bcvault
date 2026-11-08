@@ -845,6 +845,7 @@ impl LibraryService {
                     &scan_report.candidates,
                     &excluded_keys,
                     st.auto_match_min,
+                    &st.folder_style,
                 );
 
                 if !outcome.relinked.is_empty() {
@@ -1268,6 +1269,7 @@ impl LibraryService {
             st.auto_match_min,
             st.review_match_min,
             &ignored,
+            &st.folder_style,
         );
 
         let mut adopted_count = 0_u32;
@@ -1496,6 +1498,7 @@ impl LibraryService {
             st.auto_match_min,
             st.review_match_min,
             &ignored,
+            &st.folder_style,
         );
 
         let mut batch_id = match pool
@@ -1737,6 +1740,11 @@ mod tests {
         let band_id = 1234;
         pool.writer
             .call(move |c| {
+                let mut st = Settings::default();
+                st.folder_style.templates =
+                    vec!["{artist} - {title}".to_string(), "{title}".to_string()];
+                settings::set_settings(c, &st)?;
+
                 artists::upsert(
                     c,
                     &UpsertArtist {

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::library::folder_style::FolderStyle;
 use crate::library::matcher::score_release;
 use crate::library::scan::{AlbumCandidate, is_audio_file};
 use crate::types::{AudioFormat, ItemKey, LocalStatus, MissingCandidate, Origin, ReleaseRow};
@@ -154,6 +155,7 @@ pub fn find_relink_candidates(
     candidates: &[AlbumCandidate],
     excluded_path_keys: &HashSet<String>,
     auto_match_min: f32,
+    style: &FolderStyle,
 ) -> RelinkOutcome {
     let available_candidates: Vec<&AlbumCandidate> = candidates
         .iter()
@@ -181,7 +183,7 @@ pub fn find_relink_candidates(
     for rel in missing_releases {
         let mut scored = Vec::new();
         for &cand in &available_candidates {
-            let s = score_release(cand, rel);
+            let s = score_release(cand, rel, style);
             scored.push(Scored {
                 candidate: cand,
                 score: s.value,
@@ -436,7 +438,13 @@ mod tests {
         let rel = make_test_row(key, true, Some(PathBuf::from("/music/old_path")));
         let cand = make_test_candidate("Test Album", PathBuf::from("/music/new_path"), 10);
 
-        let outcome = find_relink_candidates(&[rel], &[cand], &HashSet::new(), 0.90);
+        let outcome = find_relink_candidates(
+            &[rel],
+            &[cand],
+            &HashSet::new(),
+            0.90,
+            &FolderStyle::default(),
+        );
         assert_eq!(outcome.relinked.len(), 1);
         assert_eq!(outcome.relinked[0].key, key);
         assert_eq!(outcome.relinked[0].path, PathBuf::from("/music/new_path"));
@@ -451,7 +459,13 @@ mod tests {
         let mut cand2 = make_test_candidate("Test Album", PathBuf::from("/music/path_b"), 10);
         cand2.path_key = "test_album_b".to_string();
 
-        let outcome = find_relink_candidates(&[rel], &[cand1, cand2], &HashSet::new(), 0.90);
+        let outcome = find_relink_candidates(
+            &[rel],
+            &[cand1, cand2],
+            &HashSet::new(),
+            0.90,
+            &FolderStyle::default(),
+        );
         assert!(outcome.relinked.is_empty());
         assert_eq!(outcome.unresolved.len(), 1);
         assert!(outcome.unresolved[0].1.is_some());
@@ -463,7 +477,13 @@ mod tests {
         let rel = make_test_row(key, true, Some(PathBuf::from("/music/old_path")));
         let cand = make_test_candidate("Completely Different", PathBuf::from("/music/diff"), 1);
 
-        let outcome = find_relink_candidates(&[rel], &[cand], &HashSet::new(), 0.90);
+        let outcome = find_relink_candidates(
+            &[rel],
+            &[cand],
+            &HashSet::new(),
+            0.90,
+            &FolderStyle::default(),
+        );
         assert!(outcome.relinked.is_empty());
         assert_eq!(outcome.unresolved.len(), 1);
     }
@@ -477,7 +497,8 @@ mod tests {
         let mut excluded = HashSet::new();
         excluded.insert("test album".to_string());
 
-        let outcome = find_relink_candidates(&[rel], &[cand], &excluded, 0.90);
+        let outcome =
+            find_relink_candidates(&[rel], &[cand], &excluded, 0.90, &FolderStyle::default());
         assert!(outcome.relinked.is_empty());
         assert_eq!(outcome.unresolved.len(), 1);
         assert_eq!(outcome.unresolved[0].1, None);
@@ -491,7 +512,13 @@ mod tests {
         let rel2 = make_test_row(key2, true, Some(PathBuf::from("/music/old2")));
         let cand = make_test_candidate("Test Album", PathBuf::from("/music/cand"), 10);
 
-        let outcome = find_relink_candidates(&[rel1, rel2], &[cand], &HashSet::new(), 0.90);
+        let outcome = find_relink_candidates(
+            &[rel1, rel2],
+            &[cand],
+            &HashSet::new(),
+            0.90,
+            &FolderStyle::default(),
+        );
         assert!(outcome.relinked.is_empty());
         assert_eq!(outcome.unresolved.len(), 2);
     }

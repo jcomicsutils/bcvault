@@ -16,8 +16,8 @@ use bcvault_core::{
     },
     error::BcError,
     types::{
-        AudioFormat, Classification, DeletedPolicy, DownloadSource, ItemKey, ItemType, LocalStatus,
-        OnMissing, RateLimitStatus, ReleaseQuery, Settings, SyncMode, UpdateReason,
+        AudioFormat, Classification, DeletedPolicy, DownloadSource, FolderStyle, ItemKey, ItemType,
+        LocalStatus, OnMissing, RateLimitStatus, ReleaseQuery, Settings, SyncMode, UpdateReason,
     },
     worker::{
         bridge::UiBridge, library::LibraryService, messages::WorkerToUiEvent, sync::SyncService,
@@ -887,6 +887,10 @@ async fn wiremock_sync_verify_moving_album_auto_relinks_silently() {
             let s = Settings {
                 auto_relink: true,
                 verify_on_sync: true,
+                folder_style: FolderStyle {
+                    templates: vec!["{title} ({year})".to_string(), "{title}".to_string()],
+                    noise: Vec::new(),
+                },
                 ..Settings::default()
             };
             settings_repo::set_settings(c, &s)?;
