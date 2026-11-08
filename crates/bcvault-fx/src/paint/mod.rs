@@ -194,6 +194,14 @@ pub fn sharp_button(ui: &mut Ui, label: impl Into<egui::WidgetText>) -> egui::Re
     ui.add(egui::Button::new(label).corner_radius(CornerRadius::ZERO))
 }
 
+pub fn sharp_small_button(ui: &mut Ui, label: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(
+        egui::Button::new(label)
+            .small()
+            .corner_radius(CornerRadius::ZERO),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
