@@ -1,3 +1,4 @@
+use crate::library::FolderStyle;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -689,6 +690,8 @@ pub struct Settings {
     pub auto_match_min: f32,
     #[serde(default = "default_review_match_min")]
     pub review_match_min: f32,
+    #[serde(default)]
+    pub folder_style: FolderStyle,
 }
 
 impl Settings {
@@ -719,6 +722,7 @@ impl Settings {
             auto_relink: true,
             auto_match_min: 0.92,
             review_match_min: 0.75,
+            folder_style: FolderStyle::default(),
         }
     }
 }
@@ -1081,5 +1085,65 @@ mod tests {
         assert!(!artist.matches_input("otherartist"));
         assert!(!artist.matches_input("https://otherartist.bandcamp.com"));
         assert!(!artist.matches_input(""));
+    }
+
+    #[test]
+    fn test_23_settings_json_without_folder_style_deserializes_to_default_and_roundtrips() {
+        let minimal_json = r#"{
+            "out_dir": "/tmp/music",
+            "format": "Flac",
+            "format_fallback": "Nearest",
+            "layout": "Flat",
+            "auto_extract": true,
+            "delete_zip_after_extract": false,
+            "batch_limit": 150,
+            "quota_soft": 150,
+            "quota_hard": 200,
+            "page_delay_ms": 1500,
+            "page_jitter_pct": 25,
+            "max_concurrent_downloads": 2,
+            "show_thumbnails": false,
+            "user_agent": "test"
+        }"#;
+
+        let s: Settings = serde_json::from_str(minimal_json).expect("deserialize settings");
+        assert_eq!(s.folder_style, FolderStyle::default());
+        assert_eq!(s.folder_style.templates, vec!["{title}".to_string()]);
+        assert!(s.folder_style.noise.is_empty());
+
+        let serialized = serde_json::to_string(&s).expect("serialize settings");
+        let roundtrip: Settings = serde_json::from_str(&serialized).expect("roundtrip settings");
+        assert_eq!(roundtrip, s);
+    }
+
+    #[test]
+    fn test_31_settings_json_with_folder_style_without_noise() {
+        let json_with_style_no_noise = r#"{
+            "out_dir": "/tmp/music",
+            "format": "Flac",
+            "format_fallback": "Nearest",
+            "layout": "Flat",
+            "auto_extract": true,
+            "delete_zip_after_extract": false,
+            "batch_limit": 150,
+            "quota_soft": 150,
+            "quota_hard": 200,
+            "page_delay_ms": 1500,
+            "page_jitter_pct": 25,
+            "max_concurrent_downloads": 2,
+            "show_thumbnails": false,
+            "user_agent": "test",
+            "folder_style": {
+                "templates": ["{artist} - {title}"]
+            }
+        }"#;
+
+        let s: Settings =
+            serde_json::from_str(json_with_style_no_noise).expect("deserialize settings");
+        assert_eq!(
+            s.folder_style.templates,
+            vec!["{artist} - {title}".to_string()]
+        );
+        assert!(s.folder_style.noise.is_empty());
     }
 }

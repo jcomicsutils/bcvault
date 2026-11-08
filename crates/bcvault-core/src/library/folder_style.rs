@@ -133,6 +133,45 @@ impl FolderStyle {
         result
     }
 
+    /// Drops invalid templates and noise entries, falling back to default if no templates remain.
+    pub fn sanitize(&mut self) {
+        let mut valid_tmpls = Vec::new();
+        let mut seen_tmpls = std::collections::HashSet::new();
+        for tmpl in &self.templates {
+            if tmpl.len() <= 128
+                && Self::parse_template(tmpl).is_ok()
+                && seen_tmpls.insert(tmpl.clone())
+            {
+                valid_tmpls.push(tmpl.clone());
+                if valid_tmpls.len() == 8 {
+                    break;
+                }
+            }
+        }
+        if valid_tmpls.is_empty() {
+            valid_tmpls = default_templates();
+        }
+        self.templates = valid_tmpls;
+
+        let mut valid_noise = Vec::new();
+        let mut seen_noise = std::collections::HashSet::new();
+        for entry in &self.noise {
+            if entry.len() <= 64 {
+                let tok = tokens(entry);
+                if !tok.is_empty() {
+                    let key_str = tok.join(" ");
+                    if seen_noise.insert(key_str) {
+                        valid_noise.push(entry.clone());
+                        if valid_noise.len() == 32 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.noise = valid_noise;
+    }
+
     /// Parses a single template into segments before and after `{title}`.
     fn parse_template(tmpl: &str) -> Result<ParsedTemplate, String> {
         let mut chars = tmpl.chars().peekable();
