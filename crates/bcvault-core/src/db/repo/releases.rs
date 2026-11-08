@@ -303,16 +303,24 @@ pub fn reclassify_from_pricing_json(conn: &mut Connection) -> Result<(), DbError
 
 pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT band_id,
-                COUNT(*) AS total,
-                COALESCE(SUM(downloaded), 0) AS downloaded,
-                COALESCE(SUM(classification IN ('free','nyp','email_required')), 0) AS eligible,
-                COALESCE(SUM(classification = 'email_required'), 0) AS email_required,
-                COALESCE(SUM(classification = 'unknown'), 0) AS unknown,
-                COALESCE(SUM(local_status = 'archived'), 0) AS archived,
-                COALESCE(SUM(local_status = 'missing'), 0) AS missing_files
-         FROM releases
-         GROUP BY band_id",
+        "WITH max_seen AS (
+             SELECT band_id, MAX(last_seen_at) AS latest_seen
+             FROM releases
+             GROUP BY band_id
+         )
+         SELECT r.band_id,
+                COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
+                COALESCE(SUM(r.downloaded), 0) AS downloaded,
+                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
+                COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) AS non_eligible_downloaded,
+                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
+                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
+                COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
+                COALESCE(SUM(CASE WHEN r.local_status = 'archived' THEN 1 ELSE 0 END), 0) AS archived,
+                COALESCE(SUM(CASE WHEN r.local_status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_files
+         FROM releases r
+         JOIN max_seen m ON m.band_id = r.band_id
+         GROUP BY r.band_id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -320,14 +328,14 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
             ArtistStats {
                 total: r.get::<_, u32>(1)?,
                 downloaded: r.get::<_, u32>(2)?,
-                eligible_downloaded: 0,
-                non_eligible_downloaded: 0,
-                eligible: r.get::<_, u32>(3)?,
-                email_required: r.get::<_, u32>(4)?,
-                unknown: r.get::<_, u32>(5)?,
+                eligible_downloaded: r.get::<_, u32>(3)?,
+                non_eligible_downloaded: r.get::<_, u32>(4)?,
+                eligible: r.get::<_, u32>(5)?,
+                email_required: r.get::<_, u32>(6)?,
+                unknown: r.get::<_, u32>(7)?,
                 quota_used_30d: 0,
-                archived: r.get::<_, u32>(6)?,
-                missing_files: r.get::<_, u32>(7)?,
+                archived: r.get::<_, u32>(8)?,
+                missing_files: r.get::<_, u32>(9)?,
             },
         ))
     })?;
@@ -343,28 +351,36 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
 pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistStats, DbError> {
     let stats = conn
         .query_row(
-            "SELECT COUNT(*) AS total,
-                    COALESCE(SUM(downloaded), 0) AS downloaded,
-                    COALESCE(SUM(classification IN ('free','nyp','email_required')), 0) AS eligible,
-                    COALESCE(SUM(classification = 'email_required'), 0) AS email_required,
-                    COALESCE(SUM(classification = 'unknown'), 0) AS unknown,
-                    COALESCE(SUM(local_status = 'archived'), 0) AS archived,
-                    COALESCE(SUM(local_status = 'missing'), 0) AS missing_files
-             FROM releases
-             WHERE band_id = ?1",
+            "WITH max_seen AS (
+                 SELECT MAX(last_seen_at) AS latest_seen
+                 FROM releases
+                 WHERE band_id = ?1
+             )
+             SELECT COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
+                    COALESCE(SUM(r.downloaded), 0) AS downloaded,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) AS non_eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
+                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
+                    COALESCE(SUM(CASE WHEN r.local_status = 'archived' THEN 1 ELSE 0 END), 0) AS archived,
+                    COALESCE(SUM(CASE WHEN r.local_status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_files
+             FROM releases r
+             CROSS JOIN max_seen m
+             WHERE r.band_id = ?1",
             params![band_id],
             |r| {
                 Ok(ArtistStats {
                     total: r.get::<_, u32>(0)?,
                     downloaded: r.get::<_, u32>(1)?,
-                    eligible_downloaded: 0,
-                    non_eligible_downloaded: 0,
-                    eligible: r.get::<_, u32>(2)?,
-                    email_required: r.get::<_, u32>(3)?,
-                    unknown: r.get::<_, u32>(4)?,
+                    eligible_downloaded: r.get::<_, u32>(2)?,
+                    non_eligible_downloaded: r.get::<_, u32>(3)?,
+                    eligible: r.get::<_, u32>(4)?,
+                    email_required: r.get::<_, u32>(5)?,
+                    unknown: r.get::<_, u32>(6)?,
                     quota_used_30d: 0,
-                    archived: r.get::<_, u32>(5)?,
-                    missing_files: r.get::<_, u32>(6)?,
+                    archived: r.get::<_, u32>(7)?,
+                    missing_files: r.get::<_, u32>(8)?,
                 })
             },
         )
@@ -638,5 +654,104 @@ mod tests {
         assert_eq!(miss_rows.len(), 1);
         assert_eq!(miss_rows[0].key.id, 3);
         assert_eq!(miss_rows[0].local_status, Some(LocalStatus::Missing));
+    }
+
+    #[test]
+    fn test_artist_stats_eligible_and_non_eligible_breakdown() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations::run(&mut conn).unwrap();
+
+        // Artist 10: Nigeria Futebol Clube (3 on page: 2 free, 1 paid; all 3 downloaded)
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (10, 'nfc', 'Nigeria Futebol Clube', 'https://nfc.bandcamp.com')",
+            [],
+        )
+        .unwrap();
+
+        let t_page_nfc = 1_000_000;
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+             VALUES ('album', 101, 10, 'Free 1', 'NFC', 'https://nfc.bandcamp.com/album/101', 'free', 1, ?1),
+                    ('album', 102, 10, 'Free 2', 'NFC', 'https://nfc.bandcamp.com/album/102', 'nyp', 1, ?1),
+                    ('album', 103, 10, 'Paid 1', 'NFC', 'https://nfc.bandcamp.com/album/103', 'paid', 1, ?1)",
+            params![t_page_nfc],
+        )
+        .unwrap();
+
+        let nfc_stats = artist_stats_for_one(&conn, 10).unwrap();
+        assert_eq!(nfc_stats.total, 3);
+        assert_eq!(nfc_stats.eligible, 2);
+        assert_eq!(nfc_stats.eligible_downloaded, 2);
+        assert_eq!(nfc_stats.non_eligible_downloaded, 1);
+        assert_eq!(nfc_stats.downloaded, 3);
+        assert_eq!(nfc_stats.format_sidebar_badge(), "2 (+ 1)/2/3");
+
+        // Artist 20: Leichen (40 on page all free & downloaded; 2 extra off-page downloaded)
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (20, 'leichen', 'Leichen', 'https://leichen.bandcamp.com')",
+            [],
+        )
+        .unwrap();
+
+        let t_page_leichen = 2_000_000;
+        for i in 1..=40 {
+            conn.execute(
+                "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+                 VALUES ('album', ?1, 20, ?2, 'Leichen', ?3, 'free', 1, ?4)",
+                params![200 + i, format!("Leiche {}", i), format!("https://leichen.bandcamp.com/album/{}", i), t_page_leichen],
+            )
+            .unwrap();
+        }
+
+        // 2 extra albums not on current page (older last_seen_at) but downloaded
+        let t_older = t_page_leichen - 500;
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+             VALUES ('album', 301, 20, 'Extra 1', 'Leichen', 'https://leichen.bandcamp.com/album/301', 'free', 1, ?1),
+                    ('album', 302, 20, 'Extra 2', 'Leichen', 'https://leichen.bandcamp.com/album/302', 'free', 1, ?1)",
+            params![t_older],
+        )
+        .unwrap();
+
+        let leichen_stats = artist_stats_for_one(&conn, 20).unwrap();
+        assert_eq!(leichen_stats.total, 40);
+        assert_eq!(leichen_stats.eligible, 40);
+        assert_eq!(leichen_stats.eligible_downloaded, 40);
+        assert_eq!(leichen_stats.non_eligible_downloaded, 2);
+        assert_eq!(leichen_stats.downloaded, 42);
+        assert_eq!(leichen_stats.format_sidebar_badge(), "40 (+ 2)/40/40");
+
+        // Artist 30: Standard clean artist (5 on page: 3 free, 2 paid; 2 free downloaded)
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (30, 'clean', 'Clean Artist', 'https://clean.bandcamp.com')",
+            [],
+        )
+        .unwrap();
+
+        let t_clean = 3_000_000;
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+             VALUES ('album', 401, 30, 'C1', 'Clean', 'https://clean.bandcamp.com/album/401', 'free', 1, ?1),
+                    ('album', 402, 30, 'C2', 'Clean', 'https://clean.bandcamp.com/album/402', 'free', 1, ?1),
+                    ('album', 403, 30, 'C3', 'Clean', 'https://clean.bandcamp.com/album/403', 'free', 0, ?1),
+                    ('album', 404, 30, 'C4', 'Clean', 'https://clean.bandcamp.com/album/404', 'paid', 0, ?1),
+                    ('album', 405, 30, 'C5', 'Clean', 'https://clean.bandcamp.com/album/405', 'paid', 0, ?1)",
+            params![t_clean],
+        )
+        .unwrap();
+
+        let clean_stats = artist_stats_for_one(&conn, 30).unwrap();
+        assert_eq!(clean_stats.total, 5);
+        assert_eq!(clean_stats.eligible, 3);
+        assert_eq!(clean_stats.eligible_downloaded, 2);
+        assert_eq!(clean_stats.non_eligible_downloaded, 0);
+        assert_eq!(clean_stats.downloaded, 2);
+        assert_eq!(clean_stats.format_sidebar_badge(), "2/3/5");
+
+        // Verify all_artist_stats map matches individual queries
+        let all = all_artist_stats(&conn).unwrap();
+        assert_eq!(all.get(&10), Some(&nfc_stats));
+        assert_eq!(all.get(&20), Some(&leichen_stats));
+        assert_eq!(all.get(&30), Some(&clean_stats));
     }
 }
