@@ -150,6 +150,15 @@ When an album folder disappears, `bcvault` attempts resolution in the following 
 | **`Missing`** | Warning square with exclamation `[!]` | Warning `MISSING` chip | Path unreachable on disk while folder is mounted. |
 | **`Unverified`** | Solid neutral square `[■]` | Default row style | Awaiting local disk check. |
 
+### Sidebar Download Badges
+
+Each artist row in the sidebar displays a download count badge summarizing collection completeness:
+- **Standard Format (`{eligible dl}/{eligible}/{total}`)**: When an artist has only eligible (Free, NYP, Email Required) downloads, the badge shows `X/Y/Z` (e.g., `20/20/20`).
+- **Expanded Format (`{eligible dl} (+ {non-eligible dl})/eligible/page total`)**: When the user has downloaded paid releases or extra albums not listed on the live Bandcamp page, the non-eligible downloads are highlighted with `(+ N)`.
+  - Example: `2 (+ 1)/2/3` indicates 2 free releases downloaded, 1 paid release downloaded, out of 2 eligible and 3 total on the page.
+  - Example: `40 (+ 2)/40/40` indicates all 40 free releases downloaded, plus 2 extra downloaded off-page albums.
+Hovering over the badge displays a breakdown of eligible downloads, paid/extra downloads, eligible catalog total, and total page releases.
+
 ---
 
 ## 8. Smart Views and Timeline History
