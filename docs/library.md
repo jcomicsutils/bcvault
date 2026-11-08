@@ -52,28 +52,56 @@ Audio tags and stream headers are inspected using `lofty` to guess the download 
 - `MP3` (CBR ~320 kbps) -> `Mp3_320`
 - `MP3` (VBR ~220-260 kbps) -> `Mp3V0`
 
-### Text Normalization
-Album names and folder names are normalized using Unicode NFKC, case folding, mapping `&` to `and`, stripping diacritics, removing punctuation, collapsing whitespace, and stripping common release noise tags (such as `[FLAC]`, `(320)`, `[WEB]`, `(Free Download)`, and trailing `(YYYY)` release years). Release-distinguishing tokens like `Deluxe`, `Remaster`, and `Edition` are preserved.
+### Text Normalization & Name Keys
+Folder names and release titles are converted to canonical name keys:
+1. Converted to lowercase.
+2. Decomposed to canonical NFD with combining accent marks removed.
+3. Non-decomposing European letters mapped (e.g., `ø` -> `o`, `ł` -> `l`, `ß` -> `ss`, `æ` -> `ae`, `œ` -> `oe`).
+4. Apostrophes deleted (`Don't` -> `dont`).
+5. All other non-alphanumeric characters become whitespace separators.
+6. Split into tokens, preserving Unicode alphanumeric words (including CJK and Cyrillic).
+
+### Folder Style & Templates
+Instead of guessing or implicitly stripping noise and tags, `bcvault` lets you declare how folders are named via **Folder Style**:
+- **Placeholders**: `{title}` (required), `{artist}`, `{year}`, and `{noise}`.
+- Punctuation, dashes, and brackets in templates are treated as separators; only the token sequence matters. For instance, `{title} ({year})` matches `Album [2019]`, `Album - 2019`, and `Album (2019)`.
+- **Noise List**: Decorations like audio formats or bitrates are declared explicitly in the noise list (e.g., `FLAC`, `MP3`, `320`, `WEB FLAC`) and recognized only through the `{noise}` placeholder. Noise is never stripped implicitly.
+- If a folder name does not match any custom template, the raw folder name key is always tested as a fallback.
 
 ---
 
 ## 4. Matching & Scoring
 
-The matcher executes a greedy 1-to-1 assignment between the artist's Bandcamp releases and the discovered local candidates.
+Matching uses a deterministic **exact-first** architecture, followed by fuzzy scoring only for leftover unmatched releases and candidates.
 
-### Scoring Signals
-- **Exact URL Tag (`1.0`)**: If any audio file in the folder contains a Bandcamp release URL tag in its comments/metadata matching the release URL, the score is certain (`100%`).
-- **Album Tag & Folder Name**: High-confidence agreement between audio tags and normalized folder names.
-- **Track Count**: Penalties applied for large discrepancies in track counts.
-- **Year Tag**: Agreement between tag release year and Bandcamp publication date.
+### 4.1 Exact-First Pass
+Before calculating fuzzy Levenshtein distances or running scoring heuristics, the engine builds exact match edges:
+- **Bandcamp URL Tag**: Audio file comment or tag contains the exact Bandcamp release URL.
+- **Exact Folder Name**: The folder name (or extracted title from a matching folder template) exactly equals the release title key.
+- **Exact Album Tag**: The embedded album tag exactly equals the release title key.
 
-### Match Report Tabs
-1. **Matched**: High-confidence matches (score >= 92% and beating runner-up by >= 5%). Selected by default for immediate adoption.
-2. **Review**: Ambiguous matches or candidates below the confidence threshold. Allows choosing between candidate variants or skipping.
-3. **On Page Only**: Releases present on Bandcamp that have no corresponding local files.
-4. **Local Only**: Local audio folders that could not be mapped to any release on the artist's page. Can be marked as *Leave unmatched*, *Ignore forever*, or manually attached to a release.
-5. **Conflicts**: Ambiguities where multiple formats or candidate folders compete for the same release.
-6. **Found Again (Restorable)**: Releases previously marked as `archived` whose audio files were detected on disk again.
+#### Exact Match Resolution
+1. **Authoritative URL Tags**: If a candidate and a release share a unique, 1:1 Bandcamp URL tag, they match decisively and are removed immediately.
+2. **Connected Components**: For remaining exact edges:
+   - A single-edge component (exactly one candidate matching one release) is decisively **Matched** (or **Restorable** if already downloaded and archived).
+   - Multi-edge components (e.g., duplicate formats on disk, or a folder matching release A by folder name but release B by album tag) produce a **Conflict** with an explicit explanatory description.
+3. Matched and conflicted nodes are completely excluded from the fuzzy pass. Exact matches never compete with near-misses, and runner-up margins play no role in exact matching.
+
+### 4.2 Fuzzy Scoring Pass (Leftovers Only)
+Any releases and candidates not resolved in the exact pass are evaluated with fuzzy scoring:
+- **Fuzzy Token Similarity**: Normalized Levenshtein distance on token sequences.
+- **Digit Guard**: If both names contain numeric tokens (e.g., `Volume 1` vs `Volume 2`, or `Leiche 73` vs `Leiche 75`), their multisets of digit tokens must match identically. If numbers differ, similarity is clamped to `0.0`. Numbered series can never falsely match or create conflict cascades.
+- **Containment Rule**: If one title is a strict token subset of the other (e.g., `Album` vs `Album Deluxe`), similarity is capped at `0.85` and flagged as `auto_eligible = false`. It will appear in **Review** and is never adopted automatically, regardless of score bonuses or slider settings.
+- **Track Count & Year Signals**: Small score bonuses or penalties for matching track counts and release years.
+
+### 4.3 Match Thresholds & Report Tabs
+The settings sliders (`Auto-Match Min Score` and `Review Min Score`) control the acceptance of **non-exact (fuzzy) matches only**:
+1. **Matched**: Exact matches from step 1, plus fuzzy matches scoring >= `auto_match_min` (default 92%) that beat their runner-up by >= 5%. Pre-selected for automatic adoption.
+2. **Review**: Fuzzy proposals scoring >= `review_match_min` (default 60%) or containment matches requiring manual confirmation.
+3. **On Page Only**: Tracked releases with no local files.
+4. **Local Only**: Discovered folders that do not match any release on the artist's page.
+5. **Conflicts**: Genuine duplicate formats or conflicting tag/folder identities from the exact pass. Fuzzy scoring never creates conflicts.
+6. **Found Again (Restorable)**: Releases marked as `archived` whose audio files reappeared on disk.
 
 ---
 
