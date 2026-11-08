@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::library::folder_style::FolderStyle;
-use crate::library::matcher::score_release;
+use crate::library::matcher::{build_exact_edges_refs, resolve_exact_matches, score_release};
 use crate::library::scan::{AlbumCandidate, is_audio_file};
 use crate::types::{AudioFormat, ItemKey, LocalStatus, MissingCandidate, Origin, ReleaseRow};
 
@@ -173,6 +173,67 @@ pub fn find_relink_candidates(
         };
     }
 
+    // 1. Exact pass
+    let exact_edges = build_exact_edges_refs(&available_candidates, missing_releases, style);
+    let resolution = resolve_exact_matches(&available_candidates, missing_releases, &exact_edges);
+
+    let mut relinked = Vec::new();
+    let mut unresolved_releases: Vec<(&ReleaseRow, Option<MissingCandidate>)> = Vec::new();
+
+    for (cand_idx, rel_idx, _) in resolution.matched {
+        let cand = available_candidates[cand_idx];
+        let rel = &missing_releases[rel_idx];
+        relinked.push(RelinkProposal {
+            key: rel.key,
+            path: cand.path.clone(),
+            score: 1.0,
+            format: cand.metadata.as_ref().and_then(|m| m.format_guess),
+        });
+    }
+
+    // Releases involved in exact conflicts are unresolved (asks instead), with best candidate attached
+    for conflict in &resolution.conflicts {
+        for &rel_key in &conflict.release_keys {
+            if let Some(rel) = missing_releases.iter().find(|r| r.key == rel_key) {
+                let best_cand = conflict.candidate_paths.first().map(|p| MissingCandidate {
+                    path: p.clone(),
+                    score: 1.0,
+                });
+                unresolved_releases.push((rel, best_cand));
+            }
+        }
+    }
+
+    let matched_cands = resolution.matched_cands;
+    let matched_rels = resolution.matched_rels;
+    let conflicted_cands = resolution.conflicted_cands;
+    let conflicted_rels = resolution.conflicted_rels;
+
+    // 2. Fuzzy pass for leftover releases and leftover candidates
+    let leftover_cands: Vec<&AlbumCandidate> = available_candidates
+        .iter()
+        .enumerate()
+        .filter(|(ci, _)| !matched_cands.contains(ci) && !conflicted_cands.contains(ci))
+        .map(|(_, &c)| c)
+        .collect();
+
+    let leftover_rels: Vec<&ReleaseRow> = missing_releases
+        .iter()
+        .enumerate()
+        .filter(|(ri, _)| !matched_rels.contains(ri) && !conflicted_rels.contains(ri))
+        .map(|(_, r)| r)
+        .collect();
+
+    if leftover_rels.is_empty() {
+        return RelinkOutcome {
+            relinked,
+            unresolved: unresolved_releases
+                .into_iter()
+                .map(|(r, opt)| (r.clone(), opt))
+                .collect(),
+        };
+    }
+
     struct Scored<'a> {
         candidate: &'a AlbumCandidate,
         score: f32,
@@ -180,9 +241,9 @@ pub fn find_relink_candidates(
 
     let mut per_release_scores: Vec<(&ReleaseRow, Vec<Scored>)> = Vec::new();
 
-    for rel in missing_releases {
+    for rel in leftover_rels {
         let mut scored = Vec::new();
-        for &cand in &available_candidates {
+        for &cand in &leftover_cands {
             let s = score_release(cand, rel, style);
             scored.push(Scored {
                 candidate: cand,
@@ -198,7 +259,6 @@ pub fn find_relink_candidates(
     }
 
     let mut potential_matches: Vec<(&ReleaseRow, &AlbumCandidate, f32)> = Vec::new();
-    let mut unresolved_releases: Vec<(&ReleaseRow, Option<MissingCandidate>)> = Vec::new();
 
     for (rel, scored) in per_release_scores {
         if scored.is_empty() {
@@ -226,7 +286,6 @@ pub fn find_relink_candidates(
             if beats_runner_up {
                 potential_matches.push((rel, best.candidate, best.score));
             } else {
-                // Ambiguous runner-up (e.g. two identical candidates): asks instead
                 unresolved_releases.push((rel, best_candidate_info));
             }
         } else {
@@ -240,7 +299,6 @@ pub fn find_relink_candidates(
         *candidate_claim_count.entry(cand.path.clone()).or_insert(0) += 1;
     }
 
-    let mut relinked = Vec::new();
     for (rel, cand, score) in potential_matches {
         if candidate_claim_count.get(&cand.path).copied().unwrap_or(0) == 1 {
             relinked.push(RelinkProposal {
