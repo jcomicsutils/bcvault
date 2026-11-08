@@ -396,11 +396,19 @@ fn draw_artist_row(
             ui.ctx().request_repaint();
         }
 
-        let dl_tween = state
+        let el_dl_tween = state
             .motion
             .val(
-                ("art_dl", band_id),
-                stats.downloaded as f32,
+                ("art_el_dl", band_id),
+                stats.eligible_downloaded as f32,
+                SpringCfg::SMOOTH,
+            )
+            .round() as u32;
+        let non_el_dl_tween = state
+            .motion
+            .val(
+                ("art_non_el_dl", band_id),
+                stats.non_eligible_downloaded as f32,
                 SpringCfg::SMOOTH,
             )
             .round() as u32;
@@ -416,7 +424,12 @@ fn draw_artist_row(
             .motion
             .val(("art_tot", band_id), stats.total as f32, SpringCfg::SMOOTH)
             .round() as u32;
-        let badge_str = format!("{dl_tween}/{el_tween}/{tot_tween}");
+
+        let badge_str = if non_el_dl_tween > 0 {
+            format!("{el_dl_tween} (+ {non_el_dl_tween})/{el_tween}/{tot_tween}")
+        } else {
+            format!("{el_dl_tween}/{el_tween}/{tot_tween}")
+        };
 
         let inner = Rect::from_min_max(
             Pos2::new(mos_rect.max.x + 6.0, rect.min.y + 2.0),
@@ -470,9 +483,18 @@ fn draw_artist_row(
         None => String::new(),
     };
 
+    let dl_desc = if stats.non_eligible_downloaded > 0 {
+        format!(
+            "{} ({} eligible + {} paid/extra)",
+            stats.downloaded, stats.eligible_downloaded, stats.non_eligible_downloaded
+        )
+    } else {
+        stats.downloaded.to_string()
+    };
+
     resp.on_hover_text(format!(
-        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}{}",
-        stats.downloaded,
+        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases on page: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}{}",
+        dl_desc,
         stats.eligible,
         stats.total,
         stats.email_required,
