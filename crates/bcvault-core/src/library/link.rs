@@ -317,7 +317,11 @@ mod tests {
             let unreadable = dir.path().join("unreadable_dir");
             fs::create_dir_all(&unreadable).unwrap();
             let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000));
-            assert_eq!(probe_folder(&unreadable), FolderState::Unreadable);
+            // In CI or container environments running as root (CAP_DAC_OVERRIDE),
+            // 0o000 permissions do not prevent directory listing.
+            if fs::read_dir(&unreadable).is_err() {
+                assert_eq!(probe_folder(&unreadable), FolderState::Unreadable);
+            }
             let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755));
         }
     }
