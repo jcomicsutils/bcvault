@@ -1,3 +1,4 @@
+pub mod folder_style;
 pub mod link;
 pub mod matcher;
 pub mod scan;
@@ -6,6 +7,7 @@ pub mod tags;
 pub mod textmatch;
 pub mod verify;
 
+pub use folder_style::{Extracted, FolderStyle};
 pub use link::{
     FolderLinkError, FolderWarning, ValidatedLink, check_looks_like_library, normalize_path_key,
     probe_folder, validate_folder_link,
@@ -21,7 +23,7 @@ pub use scan::{
 pub use service::{LibraryProgressCallback, ReconcileReport, run_scan_and_match};
 pub use tags::{AudioMetadata, guess_audio_format, read_audio_tags};
 pub use textmatch::{
-    name_variant_keys, name_variants, normalize, strip_diacritics, strip_noise_tokens,
+    key, name_variant_keys, name_variants, normalize, strip_diacritics, strip_noise_tokens, tokens,
 };
 pub use verify::{
     VerifyReport, VerifyResult, check_disk_release_path, is_mass_missing, verify_single_release,

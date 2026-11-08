@@ -41,6 +41,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 lofty = "0.25"
 dunce = "1.0"
 strsim = "0.11"
+unicode-normalization = "0.1"
 
 # Errors / logging
 thiserror = "2"
