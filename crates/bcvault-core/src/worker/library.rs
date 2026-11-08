@@ -1889,7 +1889,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_local_only_updates_stats_badge() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("local_only_stats.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("local_only_stats.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -1933,7 +1934,7 @@ mod tests {
             .unwrap();
 
         // Local artist folder has Free 1, plus 2 extra local-only album folders
-        let artist_dir = dir.path().join("Leichen");
+        let artist_dir = root.join("Leichen");
         let album_free = artist_dir.join("Leichen - Free 1");
         let album_extra1 = artist_dir.join("Leichen - Extra Bootleg 1");
         let album_extra2 = artist_dir.join("Leichen - Extra Bootleg 2");
@@ -2074,7 +2075,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_apply_reconcile_and_undo() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("apply_undo_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("apply_undo_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -2116,7 +2118,7 @@ mod tests {
             .await
             .unwrap();
 
-        let artist_dir = dir.path().join("Artist 555");
+        let artist_dir = root.join("Artist 555");
         let album_dir = artist_dir.join("Album 10");
         fs::create_dir_all(&album_dir).unwrap();
         fs::write(album_dir.join("01.flac"), b"audio").unwrap();
@@ -2710,7 +2712,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_verify_relinks_moved_album() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("relink_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("relink_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -2726,13 +2729,13 @@ mod tests {
         let band_id = 444;
         let key = ItemKey::new(ItemType::Album, 401);
 
-        let artist_dir = dir.path().join("Artist 444");
+        let artist_dir = root.join("Artist 444");
         let original_path = artist_dir.join("Old Album Folder");
         let moved_path = artist_dir.join("Moved Album Folder");
         fs::create_dir_all(&moved_path).unwrap();
         fs::write(moved_path.join("01.mp3"), b"audio").unwrap();
 
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         let a_dir = artist_dir.clone();
         let p_old = original_path.clone();
 
@@ -3348,7 +3351,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_repoint_artist_folder() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("repoint_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("repoint_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3364,13 +3368,13 @@ mod tests {
         let band_id = 704;
         let key = ItemKey::new(ItemType::Album, 720);
 
-        let old_artist_dir = dir.path().join("Old Artist Folder");
-        let new_artist_dir = dir.path().join("New Artist Folder");
+        let old_artist_dir = root.join("Old Artist Folder");
+        let new_artist_dir = root.join("New Artist Folder");
         let album_in_new = new_artist_dir.join("Album");
         fs::create_dir_all(&album_in_new).unwrap();
         fs::write(album_in_new.join("01.mp3"), b"audio").unwrap();
 
-        let out_dir = dir.path().join("downloads");
+        let out_dir = root.join("downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let dummy_old_path = old_artist_dir.join("Album");
@@ -3431,7 +3435,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(folder.path, new_artist_dir.canonicalize().unwrap());
+        assert_eq!(folder.path, dunce::canonicalize(&new_artist_dir).unwrap());
 
         // Album should be relinked to album_in_new
         let row = pool
@@ -3456,7 +3460,8 @@ mod tests {
     #[tokio::test]
     async fn test_sync_rescan_auto_adopts_certain_match_under_sync_batch() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("rescan_adopt_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("rescan_adopt_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3471,12 +3476,12 @@ mod tests {
         let band_id = 801;
         let key = ItemKey::new(ItemType::Album, 810);
 
-        let artist_dir = dir.path().join("Artist 801");
+        let artist_dir = root.join("Artist 801");
         let album_dir = artist_dir.join("Album One");
         fs::create_dir_all(&album_dir).unwrap();
         fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
 
-        let out_dir = dir.path().join("downloads");
+        let out_dir = root.join("downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let a_dir = artist_dir.clone();
@@ -3771,7 +3776,8 @@ mod tests {
     #[tokio::test]
     async fn test_already_linked_candidates_are_not_reported_as_local_only() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("already_linked_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("already_linked_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3784,12 +3790,12 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 888;
-        let artist_dir = dir.path().join("Artist 888");
+        let artist_dir = root.join("Artist 888");
         let album_dir = artist_dir.join("Album One [FLAC]");
         fs::create_dir_all(&album_dir).unwrap();
         fs::write(album_dir.join("01.flac"), b"dummy audio").unwrap();
 
-        let out_dir = dir.path().join("downloads");
+        let out_dir = root.join("downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let key = ItemKey {

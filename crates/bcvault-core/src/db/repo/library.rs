@@ -818,10 +818,11 @@ mod tests {
     fn link_folder_rejects_overlap_with_other_artist_folder() {
         let mut conn = test_db();
         let tmp = tempfile::tempdir().unwrap();
-        let out_dir = tmp.path().join("downloads");
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let out_dir = root.join("downloads");
         std::fs::create_dir(&out_dir).unwrap();
 
-        let music = tmp.path().join("music");
+        let music = root.join("music");
         let art1_dir = music.join("art1");
         std::fs::create_dir_all(&art1_dir).unwrap();
 
@@ -856,7 +857,7 @@ mod tests {
         let art1_new = music.join("art1_new");
         std::fs::create_dir(&art1_new).unwrap();
         let f1_new = link_folder(&mut conn, 1, &art1_new, &out_dir).unwrap();
-        assert_eq!(f1_new.path, art1_new.canonicalize().unwrap());
+        assert_eq!(f1_new.path, dunce::canonicalize(&art1_new).unwrap());
     }
 
     #[test]
