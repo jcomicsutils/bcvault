@@ -313,7 +313,21 @@ fn draw_artist_row(
             sharp_rect(painter, fill_rect, pal::ACCENT, Stroke::NONE);
         }
 
-        let badge_str = format!("{}/{}/{}", stats.downloaded, stats.eligible, stats.total);
+        let badge_str = stats.format_sidebar_badge();
+        let badge_tip = if stats.non_eligible_downloaded > 0 {
+            format!(
+                "Downloaded: {} eligible + {} paid/extra\nEligible (Free / NYP): {}\nTotal on page: {}",
+                stats.eligible_downloaded,
+                stats.non_eligible_downloaded,
+                stats.eligible,
+                stats.total
+            )
+        } else {
+            format!(
+                "Downloaded: {}\nEligible (Free / NYP): {}\nTotal on page: {}",
+                stats.eligible_downloaded, stats.eligible, stats.total
+            )
+        };
         let inner = rect.shrink2(Vec2::new(8.0, 2.0));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
@@ -340,7 +354,8 @@ fn draw_artist_row(
                     .monospace()
                     .size(11.0)
                     .color(pal::TEXT_DIM),
-            );
+            )
+            .on_hover_text(badge_tip);
         });
     }
 
@@ -353,9 +368,18 @@ fn draw_artist_row(
         None => String::new(),
     };
 
+    let dl_desc = if stats.non_eligible_downloaded > 0 {
+        format!(
+            "{} ({} eligible + {} paid/extra)",
+            stats.downloaded, stats.eligible_downloaded, stats.non_eligible_downloaded
+        )
+    } else {
+        stats.downloaded.to_string()
+    };
+
     resp.on_hover_text(format!(
-        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}{}",
-        stats.downloaded,
+        "Downloaded: {}\nEligible (Free + NYP + Email): {}\nTotal releases on page: {}\nEmail-gated: {}\nPending metadata: {}\nYour downloads (30d): {}/{}{}",
+        dl_desc,
         stats.eligible,
         stats.total,
         stats.email_required,
