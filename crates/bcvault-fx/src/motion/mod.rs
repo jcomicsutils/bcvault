@@ -172,6 +172,10 @@ impl Motion {
         self.entries.len()
     }
 
+    pub fn has(&self, id: impl Hash) -> bool {
+        self.entries.contains_key(&Id::new(id))
+    }
+
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         let dt = ctx.input(|i| i.stable_dt).clamp(1.0 / 500.0, 0.05);
         self.begin_frame_dt(dt);

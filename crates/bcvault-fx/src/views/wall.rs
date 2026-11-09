@@ -481,33 +481,38 @@ pub fn show(
                     FontId::monospace(9.5),
                     th.warn,
                 );
-            } else if row.rel.downloaded || is_selected {
+            } else if row.rel.downloaded {
                 let is_archived =
                     row.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
-                let is_folder_missing = if !is_selected
-                    && !is_archived
-                    && let Some(folder) = state.folders.get(&row.rel.band_id)
-                    && folder.state != bcvault_core::types::FolderState::Ok
-                {
-                    match &row.rel.local_path {
-                        Some(p) => {
-                            let rel_key = bcvault_core::library::link::normalize_path_key(p);
-                            let folder_key =
-                                bcvault_core::library::link::normalize_path_key(&folder.path);
-                            rel_key == folder_key || rel_key.starts_with(&format!("{folder_key}/"))
-                        }
-                        None => true,
-                    }
-                } else {
-                    false
-                };
+                let is_folder_missing = !is_archived
+                    && (row.rel.local_status == Some(bcvault_core::types::LocalStatus::Missing)
+                        || if let Some(folder) = state.folders.get(&row.rel.band_id)
+                            && folder.state != bcvault_core::types::FolderState::Ok
+                        {
+                            match &row.rel.local_path {
+                                Some(p) => {
+                                    let rel_key =
+                                        bcvault_core::library::link::normalize_path_key(p);
+                                    let folder_key =
+                                        bcvault_core::library::link::normalize_path_key(
+                                            &folder.path,
+                                        );
+                                    rel_key == folder_key
+                                        || rel_key.starts_with(&format!("{folder_key}/"))
+                                }
+                                None => true,
+                            }
+                        } else {
+                            false
+                        });
 
                 if is_folder_missing {
                     let unavail_r = Rect::from_min_size(
                         Pos2::new(cov_rect.max.x - 52.0, cov_rect.min.y + 6.0),
                         Vec2::new(46.0, 16.0),
                     );
-                    paint::rect(painter, unavail_r, th.bg0, Stroke::new(1.0_f32, th.warn));
+                    let border_col = if is_selected { th.accent } else { th.warn };
+                    paint::rect(painter, unavail_r, th.bg0, Stroke::new(1.0_f32, border_col));
                     painter.text(
                         unavail_r.center(),
                         egui::Align2::CENTER_CENTER,
@@ -851,5 +856,89 @@ mod tests {
         // Cards must be actively animating via FLIP springs, not teleporting
         assert!(!state.flip_origins.is_empty());
         assert!(state.motion.active_springs() > 0);
+    }
+
+    #[test]
+    fn wall_selected_card_does_not_render_download_checkmark_when_undownloaded() {
+        let ctx = egui::Context::default();
+        let mut state = FxState::new();
+        state.rows = make_rows(1);
+        let key = state.rows[0].rel.key;
+        state.selected_keys.insert(key);
+
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+            ..Default::default()
+        };
+
+        // Render with downloaded = false
+        let _ = ctx.run(raw.clone(), |ctx| {
+            state.motion.begin_frame_dt(1.0 / 60.0);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &core_tx, &fx_tx, 0.0);
+            });
+            state.motion.end_frame(ctx);
+        });
+
+        // dl_check spring should NOT have been touched
+        assert!(!state.motion.has(("dl_check", key)));
+
+        // Now set downloaded = true and re-render
+        state.rows[0].rel.downloaded = true;
+        let _ = ctx.run(raw, |ctx| {
+            state.motion.begin_frame_dt(1.0 / 60.0);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &core_tx, &fx_tx, 0.016);
+            });
+            state.motion.end_frame(ctx);
+        });
+
+        // dl_check spring SHOULD now be registered
+        assert!(state.motion.has(("dl_check", key)));
+    }
+
+    #[test]
+    fn wall_selected_downloaded_card_with_missing_folder_shows_missing_not_checkmark() {
+        use bcvault_core::types::{ArtistFolder, FolderState};
+        use std::path::PathBuf;
+
+        let ctx = egui::Context::default();
+        let mut state = FxState::new();
+        state.rows = make_rows(1);
+        state.rows[0].rel.downloaded = true;
+        let key = state.rows[0].rel.key;
+        let band_id = state.rows[0].rel.band_id;
+        state.selected_keys.insert(key);
+
+        state.folders.insert(
+            band_id,
+            ArtistFolder {
+                band_id,
+                path: PathBuf::from("/music/Artist"),
+                state: FolderState::Missing,
+            },
+        );
+
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+            ..Default::default()
+        };
+
+        let _ = ctx.run(raw, |ctx| {
+            state.motion.begin_frame_dt(1.0 / 60.0);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &core_tx, &fx_tx, 0.0);
+            });
+            state.motion.end_frame(ctx);
+        });
+
+        // dl_check spring should NOT have been registered because card is MISSING
+        assert!(!state.motion.has(("dl_check", key)));
     }
 }
