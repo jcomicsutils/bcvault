@@ -291,6 +291,61 @@ impl DeletedPolicy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UnavailableRoot {
+    Linked { band_id: i64 },
+    OutDir,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableRelease {
+    pub key: ItemKey,
+    pub band_id: i64,
+    pub artist_name: String,
+    pub title: String,
+    pub last_known_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableFolder {
+    pub root: UnavailableRoot,
+    pub path: PathBuf,
+    pub state: FolderState,
+    pub releases: Vec<UnavailableRelease>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnavailableAction {
+    /// Drive unplugged, will reconnect: change nothing.
+    Keep,
+    /// Deleted on purpose: apply `policy` to `keys`; optionally unlink the folder.
+    Deleted { policy: DeletedPolicy, unlink: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableDecision {
+    pub root: UnavailableRoot,
+    pub keys: Vec<ItemKey>,
+    pub action: UnavailableAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VerifyTrigger {
+    Manual,
+    SyncInteractive,
+    SyncBackground,
+}
+
+impl VerifyTrigger {
+    pub fn is_sync(self) -> bool {
+        self != Self::Manual
+    }
+
+    pub fn prompts(self) -> bool {
+        self != Self::SyncBackground
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FolderState {
     Ok,
     Missing,

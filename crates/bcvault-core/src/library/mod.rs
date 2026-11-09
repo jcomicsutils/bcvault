@@ -24,5 +24,6 @@ pub use service::{LibraryProgressCallback, ReconcileReport, run_scan_and_match};
 pub use tags::{AudioMetadata, guess_audio_format, read_audio_tags};
 pub use textmatch::{key, tokens};
 pub use verify::{
-    VerifyReport, VerifyResult, check_disk_release_path, is_mass_missing, verify_single_release,
+    VerifyReport, VerifyResult, attribute_release_root, check_disk_release_path,
+    group_unavailable_releases, is_mass_missing, verify_single_release,
 };

@@ -193,5 +193,10 @@ pub enum WorkerToUiEvent {
         items: Vec<crate::types::MissingItem>,
         mass_missing: bool,
     },
+    FolderUnavailable {
+        batch_id: u64,
+        folders: Vec<crate::types::UnavailableFolder>,
+        prompt: bool,
+    },
     Log(LogEntry),
 }

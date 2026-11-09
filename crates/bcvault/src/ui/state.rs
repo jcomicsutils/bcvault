@@ -654,6 +654,7 @@ impl UiState {
                     self.show_resolve_missing_window = false;
                 }
             }
+            WorkerToUiEvent::FolderUnavailable { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }

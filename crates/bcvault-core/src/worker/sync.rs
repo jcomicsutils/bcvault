@@ -9,7 +9,7 @@ use crate::{
         },
     },
     error::{BcError, DbError},
-    types::{ItemKey, LogLevel, SyncMode, SyncPhase, SyncProgress, SyncScope},
+    types::{ItemKey, LogLevel, SyncMode, SyncPhase, SyncProgress, SyncScope, VerifyTrigger},
     worker::{bridge::UiBridge, library::LibraryService, messages::WorkerToUiEvent},
 };
 use std::collections::HashSet;
@@ -60,6 +60,7 @@ impl SyncService {
             None,
             SyncMode::Incremental,
             cancel,
+            VerifyTrigger::SyncInteractive,
         )
         .await
     }
@@ -69,6 +70,17 @@ impl SyncService {
         band_id: i64,
         mode: SyncMode,
         cancel: CancellationToken,
+    ) -> Result<SyncOutcome, BcError> {
+        self.sync_artist_with_trigger(band_id, mode, cancel, VerifyTrigger::SyncInteractive)
+            .await
+    }
+
+    pub async fn sync_artist_with_trigger(
+        &self,
+        band_id: i64,
+        mode: SyncMode,
+        cancel: CancellationToken,
+        trigger: VerifyTrigger,
     ) -> Result<SyncOutcome, BcError> {
         let view_opt = self
             .pool
@@ -81,8 +93,15 @@ impl SyncService {
             return Err(BcError::BandIdNotFound);
         };
 
-        self.sync_resolved(&view.url, &view.slug, Some(view.band_id), mode, cancel)
-            .await
+        self.sync_resolved(
+            &view.url,
+            &view.slug,
+            Some(view.band_id),
+            mode,
+            cancel,
+            trigger,
+        )
+        .await
     }
 
     async fn sync_resolved(
@@ -92,6 +111,7 @@ impl SyncService {
         known_band_id: Option<i64>,
         mode: SyncMode,
         cancel: CancellationToken,
+        trigger: VerifyTrigger,
     ) -> Result<SyncOutcome, BcError> {
         if let Some(bid) = known_band_id {
             self.bridge
@@ -340,7 +360,7 @@ impl SyncService {
 
             if st.verify_on_sync && !cancel.is_cancelled() {
                 let v_outcome = lib
-                    .verify_files(SyncScope::Selected(vec![band_id]), true, cancel.clone())
+                    .verify_files(SyncScope::Selected(vec![band_id]), trigger, cancel.clone())
                     .await;
                 missing_local_count = v_outcome.missing_count;
                 relinked_count = v_outcome.relinked_count;

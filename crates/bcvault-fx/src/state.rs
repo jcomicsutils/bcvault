@@ -780,6 +780,7 @@ impl FxState {
                 self.settings = st;
                 self.push_toast(ToastKind::Info, "Settings saved", now_s);
             }
+            WorkerToUiEvent::FolderUnavailable { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 if entry.level == bcvault_core::types::LogLevel::Error {
                     self.push_toast(ToastKind::Error, entry.message.clone(), now_s);

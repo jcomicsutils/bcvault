@@ -6,7 +6,7 @@ use crate::{
     },
     error::DbError,
     paths::AppPaths,
-    types::{FolderState, LogLevel, SyncScope},
+    types::{FolderState, LogLevel, SyncScope, VerifyTrigger},
     worker::{
         bridge::UiBridge,
         downloads::DownloadManager,
@@ -218,23 +218,29 @@ impl Supervisor {
                 let bridge = self.bridge.clone();
                 let tok = self.sync_cancel.child_token();
                 tokio::spawn(async move {
-                    let ids: Vec<i64> = match scope {
-                        SyncScope::Selected(v) => v,
-                        SyncScope::All => pool
-                            .reader
-                            .call(|c| {
-                                let views = artists::list_views(c)?;
-                                Ok::<_, DbError>(views.into_iter().map(|v| v.band_id).collect())
-                            })
-                            .await
-                            .unwrap_or_default(),
+                    let (ids, trigger) = match scope {
+                        SyncScope::Selected(v) => (v, VerifyTrigger::SyncInteractive),
+                        SyncScope::All => {
+                            let list = pool
+                                .reader
+                                .call(|c| {
+                                    let views = artists::list_views(c)?;
+                                    Ok::<_, DbError>(views.into_iter().map(|v| v.band_id).collect())
+                                })
+                                .await
+                                .unwrap_or_default();
+                            (list, VerifyTrigger::SyncBackground)
+                        }
                     };
 
                     for band_id in ids {
                         if tok.is_cancelled() {
                             break;
                         }
-                        if let Err(e) = svc.sync_artist(band_id, mode, tok.clone()).await {
+                        if let Err(e) = svc
+                            .sync_artist_with_trigger(band_id, mode, tok.clone(), trigger)
+                            .await
+                        {
                             bridge.log(
                                 LogLevel::Error,
                                 "sync",
@@ -445,7 +451,7 @@ impl Supervisor {
                 let svc = self.library_service.clone();
                 let tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
-                    svc.verify_files(scope, false, tok).await;
+                    svc.verify_files(scope, VerifyTrigger::Manual, tok).await;
                 });
             }
             UiToWorkerCommand::ResolveMissing {

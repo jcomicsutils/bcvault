@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use crate::library::folder_style::FolderStyle;
 use crate::library::matcher::{build_exact_edges_refs, resolve_exact_matches, score_release};
 use crate::library::scan::{AlbumCandidate, is_audio_file};
-use crate::types::{AudioFormat, ItemKey, LocalStatus, MissingCandidate, Origin, ReleaseRow};
+use crate::types::{
+    ArtistFolder, AudioFormat, FolderState, ItemKey, LocalStatus, MissingCandidate, Origin,
+    ReleaseRow, UnavailableFolder, UnavailableRelease, UnavailableRoot,
+};
 
 /// Verification status for a downloaded release on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +125,92 @@ pub fn is_mass_missing(missing_count: usize, total_checked: usize) -> bool {
         return false;
     }
     (missing_count as f32 / total_checked as f32) > 0.30
+}
+
+/// Determines the root folder and health state for a release during verification.
+pub fn attribute_release_root(
+    rel: &ReleaseRow,
+    linked_folder: Option<&ArtistFolder>,
+    out_dir: &Path,
+    out_dir_state: FolderState,
+) -> (UnavailableRoot, PathBuf, FolderState) {
+    if let Some(folder) = linked_folder {
+        if let Some(local_p) = &rel.local_path {
+            let rel_key = crate::library::link::normalize_path_key(local_p);
+            let link_key = crate::library::link::normalize_path_key(&folder.path);
+            if rel_key == link_key || rel_key.starts_with(&format!("{link_key}/")) {
+                return (
+                    UnavailableRoot::Linked {
+                        band_id: folder.band_id,
+                    },
+                    folder.path.clone(),
+                    folder.state,
+                );
+            }
+        } else {
+            return (
+                UnavailableRoot::Linked {
+                    band_id: folder.band_id,
+                },
+                folder.path.clone(),
+                folder.state,
+            );
+        }
+    }
+    (
+        UnavailableRoot::OutDir,
+        out_dir.to_path_buf(),
+        out_dir_state,
+    )
+}
+
+/// Groups `Unknown` releases by their unavailable root (linked folder or out_dir).
+/// Drops releases whose `local_status` is already `Archived`.
+pub fn group_unavailable_releases(
+    items: Vec<(ReleaseRow, UnavailableRoot, PathBuf, FolderState)>,
+) -> Vec<UnavailableFolder> {
+    let mut groups: Vec<(
+        UnavailableRoot,
+        PathBuf,
+        FolderState,
+        Vec<UnavailableRelease>,
+    )> = Vec::new();
+
+    for (rel, root, path, state) in items {
+        if rel.local_status == Some(LocalStatus::Archived) {
+            continue;
+        }
+        if state == FolderState::Ok {
+            continue;
+        }
+
+        let release_info = UnavailableRelease {
+            key: rel.key,
+            band_id: rel.band_id,
+            artist_name: rel.artist_name,
+            title: rel.title,
+            last_known_path: rel.local_path,
+        };
+
+        if let Some(existing) = groups
+            .iter_mut()
+            .find(|(r, p, _, _)| *r == root && *p == path)
+        {
+            existing.3.push(release_info);
+        } else {
+            groups.push((root, path, state, vec![release_info]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(root, path, state, releases)| UnavailableFolder {
+            root,
+            path,
+            state,
+            releases,
+        })
+        .collect()
 }
 
 /// Relink proposal for a missing release that confidently matches a local folder.
@@ -579,5 +668,120 @@ mod tests {
         );
         assert!(outcome.relinked.is_empty());
         assert_eq!(outcome.unresolved.len(), 2);
+    }
+
+    #[test]
+    fn test_attribute_release_root_under_link_and_outside() {
+        let band_id = 42;
+        let link_path = PathBuf::from("/music/Artist");
+        let linked = ArtistFolder {
+            band_id,
+            path: link_path.clone(),
+            state: FolderState::Missing,
+        };
+        let out_dir = PathBuf::from("/downloads");
+
+        // 1. Release under linked folder
+        let key1 = ItemKey::new(ItemType::Album, 1);
+        let rel1 = make_test_row(key1, true, Some(link_path.join("Album 1")));
+        let (root1, p1, st1) =
+            attribute_release_root(&rel1, Some(&linked), &out_dir, FolderState::Ok);
+        assert_eq!(root1, UnavailableRoot::Linked { band_id });
+        assert_eq!(p1, link_path);
+        assert_eq!(st1, FolderState::Missing);
+
+        // 2. Release outside linked folder (e.g. in out_dir)
+        let key2 = ItemKey::new(ItemType::Album, 2);
+        let rel2 = make_test_row(key2, true, Some(out_dir.join("Album 2")));
+        let (root2, p2, st2) =
+            attribute_release_root(&rel2, Some(&linked), &out_dir, FolderState::Ok);
+        assert_eq!(root2, UnavailableRoot::OutDir);
+        assert_eq!(p2, out_dir);
+        assert_eq!(st2, FolderState::Ok);
+
+        // 3. Release without path but artist has link
+        let key3 = ItemKey::new(ItemType::Album, 3);
+        let rel3 = make_test_row(key3, true, None);
+        let (root3, p3, st3) =
+            attribute_release_root(&rel3, Some(&linked), &out_dir, FolderState::Ok);
+        assert_eq!(root3, UnavailableRoot::Linked { band_id });
+        assert_eq!(p3, link_path);
+        assert_eq!(st3, FolderState::Missing);
+
+        // 4. Release without path and no link
+        let (root4, p4, st4) =
+            attribute_release_root(&rel3, None, &out_dir, FolderState::Unreadable);
+        assert_eq!(root4, UnavailableRoot::OutDir);
+        assert_eq!(p4, out_dir);
+        assert_eq!(st4, FolderState::Unreadable);
+    }
+
+    #[test]
+    fn test_group_unavailable_releases_pure() {
+        let key1 = ItemKey::new(ItemType::Album, 1);
+        let mut rel1 = make_test_row(key1, true, Some(PathBuf::from("/music/Artist/Album 1")));
+        rel1.title = "Album 1".to_string();
+        rel1.artist_name = "Artist".to_string();
+
+        let key2 = ItemKey::new(ItemType::Album, 2);
+        let mut rel2 = make_test_row(key2, true, Some(PathBuf::from("/music/Artist/Album 2")));
+        rel2.title = "Album 2".to_string();
+        rel2.artist_name = "Artist".to_string();
+
+        // Archived release: should be dropped
+        let key3 = ItemKey::new(ItemType::Album, 3);
+        let mut rel3 = make_test_row(key3, true, Some(PathBuf::from("/music/Artist/Album 3")));
+        rel3.local_status = Some(LocalStatus::Archived);
+
+        let key4 = ItemKey::new(ItemType::Album, 4);
+        let mut rel4 = make_test_row(key4, true, Some(PathBuf::from("/downloads/Other")));
+        rel4.title = "Other".to_string();
+        rel4.artist_name = "Other Artist".to_string();
+
+        let root_linked = UnavailableRoot::Linked { band_id: 10 };
+        let root_out = UnavailableRoot::OutDir;
+
+        let items = vec![
+            (
+                rel1,
+                root_linked,
+                PathBuf::from("/music/Artist"),
+                FolderState::Missing,
+            ),
+            (
+                rel2,
+                root_linked,
+                PathBuf::from("/music/Artist"),
+                FolderState::Missing,
+            ),
+            (
+                rel3,
+                root_linked,
+                PathBuf::from("/music/Artist"),
+                FolderState::Missing,
+            ),
+            (
+                rel4,
+                root_out,
+                PathBuf::from("/downloads"),
+                FolderState::Unreadable,
+            ),
+        ];
+
+        let grouped = group_unavailable_releases(items);
+        assert_eq!(grouped.len(), 2);
+
+        // Group 1: Linked Missing with 2 releases (archived excluded)
+        assert_eq!(grouped[0].root, root_linked);
+        assert_eq!(grouped[0].state, FolderState::Missing);
+        assert_eq!(grouped[0].releases.len(), 2);
+        assert_eq!(grouped[0].releases[0].key, key1);
+        assert_eq!(grouped[0].releases[1].key, key2);
+
+        // Group 2: OutDir Unreadable with 1 release
+        assert_eq!(grouped[1].root, root_out);
+        assert_eq!(grouped[1].state, FolderState::Unreadable);
+        assert_eq!(grouped[1].releases.len(), 1);
+        assert_eq!(grouped[1].releases[0].key, key4);
     }
 }
