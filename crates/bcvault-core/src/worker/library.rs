@@ -18,7 +18,8 @@ use crate::types::{
     ArtistFolder, BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus,
     LogLevel, MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem,
     OnMissing, ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope,
-    UnavailableAction, UnavailableDecision, UnavailableRoot, VerifyOutcome, VerifyTrigger,
+    UnavailableAction, UnavailableDecision, UnavailableFolder, UnavailableRoot, VerifyOutcome,
+    VerifyTrigger,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -717,6 +718,7 @@ impl LibraryService {
         };
 
         // 2. Determine artist IDs in scope
+        let is_all_scope = matches!(scope, SyncScope::All);
         let band_ids: Vec<i64> = match scope {
             SyncScope::Selected(v) => v,
             SyncScope::All => {
@@ -1155,7 +1157,40 @@ impl LibraryService {
 
         // 10. Handle unknown releases (unavailable roots)
         let unknown_count = unknown_rels.len();
-        let unavailable_folders = group_unavailable_releases(unknown_rels);
+        let mut unavailable_folders = group_unavailable_releases(unknown_rels);
+
+        // Ensure every unavailable linked folder in scope is represented in unavailable_folders,
+        // even if it has 0 active unarchived releases (e.g. all releases were archived or empty).
+        for (&band_id, folder) in &linked_folders {
+            if folder.state != FolderState::Ok {
+                let already_present = unavailable_folders.iter().any(
+                    |f| matches!(f.root, UnavailableRoot::Linked { band_id: b } if b == band_id),
+                );
+                if !already_present {
+                    unavailable_folders.push(UnavailableFolder {
+                        root: UnavailableRoot::Linked { band_id },
+                        path: folder.path.clone(),
+                        state: folder.state,
+                        releases: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        if out_dir_state != FolderState::Ok && is_all_scope {
+            let already_present = unavailable_folders
+                .iter()
+                .any(|f| f.root == UnavailableRoot::OutDir);
+            if !already_present {
+                unavailable_folders.push(UnavailableFolder {
+                    root: UnavailableRoot::OutDir,
+                    path: out_dir.clone(),
+                    state: out_dir_state,
+                    releases: Vec::new(),
+                });
+            }
+        }
+
         if !unavailable_folders.is_empty() {
             let batch_id = match pool
                 .writer
@@ -4781,6 +4816,132 @@ mod tests {
         // Only the active release should be present, NOT the archived one
         assert_eq!(folders[0].releases.len(), 1);
         assert_eq!(folders[0].releases[0].key, key_active);
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_folder_when_all_releases_archived() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("all_archived_unavail.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 707;
+        let artist_dir = dir.path().join("Artist 707");
+        fs::create_dir_all(&artist_dir).unwrap();
+        let out_dir = dir.path().join("Downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let key_archived = ItemKey::new(ItemType::Album, 7071);
+        let a_dir = artist_dir.clone();
+        let o_dir = out_dir.clone();
+
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-707",
+                        name: "Artist 707",
+                        url: "https://artist707.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+
+                let disc = DiscoveredRelease {
+                    key: key_archived,
+                    band_id,
+                    title: "Archived Album",
+                    artist_name: "Artist 707",
+                    url: "https://artist707.bandcamp.com/album/archived",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc)?;
+                lib_repo::adopt(
+                    c,
+                    key_archived,
+                    &a_dir.join("Archived Album"),
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                lib_repo::archive(c, &[key_archived], b_id)?;
+
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        fs::remove_dir_all(&artist_dir).unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(
+            SyncScope::Selected(vec![band_id]),
+            VerifyTrigger::Manual,
+            cancel,
+        )
+        .await;
+
+        let mut unavail_folders = None;
+        let mut b_id = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let WorkerToUiEvent::FolderUnavailable {
+                batch_id, folders, ..
+            } = ev
+            {
+                b_id = batch_id;
+                unavail_folders = Some(folders);
+            }
+        }
+
+        assert!(
+            unavail_folders.is_some(),
+            "FolderUnavailable must be emitted even if all releases are archived"
+        );
+        let folders = unavail_folders.unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].releases.len(), 0);
+        assert_eq!(folders[0].root, UnavailableRoot::Linked { band_id });
+
+        // Resolving by unlinking must work
+        svc.resolve_unavailable(
+            b_id,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::Linked { band_id },
+                keys: vec![],
+                action: UnavailableAction::Deleted {
+                    policy: DeletedPolicy::KeepMarked,
+                    unlink: true,
+                },
+            }],
+        )
+        .await;
+
+        let mut unlinked_ev = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let WorkerToUiEvent::FolderStatus {
+                band_id: b,
+                folder: None,
+            } = ev
+                && b == band_id
+            {
+                unlinked_ev = true;
+            }
+        }
+        assert!(
+            unlinked_ev,
+            "FolderStatus None must be emitted after unlinking"
+        );
     }
 
     #[tokio::test]

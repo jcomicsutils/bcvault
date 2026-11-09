@@ -2252,12 +2252,18 @@ fn show_unavailable_modal(
                 .show(ui, |ui| {
                     for (idx, card) in modal.cards.iter_mut().enumerate() {
                         let title = match card.folder.root {
-                            UnavailableRoot::Linked { .. } => {
-                                let artist_name = card
-                                    .folder
-                                    .releases
-                                    .first()
-                                    .map(|r| r.artist_name.as_str())
+                            UnavailableRoot::Linked { band_id } => {
+                                let artist_name = state
+                                    .artists
+                                    .iter()
+                                    .find(|a| a.band_id == band_id)
+                                    .map(|a| a.display_name())
+                                    .or_else(|| {
+                                        card.folder
+                                            .releases
+                                            .first()
+                                            .map(|r| r.artist_name.as_str())
+                                    })
                                     .unwrap_or("Artist");
                                 format!("{artist_name}: linked folder unavailable")
                             }
@@ -2289,13 +2295,12 @@ fn show_unavailable_modal(
                                         .monospace()
                                         .color(pal::TEXT_DIM),
                                 );
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{count} downloaded releases were last seen here. Their files can't be checked."
-                                    ))
-                                    .size(11.5)
-                                    .color(pal::TEXT_DIM),
-                                );
+                                let rel_summary = if count == 0 {
+                                    "No active downloads are located in this folder. You can unlink this folder or repoint it to a new location.".to_string()
+                                } else {
+                                    format!("{count} downloaded releases were last seen here. Their files can't be checked.")
+                                };
+                                ui.label(RichText::new(rel_summary).size(11.5).color(pal::TEXT_DIM));
                                 ui.add_space(6.0);
 
                                 // Choice 1: Drive disconnected
@@ -2369,37 +2374,39 @@ fn show_unavailable_modal(
                                     }
                                 });
 
-                                // Expandable list of releases
-                                ui.add_space(4.0);
-                                let toggle_label = if card.expanded {
-                                    format!("Hide releases ({count})")
-                                } else {
-                                    format!("Show releases ({count})")
-                                };
-                                if ui.small_button(toggle_label).clicked() {
-                                    card.expanded = !card.expanded;
-                                }
-                                if card.expanded {
-                                    egui::ScrollArea::vertical()
-                                        .max_height(120.0)
-                                        .id_salt(format!("card_rels_scroll_{idx}"))
-                                        .show(ui, |ui| {
-                                            for rel in &card.folder.releases {
-                                                let path_display = rel
-                                                    .last_known_path
-                                                    .as_ref()
-                                                    .map(|p| p.display().to_string())
-                                                    .unwrap_or_else(|| "Unknown path".to_string());
-                                                ui.horizontal(|ui| {
-                                                    ui.label(RichText::new(&rel.title).size(11.0).color(pal::TEXT));
-                                                    ui.label(
-                                                        RichText::new(format!("({path_display})"))
-                                                            .size(10.5)
-                                                            .color(pal::TEXT_DIM),
-                                                    );
-                                                });
-                                            }
-                                        });
+                                // Expandable list of releases (only if there are releases to show)
+                                if count > 0 {
+                                    ui.add_space(4.0);
+                                    let toggle_label = if card.expanded {
+                                        format!("Hide releases ({count})")
+                                    } else {
+                                        format!("Show releases ({count})")
+                                    };
+                                    if ui.small_button(toggle_label).clicked() {
+                                        card.expanded = !card.expanded;
+                                    }
+                                    if card.expanded {
+                                        egui::ScrollArea::vertical()
+                                            .max_height(120.0)
+                                            .id_salt(format!("card_rels_scroll_{idx}"))
+                                            .show(ui, |ui| {
+                                                for rel in &card.folder.releases {
+                                                    let path_display = rel
+                                                        .last_known_path
+                                                        .as_ref()
+                                                        .map(|p| p.display().to_string())
+                                                        .unwrap_or_else(|| "Unknown path".to_string());
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new(&rel.title).size(11.0).color(pal::TEXT));
+                                                        ui.label(
+                                                            RichText::new(format!("({path_display})"))
+                                                                .size(10.5)
+                                                                .color(pal::TEXT_DIM),
+                                                        );
+                                                    });
+                                                }
+                                            });
+                                    }
                                 }
                             });
                         ui.add_space(8.0);
