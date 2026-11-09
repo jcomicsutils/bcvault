@@ -66,6 +66,17 @@ pub fn show(
             // Gate chip: OK / PACING / COOLDOWN 00:41
             draw_gate_chip(ui, state, now_s);
 
+            let unavail_artists = state.unavailable_folder_artists();
+            if !unavail_artists.is_empty() {
+                let count = unavail_artists.len();
+                let label = format!("FOLDER {count}");
+                if paint::sharp_button(ui, RichText::new(label).color(th.warn)).clicked() {
+                    let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                        scope: bcvault_core::types::SyncScope::Selected(unavail_artists),
+                    });
+                }
+            }
+
             if let Some(modal) = &state.resolve_missing_modal {
                 let count = modal.items.len();
                 if count > 0 {

@@ -153,6 +153,34 @@ pub fn show(
                     if resp.clicked() {
                         pending_actions.push(FxAction::OpenDrawer(key));
                     }
+                    if w.rel.downloaded {
+                        if w.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived) {
+                            paint_table_badge(ui, "ARCHIVED", th.text_dim, th.border);
+                        } else if w.rel.local_status
+                            == Some(bcvault_core::types::LocalStatus::Missing)
+                        {
+                            paint_table_badge(ui, "MISSING", th.warn, th.warn);
+                        } else if let Some(folder) = state.folders.get(&w.rel.band_id)
+                            && folder.state != bcvault_core::types::FolderState::Ok
+                        {
+                            let is_under_folder = match &w.rel.local_path {
+                                Some(p) => {
+                                    let rel_key =
+                                        bcvault_core::library::link::normalize_path_key(p);
+                                    let folder_key =
+                                        bcvault_core::library::link::normalize_path_key(
+                                            &folder.path,
+                                        );
+                                    rel_key == folder_key
+                                        || rel_key.starts_with(&format!("{folder_key}/"))
+                                }
+                                None => true,
+                            };
+                            if is_under_folder {
+                                paint_table_badge(ui, "FOLDER MISSING", th.warn, th.warn);
+                            }
+                        }
+                    }
                 });
 
                 row_ui.col(|ui| {
@@ -331,4 +359,21 @@ fn draw_highlighted_text(
             .truncate()
             .sense(Sense::click()),
     )
+}
+
+fn paint_table_badge(ui: &mut Ui, text: &str, text_col: Color32, border_col: Color32) {
+    let font = FontId::monospace(9.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font, text_col);
+    let size = galley.size() + Vec2::new(8.0, 4.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    paint::rect(
+        ui.painter(),
+        rect,
+        Color32::TRANSPARENT,
+        Stroke::new(1.0_f32, border_col),
+    );
+    ui.painter()
+        .galley(rect.min + Vec2::new(4.0, 2.0), galley, text_col);
 }

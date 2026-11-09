@@ -482,14 +482,46 @@ pub fn show(
                     th.warn,
                 );
             } else if row.rel.downloaded || is_selected {
-                let chk_r = Rect::from_min_size(
-                    Pos2::new(cov_rect.max.x - 22.0, cov_rect.min.y + 6.0),
-                    Vec2::new(16.0, 16.0),
-                );
-                let fill = if is_selected { th.accent } else { th.ok };
-                paint::rect_filled(painter, chk_r, fill);
-                let prog = state.motion.val(("dl_check", key), 1.0, SpringCfg::POP);
-                paint::drawn_check(painter, chk_r, prog, Stroke::new(1.8_f32, th.bg0));
+                let is_folder_missing = if !is_selected
+                    && let Some(folder) = state.folders.get(&row.rel.band_id)
+                    && folder.state != bcvault_core::types::FolderState::Ok
+                {
+                    match &row.rel.local_path {
+                        Some(p) => {
+                            let rel_key = bcvault_core::library::link::normalize_path_key(p);
+                            let folder_key =
+                                bcvault_core::library::link::normalize_path_key(&folder.path);
+                            rel_key == folder_key || rel_key.starts_with(&format!("{folder_key}/"))
+                        }
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+
+                if is_folder_missing {
+                    let unavail_r = Rect::from_min_size(
+                        Pos2::new(cov_rect.max.x - 52.0, cov_rect.min.y + 6.0),
+                        Vec2::new(46.0, 16.0),
+                    );
+                    paint::rect(painter, unavail_r, th.bg0, Stroke::new(1.0_f32, th.warn));
+                    painter.text(
+                        unavail_r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "MISSING",
+                        FontId::monospace(9.5),
+                        th.warn,
+                    );
+                } else {
+                    let chk_r = Rect::from_min_size(
+                        Pos2::new(cov_rect.max.x - 22.0, cov_rect.min.y + 6.0),
+                        Vec2::new(16.0, 16.0),
+                    );
+                    let fill = if is_selected { th.accent } else { th.ok };
+                    paint::rect_filled(painter, chk_r, fill);
+                    let prog = state.motion.val(("dl_check", key), 1.0, SpringCfg::POP);
+                    paint::drawn_check(painter, chk_r, prog, Stroke::new(1.8_f32, th.bg0));
+                }
             }
 
             // Title + artist label strip below cover

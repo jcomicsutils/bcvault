@@ -244,6 +244,15 @@ pub fn show(
                             ui.close();
                         }
                         if let Some(folder) = state.folders.get(&artist.band_id) {
+                            if folder.state != FolderState::Ok
+                                && paint::sharp_button(ui, "Resolve unavailable folder...")
+                                    .clicked()
+                            {
+                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                });
+                                ui.close();
+                            }
                             if paint::sharp_button(ui, "Change Folder...").clicked() {
                                 state.link_folder_modal = Some(FxLinkFolderModalState::new(
                                     Some(artist.band_id),
@@ -461,7 +470,21 @@ fn draw_artist_row(
                 FolderState::Missing => th.err,
                 FolderState::Unreadable => th.warn,
             };
-            let (glyph_rect, _) = child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
+            let (glyph_rect, glyph_resp) =
+                child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
+            let tip = match folder.state {
+                FolderState::Ok => format!("Linked: {}\nStatus: Reachable", folder.path.display()),
+                FolderState::Missing => {
+                    format!(
+                        "Linked: {}\nStatus: Missing\nRight-click to resolve",
+                        folder.path.display()
+                    )
+                }
+                FolderState::Unreadable => {
+                    format!("Linked: {}\nStatus: Unreadable", folder.path.display())
+                }
+            };
+            glyph_resp.on_hover_text(tip);
             let p = child.painter();
             paint::icons::paint_icon(p, glyph_rect, paint::icons::IconKind::Folder, th.text_dim);
             let dot = Rect::from_min_max(

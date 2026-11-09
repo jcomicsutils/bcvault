@@ -12,8 +12,9 @@ use crate::{
 use bcvault_core::{
     library::service::ReconcileReport,
     types::{
-        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, ItemKey, JobId, JobState, JobView,
-        LogEntry, MissingItem, RateLimitStatus, Settings, SyncMode, SyncProgress, SyncScope,
+        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, FolderState, ItemKey, JobId,
+        JobState, JobView, LogEntry, MissingItem, RateLimitStatus, Settings, SyncMode,
+        SyncProgress, SyncScope, UnavailableFolder, UnavailableRoot,
     },
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
 };
@@ -83,6 +84,47 @@ impl FxResolveMissingModalState {
             picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             repoint_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             repoint_selected_band_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FxUnavailableCardState {
+    pub folder: UnavailableFolder,
+    pub policy: DeletedPolicy,
+    pub unlink: bool,
+    pub expanded: bool,
+}
+
+#[derive(Clone)]
+pub struct FxUnavailableModalState {
+    pub batch_id: u64,
+    pub cards: Vec<FxUnavailableCardState>,
+    pub picked_folder: std::sync::Arc<std::sync::Mutex<Option<(i64, std::path::PathBuf)>>>,
+}
+
+impl FxUnavailableModalState {
+    pub fn new(
+        batch_id: u64,
+        folders: Vec<UnavailableFolder>,
+        default_policy: DeletedPolicy,
+    ) -> Self {
+        let cards = folders
+            .into_iter()
+            .map(|folder| {
+                let unlink = matches!(folder.root, UnavailableRoot::Linked { .. });
+                FxUnavailableCardState {
+                    folder,
+                    policy: default_policy,
+                    unlink,
+                    expanded: false,
+                }
+            })
+            .collect();
+        Self {
+            batch_id,
+            cards,
+            picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -278,6 +320,8 @@ pub struct FxState {
     pub reconcile_report_modal: Option<FxReconcileReportModalState>,
     pub resolve_missing_modal: Option<FxResolveMissingModalState>,
     pub show_resolve_missing_window: bool,
+    pub unavailable_modal: Option<FxUnavailableModalState>,
+    pub show_unavailable_window: bool,
     pub folders: HashMap<i64, ArtistFolder>,
     pub relink_picked_folder:
         std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
@@ -385,6 +429,8 @@ impl FxState {
             reconcile_report_modal: None,
             resolve_missing_modal: None,
             show_resolve_missing_window: false,
+            unavailable_modal: None,
+            show_unavailable_window: false,
             folders: HashMap::new(),
             relink_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             jobs: Vec::new(),
@@ -408,6 +454,19 @@ impl FxState {
         CARD_SIZES[self.prefs.card_size_idx.min(CARD_SIZES.len() - 1)]
     }
 
+    pub fn unavailable_folder_artists(&self) -> Vec<i64> {
+        self.folders
+            .iter()
+            .filter_map(|(&band_id, f)| {
+                if f.state != FolderState::Ok {
+                    Some(band_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn has_open_modal(&self) -> bool {
         self.confirm_remove_artist.is_some()
             || self.rename_artist_modal.is_some()
@@ -415,6 +474,7 @@ impl FxState {
             || self.redeem_modal.is_some()
             || self.reconcile_report_modal.is_some()
             || (self.show_resolve_missing_window && self.resolve_missing_modal.is_some())
+            || (self.show_unavailable_window && self.unavailable_modal.is_some())
             || self.link_folder_modal.is_some()
             || self.settings_modal_open
     }
@@ -437,6 +497,10 @@ impl FxState {
         }
         if self.show_resolve_missing_window && self.resolve_missing_modal.is_some() {
             self.show_resolve_missing_window = false;
+            return true;
+        }
+        if self.show_unavailable_window && self.unavailable_modal.is_some() {
+            self.show_unavailable_window = false;
             return true;
         }
         if self.link_folder_modal.take().is_some() {
@@ -780,7 +844,20 @@ impl FxState {
                 self.settings = st;
                 self.push_toast(ToastKind::Info, "Settings saved", now_s);
             }
-            WorkerToUiEvent::FolderUnavailable { .. } => {}
+            WorkerToUiEvent::FolderUnavailable {
+                batch_id,
+                folders,
+                prompt,
+            } => {
+                if prompt && !folders.is_empty() {
+                    self.unavailable_modal = Some(FxUnavailableModalState::new(
+                        batch_id,
+                        folders,
+                        self.settings.deleted_policy,
+                    ));
+                    self.show_unavailable_window = true;
+                }
+            }
             WorkerToUiEvent::Log(entry) => {
                 if entry.level == bcvault_core::types::LogLevel::Error {
                     self.push_toast(ToastKind::Error, entry.message.clone(), now_s);
@@ -1602,5 +1679,84 @@ mod tests {
         assert!(!state.has_open_modal());
 
         assert!(!state.close_top_modal());
+    }
+
+    #[test]
+    fn test_fx_unavailable_modal_state_and_chip() {
+        use bcvault_core::types::{
+            DeletedPolicy, FolderState, ItemType, UnavailableFolder, UnavailableRelease,
+            UnavailableRoot,
+        };
+        use std::path::PathBuf;
+
+        let mut st = FxState::new();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let folder = UnavailableFolder {
+            root: UnavailableRoot::Linked { band_id: 42 },
+            path: PathBuf::from("/music/aphex"),
+            state: FolderState::Missing,
+            releases: vec![UnavailableRelease {
+                key: ItemKey::new(ItemType::Album, 100),
+                band_id: 42,
+                artist_name: "Aphex Twin".to_string(),
+                title: "SAW II".to_string(),
+                last_known_path: Some(PathBuf::from("/music/aphex/saw2")),
+            }],
+        };
+
+        // 1. prompt: false does NOT open the modal
+        st.apply_core_event(
+            WorkerToUiEvent::FolderUnavailable {
+                batch_id: 50,
+                folders: vec![folder.clone()],
+                prompt: false,
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert!(!st.show_unavailable_window);
+        assert!(st.unavailable_modal.is_none());
+
+        // 2. prompt: true opens the modal
+        st.apply_core_event(
+            WorkerToUiEvent::FolderUnavailable {
+                batch_id: 51,
+                folders: vec![folder],
+                prompt: true,
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert!(st.show_unavailable_window);
+        assert!(st.unavailable_modal.is_some());
+        if let Some(modal) = &st.unavailable_modal {
+            assert_eq!(modal.batch_id, 51);
+            assert_eq!(modal.cards.len(), 1);
+            assert!(modal.cards[0].unlink, "Linked roots default unlink to true");
+            assert_eq!(modal.cards[0].policy, DeletedPolicy::KeepMarked);
+        } else {
+            unreachable!("modal must be Some");
+        }
+
+        // 3. unavailable_folder_artists tracks state.folders with state != Ok
+        assert_eq!(st.unavailable_folder_artists().len(), 0);
+        st.folders.insert(
+            42,
+            bcvault_core::types::ArtistFolder {
+                band_id: 42,
+                path: PathBuf::from("/music/aphex"),
+                state: FolderState::Missing,
+            },
+        );
+        st.folders.insert(
+            43,
+            bcvault_core::types::ArtistFolder {
+                band_id: 43,
+                path: PathBuf::from("/music/boc"),
+                state: FolderState::Ok,
+            },
+        );
+        assert_eq!(st.unavailable_folder_artists(), vec![42]);
     }
 }
