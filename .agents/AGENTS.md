@@ -14,13 +14,14 @@
 | `LIBRARY_SYNC/LIBRARY_SYNC_PLAN.md` | Artist folder links: one folder per artist, adopt and verify (Phases L0 to L6). (Done)|
 | `LIBRARY_SYNC/MATCH-FIX.md` | Exact-first matching and folder style templates; amends `LIBRARY_SYNC_PLAN.md` §5 and §6. (Done, `Task: none` commits)|
 | `LIBRARY_SYNC/MISSING-FOLDER-FIX.md` | Ask user when linked folder is gone; amends `LIBRARY_SYNC_PLAN.md` §5 and §6. (Done, `Task: none` commits)|
+| `LIBRARY_SYNC/MULTI_FOLDER.md` | Several linked folders per artist; amends `LIBRARY_SYNC_PLAN.md` §5. Not started. |
 | `MAIL_REDEEM/MAIL_REDEEM_PLAN.md` | Mailbox redeem and cleanup (Phases M0 to M6). Not started. |
 | `AUTO_SYNC/AUTO_SYNC.md` | Scheduled auto sync, quick check, removed-release tracking. Not started. |
 | `ARCHIVE/ARCHIVE.md` | Selectable release archive (text and covers). Not started; merges after `AUTO_SYNC.md`. |
 | `USER_THEMES/USER_THEMES.md` | File-based themes for `bcvault-fx`. Not started. |
 | `PROGRESS.md`, `FX/PROGRESS-FX.md` | Live status. Wins over the status lines in every other document. |
 
-Paths are relative to `.agents/`. `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`, `MATCH-FIX.md` and `MISSING-FOLDER-FIX.md` are step lists without phase IDs: their commits use `Task: none` and their step number goes in `PROGRESS.md`.
+Paths are relative to `.agents/` or `.agents/PLANS/`. `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`, `MATCH-FIX.md`, `MISSING-FOLDER-FIX.md` and `MULTI_FOLDER.md` are step lists without phase IDs: their commits use `Task: none` and their step number goes in `PROGRESS.md`.
 
 **Precedence:** the user's latest message, then this file, then the feature plan, then `Initial Plan.md`. Where a feature plan amends the base plan (for example the main-DB migrations `0004`/`0005` added by the library plan, which amend FX's "main schema untouched"), the amendment wins. Fixtures beat assumptions: if captured data disagrees with a plan's hypothesis about Bandcamp or an email format, follow the fixture and note it in `PROGRESS.md`.
 

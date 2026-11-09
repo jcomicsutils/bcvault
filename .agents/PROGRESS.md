@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## Current
-Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  Updated: 2026-11-09
+Task: none (idle; next: AUTO_SYNC or MULTI_FOLDER, see `ROADMAP.md` §3)  ·  Branch: main  ·  Updated: 2026-11-09
 
 ## Done
 - B0.1 to B5.x: base engine (phase-sized commits, before the commit convention)
@@ -63,6 +63,7 @@ Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  
 - none: release v0.1.1 bump
 - none: release v0.1.2 bump
 - none: pre-push hook installing bcvault-fx to ~/.local/bin and updating desktop entry; tracked .agents in git
+- none: sync ROADMAP.md and AGENTS.md to list and track all plans including MULTI_FOLDER
 
 ## Milestones
 - [x] Base engine (Phase 0 - 5)
