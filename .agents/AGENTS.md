@@ -51,6 +51,7 @@ For every task ID in the plan you are executing:
 11. Versions in the plans are a known-good baseline. If an API has drifted, fix the call site rather than downgrading. All `egui*`/`eframe` crates share one minor version; check `cargo tree -d` after dependency changes.
 12. Network, disk and mailbox politeness settings keep their conservative defaults unless the user changes them.
 13. **SemVer and git tags.** Follow Semantic Versioning (maintain coherent version numbers: patch for fixes, minor for features/breaking migrations while on 0.x). Always create annotated SemVer git tags (`vMAJOR.MINOR.PATCH`) whenever releases or significant milestones land. Use version tags exclusively (no `milestone/<ID>` tags). Never leave releases untagged.
+14. **Always update `PROGRESS.md`.** Every change, task completion, release bump, hotfix, or architectural deviation must update `PROGRESS.md` in the exact same commit. Never leave completed work undocumented or leave `PROGRESS.md` stale.
 
 ## 4. Quality gate
 
@@ -171,6 +172,8 @@ Bad (all rejected by the hook): `Update stuff`, `feat: add wall` (no scope), `fe
 - `main` is always green and shippable. No direct commits to `main` except `docs(plans)` and `chore` housekeeping approved by the user.
 
 ## 7. `PROGRESS.md`
+
+**Mandatory rule: `PROGRESS.md` must ALWAYS be updated.** Every task, bugfix, chore, release bump, or decision must be recorded here in the same commit. Never leave completed work undocumented or leave `PROGRESS.md` stale.
 
 Stored under `.agents/PROGRESS.md` (FX also keeps `.agents/FX/PROGRESS-FX.md`). Template:
 

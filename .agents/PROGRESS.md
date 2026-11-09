@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## Current
-Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  Updated: 2026-11-08
+Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  Updated: 2026-11-09
 
 ## Done
 - B0.1 to B5.x: base engine (phase-sized commits, before the commit convention)
@@ -60,6 +60,9 @@ Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  
 - MISSING-FOLDER-FIX 5: document unavailable folder handling
 - none: resolve unavailable folder when all releases are archived or empty
 - none: visually differentiate archived releases on wall, drawer, and table; add sidebar archive icon
+- none: release v0.1.1 bump
+- none: release v0.1.2 bump
+- none: pre-push hook installing bcvault-fx to ~/.local/bin and updating desktop entry; tracked .agents in git
 
 ## Milestones
 - [x] Base engine (Phase 0 - 5)
@@ -72,7 +75,7 @@ Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  
 - [x] L5: FX integration and polish
 - [x] L6: Hardening
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
-- Note: no `milestone/*` tags exist; `v0.1.0` points at the current `main` head and covers base, FX and library
+- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; current HEAD is tagged `v0.1.2`).
 
 ## Open questions (needs the user)
 - 2026-11-08: create `milestone/F*` and `milestone/L*` tags retroactively, or record skipping them? (blocking: no)
@@ -84,7 +87,7 @@ Task: none (idle; next: AUTO_SYNC, see `ROADMAP.md` §3)  ·  Branch: main  ·  
 - 2026-11-08: Replaced `{downloaded}/{eligible}/{total}` sidebar badge with `{eligible dl} (+ {non-eligible dl})/eligible/page total`. Updated SQL queries to determine current page releases via latest sync timestamps and split downloaded releases into eligible vs. non-eligible (paid or off-page). Added spring motion in FX and detailed hover tooltips across both front-ends.
 - 2026-11-08: Library work was committed directly on `main` (no `phase/L*` branches, no milestone tags). Migration numbers differ from the plan: `0003` was already taken by `custom_artist_name`, so library is `0004_library.sql`, and the badge rework added `0005_artist_folder_local_only.sql`. Planned: `0006` auto sync, `0007` archive, mail takes the next free number.
 - 2026-11-08: L2.2 was committed as `feat(library): greedy 1-to-1 candidate assignment` (plan: `assign matches one-to-one and detect conflicts`); L1.5 (fixture builder) was folded into L1.3, as the plan allowed. `COMMIT_PLAN.md` updated to match.
-- 2026-11-08: `.agents/` is excluded via `.git/info/exclude`, so plan documents are not committed.
+- 2026-11-09: `.agents/` is now tracked in git (previously excluded via `.git/info/exclude`). Added `.githooks/pre-push` to automatically copy the newest compiled `bcvault-fx` binary to `~/.local/bin/` and generate/update `bcvault-fx.desktop` with standard audio category and generic icon.
 - 2026-11-08: T0 tooling: integrated architectural guards (UI purity, square look, single gate, secrets in logs, migration immutability) into scripts/check.sh and scripts/guards.sh; skipped commit hook and commit message enforcement ceremony. Fixed synchronous settings JSON export in bcvault-fx to run off the UI thread via spawn_blocking.
 - 2026-11-08: Applied MISSING-FOLDER-FIX plan: when an artist's linked folder or out_dir is unavailable (Missing or Unreadable), verify emits FolderUnavailable instead of silently keeping Unknown releases. Attribution checks each release against its true root so releases elsewhere verify normally. Unavailable roots are never auto-resolved, even with on_missing = Auto; the Resolve Unavailable Folder dialog provides Keep, Repoint, and Deleted policies with single-batch undo and optional unlinking. Added FOLDER n warning dock chips, Resolve unavailable folder... sidebar actions, and derived FOLDER MISSING badges in both classic and FX front-ends. Excluded Unknown releases from mass-missing ratio calculations.
 - 2026-11-09: Fixed unavailable folder resolution stalling when releases under a missing folder are already archived or empty: `verify_files` now includes all unavailable linked folders in scope so `FolderUnavailable` is reliably emitted, allowing unlinking and repointing via the modal. Added monospace rectangular `ARCHIVED` badges on Wall view cards (matching `UPDATE`/`MISSING`), `ARCHIVED (FILES REMOVED)` status in detail drawer with suppressed "Open Folder" action, dimmed format labels in table view, and geometric `Archive` box icons in the artist sidebar for artists with archived releases.
