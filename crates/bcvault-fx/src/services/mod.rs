@@ -268,3 +268,15 @@ async fn run_fx_loop(
         }
     }
 }
+
+pub fn export_settings_json(
+    rt: &tokio::runtime::Handle,
+    out_dir: std::path::PathBuf,
+    json: String,
+) {
+    rt.spawn_blocking(move || {
+        let export_path = out_dir.join("bcvault-settings.json");
+        let _ = std::fs::create_dir_all(&out_dir);
+        let _ = std::fs::write(export_path, json);
+    });
+}

@@ -483,12 +483,14 @@ pub fn show_modals(
                 if paint::sharp_button(ui, "Cancel").clicked() {
                     close_modal = true;
                 }
-                if paint::sharp_button(ui, "Export Settings JSON").clicked() {
-                    let export_path = draft.out_dir.join("bcvault-settings.json");
-                    if let Ok(json) = serde_json::to_string_pretty(&draft) {
-                        let _ = std::fs::create_dir_all(&draft.out_dir);
-                        let _ = std::fs::write(export_path, json);
-                    }
+                if paint::sharp_button(ui, "Export Settings JSON").clicked()
+                    && let Ok(json) = serde_json::to_string_pretty(&draft)
+                {
+                    crate::services::export_settings_json(
+                        rt_handle,
+                        draft.out_dir.clone(),
+                        json,
+                    );
                 }
             });
         }
