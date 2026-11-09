@@ -858,14 +858,17 @@ async fn wiremock_sync_verify_moving_album_auto_relinks_silently() {
     let db_path = dir.path().join("sync_verify_relink.db");
     let pool = DbPool::open(&db_path).unwrap();
 
-    let artist_dir = dir.path().join("Artist 777");
+    // Linked folders are stored canonicalized; on Windows the temp dir can be
+    // an 8.3 short path (RUNNER~1) that canonicalizes to the long form.
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    let artist_dir = root.join("Artist 777");
     let album_dir = artist_dir.join("Album 1");
     std::fs::create_dir_all(&album_dir).unwrap();
     std::fs::write(album_dir.join("01.mp3"), b"audio").unwrap();
     std::fs::write(album_dir.join("02.mp3"), b"audio").unwrap();
     std::fs::write(album_dir.join("03.mp3"), b"audio").unwrap();
 
-    let out_dir = dir.path().join("downloads");
+    let out_dir = root.join("downloads");
     std::fs::create_dir_all(&out_dir).unwrap();
 
     let (tx, mut rx) = mpsc::unbounded_channel();
