@@ -464,6 +464,15 @@ impl Supervisor {
                     svc.resolve_missing(batch_id, decisions, remember).await;
                 });
             }
+            UiToWorkerCommand::ResolveUnavailable {
+                batch_id,
+                decisions,
+            } => {
+                let svc = self.library_service.clone();
+                tokio::spawn(async move {
+                    svc.resolve_unavailable(batch_id, decisions).await;
+                });
+            }
             UiToWorkerCommand::RelinkRelease { key, path } => {
                 let svc = self.library_service.clone();
                 tokio::spawn(async move {

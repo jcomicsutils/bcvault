@@ -85,6 +85,10 @@ pub enum UiToWorkerCommand {
         decisions: Vec<crate::types::MissingDecision>,
         remember: Option<crate::types::RememberChoice>,
     },
+    ResolveUnavailable {
+        batch_id: u64,
+        decisions: Vec<crate::types::UnavailableDecision>,
+    },
     RelinkRelease {
         key: ItemKey,
         path: PathBuf,

@@ -17,8 +17,8 @@ use crate::library::verify::{
 use crate::types::{
     ArtistFolder, BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus,
     LogLevel, MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem,
-    OnMissing, ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope, UnavailableRoot,
-    VerifyOutcome, VerifyTrigger,
+    OnMissing, ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope,
+    UnavailableAction, UnavailableDecision, UnavailableRoot, VerifyOutcome, VerifyTrigger,
 };
 use crate::worker::bridge::UiBridge;
 use crate::worker::messages::WorkerToUiEvent;
@@ -348,6 +348,110 @@ impl LibraryService {
                     format!("Failed to resolve missing batch {batch_id}: {e}"),
                     None,
                 );
+            }
+        }
+    }
+
+    /// Resolves unavailable folders according to user decisions.
+    pub async fn resolve_unavailable(&self, batch_id: u64, decisions: Vec<UnavailableDecision>) {
+        let _guard = self.job_lock.lock().await;
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+
+        for dec in decisions {
+            match dec.action {
+                UnavailableAction::Keep => {
+                    self.acked_unavailable.lock().await.insert(dec.root);
+                }
+                UnavailableAction::Deleted { policy, unlink } => {
+                    let keys = dec.keys;
+                    let b_id = batch_id as i64;
+                    let pool_clone = pool.clone();
+                    let bridge_clone = bridge.clone();
+
+                    let res = pool_clone
+                        .writer
+                        .call(move |c| {
+                            let mut valid_keys = Vec::new();
+                            for &k in &keys {
+                                if let Some(r) = releases::get_release(c, k)?
+                                    && r.downloaded
+                                    && r.local_status != Some(LocalStatus::Archived)
+                                {
+                                    valid_keys.push(k);
+                                }
+                            }
+
+                            if !valid_keys.is_empty() {
+                                match policy {
+                                    DeletedPolicy::KeepMarked => {
+                                        lib_repo::archive(c, &valid_keys, b_id)?;
+                                    }
+                                    DeletedPolicy::MarkNotDownloaded => {
+                                        lib_repo::unmark(c, &valid_keys, b_id)?;
+                                    }
+                                }
+                            }
+
+                            let mut touched_bands = std::collections::HashSet::new();
+                            let mut updated = Vec::new();
+                            for &k in &valid_keys {
+                                if let Some(r) = releases::get_release(c, k)? {
+                                    touched_bands.insert(r.band_id);
+                                    updated.push(r);
+                                }
+                            }
+
+                            if unlink && let UnavailableRoot::Linked { band_id } = dec.root {
+                                lib_repo::unlink_folder(c, band_id)?;
+                                touched_bands.insert(band_id);
+                            }
+
+                            let mut stats_list = Vec::new();
+                            for &b in &touched_bands {
+                                stats_list.push((b, artists::stats_with_quota(c, b)?));
+                            }
+
+                            let summary = lib_repo::get_batch_summary(c, b_id)?.unwrap_or_default();
+                            Ok::<_, DbError>((updated, stats_list, summary))
+                        })
+                        .await;
+
+                    if let Ok((updated_releases, stats_list, summary)) = res {
+                        if unlink && let UnavailableRoot::Linked { band_id } = dec.root {
+                            self.pending_first_matches.lock().await.remove(&band_id);
+                            self.acked_unavailable
+                                .lock()
+                                .await
+                                .remove(&UnavailableRoot::Linked { band_id });
+                            bridge_clone.emit(WorkerToUiEvent::FolderStatus {
+                                band_id,
+                                folder: None,
+                            });
+                            if let Ok(Some(av)) = pool
+                                .reader
+                                .call(move |c| artists::get_view(c, band_id))
+                                .await
+                            {
+                                bridge_clone.emit(WorkerToUiEvent::ArtistUpserted(av));
+                            }
+                        }
+
+                        for r in updated_releases {
+                            bridge_clone.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(r)));
+                        }
+                        for (band_id, stats) in stats_list {
+                            bridge_clone.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                        }
+                        bridge_clone.emit(WorkerToUiEvent::LibraryApplied { batch_id, summary });
+                        bridge_clone.log(
+                            LogLevel::Info,
+                            "library",
+                            format!("Resolved unavailable folder batch {batch_id}"),
+                            None,
+                        );
+                    }
+                }
             }
         }
     }
@@ -4329,7 +4433,7 @@ mod tests {
             }
         }
         assert_eq!(prompt_opt, Some(true), "SyncInteractive must prompt");
-        let _batch_id = batch_id_opt.unwrap();
+        let batch_id = batch_id_opt.unwrap();
 
         // 2. SyncBackground -> prompt: false
         svc.verify_files(
@@ -4347,10 +4451,15 @@ mod tests {
         assert_eq!(prompt_bg, Some(false), "SyncBackground must NOT prompt");
 
         // 3. User chooses Keep -> added to session acked_unavailable
-        svc.acked_unavailable
-            .lock()
-            .await
-            .insert(UnavailableRoot::Linked { band_id });
+        svc.resolve_unavailable(
+            batch_id,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::Linked { band_id },
+                keys: vec![key],
+                action: UnavailableAction::Keep,
+            }],
+        )
+        .await;
 
         // 4. Next SyncInteractive -> prompt: false because root is acked!
         svc.verify_files(
@@ -4876,6 +4985,281 @@ mod tests {
             Some(false),
             "Mass missing guard must NOT trigger for Unknown releases"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_unavailable_actions_and_undo() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("resolve_unavail_test.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 508;
+        let artist_dir = dir.path().join("Artist 508");
+        fs::create_dir_all(&artist_dir).unwrap();
+        let out_dir = dir.path().join("Downloads");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let key1 = ItemKey::new(ItemType::Album, 5081);
+        let key2 = ItemKey::new(ItemType::Album, 5082);
+
+        let a_dir = artist_dir.clone();
+        let o_dir = out_dir.clone();
+
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-508",
+                        name: "Artist 508",
+                        url: "https://artist508.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+
+                for &(k, name) in &[(key1, "Album 1"), (key2, "Album 2")] {
+                    let disc = DiscoveredRelease {
+                        key: k,
+                        band_id,
+                        title: name,
+                        artist_name: "Artist 508",
+                        url: &format!("https://artist508.bandcamp.com/album/{name}"),
+                        cover_url: None,
+                        art_id: None,
+                    };
+                    releases::upsert_discovered(c, &disc)?;
+                    lib_repo::adopt(
+                        c,
+                        k,
+                        &a_dir.join(name),
+                        Some(crate::types::AudioFormat::Flac),
+                        crate::types::Origin::App,
+                        None,
+                        b_id,
+                    )?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        fs::remove_dir_all(&artist_dir).unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(
+            SyncScope::Selected(vec![band_id]),
+            VerifyTrigger::Manual,
+            cancel,
+        )
+        .await;
+
+        let mut batch_id = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let WorkerToUiEvent::FolderUnavailable { batch_id: b_id, .. } = ev {
+                batch_id = b_id;
+            }
+        }
+        assert!(batch_id > 0);
+
+        // 1. Resolve key1 with Deleted { KeepMarked, unlink: false }
+        svc.resolve_unavailable(
+            batch_id,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::Linked { band_id },
+                keys: vec![key1],
+                action: UnavailableAction::Deleted {
+                    policy: DeletedPolicy::KeepMarked,
+                    unlink: false,
+                },
+            }],
+        )
+        .await;
+
+        let rel1 = pool
+            .reader
+            .call(move |c| releases::get_release(c, key1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rel1.downloaded, "KeepMarked keeps downloaded = 1");
+        assert_eq!(rel1.local_status, Some(LocalStatus::Archived));
+
+        // Folder link should still exist
+        let folder = pool
+            .reader
+            .call(move |c| lib_repo::get_folder(c, band_id))
+            .await
+            .unwrap();
+        assert!(folder.is_some());
+
+        // 2. Resolve key2 with Deleted { MarkNotDownloaded, unlink: true }
+        svc.resolve_unavailable(
+            batch_id,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::Linked { band_id },
+                keys: vec![key2],
+                action: UnavailableAction::Deleted {
+                    policy: DeletedPolicy::MarkNotDownloaded,
+                    unlink: true,
+                },
+            }],
+        )
+        .await;
+
+        let rel2 = pool
+            .reader
+            .call(move |c| releases::get_release(c, key2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rel2.downloaded, "MarkNotDownloaded sets downloaded = 0");
+        assert_eq!(rel2.local_status, None);
+        assert_eq!(rel2.local_path, None);
+
+        // Folder link should now be unlinked
+        let folder_after = pool
+            .reader
+            .call(move |c| lib_repo::get_folder(c, band_id))
+            .await
+            .unwrap();
+        assert!(folder_after.is_none());
+
+        // 3. Undo the batch restores the releases!
+        svc.undo_batch(batch_id).await;
+
+        let rel1_restored = pool
+            .reader
+            .call(move |c| releases::get_release(c, key1))
+            .await
+            .unwrap()
+            .unwrap();
+        let rel2_restored = pool
+            .reader
+            .call(move |c| releases::get_release(c, key2))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(rel1_restored.local_status, Some(LocalStatus::Present));
+        assert!(rel2_restored.downloaded);
+        assert_eq!(rel2_restored.local_status, Some(LocalStatus::Present));
+
+        // Invariants check
+        pool.reader
+            .call(|c| lib_repo::assert_library_invariants(c))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_unavailable_stale_keys_skipped() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("stale_keys_test.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 509;
+        let key_not_downloaded = ItemKey::new(ItemType::Album, 5091);
+        let key_already_archived = ItemKey::new(ItemType::Album, 5092);
+
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-509",
+                        name: "Artist 509",
+                        url: "https://artist509.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+
+                // 1. Release not downloaded
+                let disc1 = DiscoveredRelease {
+                    key: key_not_downloaded,
+                    band_id,
+                    title: "Not Downloaded",
+                    artist_name: "Artist 509",
+                    url: "https://artist509.bandcamp.com/album/1",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc1)?;
+
+                // 2. Release already archived
+                let disc2 = DiscoveredRelease {
+                    key: key_already_archived,
+                    band_id,
+                    title: "Already Archived",
+                    artist_name: "Artist 509",
+                    url: "https://artist509.bandcamp.com/album/2",
+                    cover_url: None,
+                    art_id: None,
+                };
+                releases::upsert_discovered(c, &disc2)?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key_already_archived,
+                    &PathBuf::from("/some/path"),
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                lib_repo::archive(c, &[key_already_archived], b_id)?;
+
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        // Resolving stale keys should not error and skip them
+        svc.resolve_unavailable(
+            1,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::Linked { band_id },
+                keys: vec![key_not_downloaded, key_already_archived],
+                action: UnavailableAction::Deleted {
+                    policy: DeletedPolicy::KeepMarked,
+                    unlink: false,
+                },
+            }],
+        )
+        .await;
+
+        let rel1 = pool
+            .reader
+            .call(move |c| releases::get_release(c, key_not_downloaded))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rel1.downloaded);
+
+        let rel2 = pool
+            .reader
+            .call(move |c| releases::get_release(c, key_already_archived))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rel2.local_status, Some(LocalStatus::Archived));
     }
 
     #[tokio::test]
