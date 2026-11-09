@@ -303,31 +303,44 @@ pub fn reclassify_from_pricing_json(conn: &mut Connection) -> Result<(), DbError
 
 pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, DbError> {
     let mut stmt = conn.prepare(
-        "WITH max_seen AS (
-             SELECT band_id, MAX(last_seen_at) AS latest_seen
-             FROM releases
-             GROUP BY band_id
-         ),
-         rel_stats AS (
+        "WITH rel_grouped AS (
              SELECT r.band_id,
-                    COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
+                    r.last_seen_at,
+                    COUNT(*) AS total,
                     COALESCE(SUM(r.downloaded), 0) AS downloaded,
-                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
-                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) AS non_eligible_downloaded,
-                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
-                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
-                    COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
+                    COALESCE(SUM(CASE WHEN r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
+                    COALESCE(SUM(CASE WHEN r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
+                    COALESCE(SUM(CASE WHEN r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
                     COALESCE(SUM(CASE WHEN r.local_status = 'archived' THEN 1 ELSE 0 END), 0) AS archived,
                     COALESCE(SUM(CASE WHEN r.local_status = 'missing' THEN 1 ELSE 0 END), 0) AS missing_files
              FROM releases r
-             JOIN max_seen m ON m.band_id = r.band_id
-             GROUP BY r.band_id
+             GROUP BY r.band_id, r.last_seen_at
+         ),
+         max_seen AS (
+             SELECT band_id, MAX(last_seen_at) AS latest_seen
+             FROM rel_grouped
+             GROUP BY band_id
+         ),
+         rel_stats AS (
+             SELECT g.band_id,
+                    COALESCE(SUM(CASE WHEN g.last_seen_at >= m.latest_seen THEN g.total ELSE 0 END), 0) AS total,
+                    COALESCE(SUM(g.downloaded), 0) AS downloaded,
+                    COALESCE(SUM(CASE WHEN g.last_seen_at >= m.latest_seen THEN g.eligible_downloaded ELSE 0 END), 0) AS eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN g.last_seen_at >= m.latest_seen THEN g.eligible ELSE 0 END), 0) AS eligible,
+                    COALESCE(SUM(CASE WHEN g.last_seen_at >= m.latest_seen THEN g.email_required ELSE 0 END), 0) AS email_required,
+                    COALESCE(SUM(CASE WHEN g.last_seen_at >= m.latest_seen THEN g.unknown ELSE 0 END), 0) AS unknown,
+                    COALESCE(SUM(g.archived), 0) AS archived,
+                    COALESCE(SUM(g.missing_files), 0) AS missing_files
+             FROM rel_grouped g
+             JOIN max_seen m ON m.band_id = g.band_id
+             GROUP BY g.band_id
          )
          SELECT s.band_id,
                 s.total,
                 s.downloaded + COALESCE(af.local_only_count, 0) AS downloaded,
                 s.eligible_downloaded,
-                s.non_eligible_downloaded + COALESCE(af.local_only_count, 0) AS non_eligible_downloaded,
+                (s.downloaded - s.eligible_downloaded) + COALESCE(af.local_only_count, 0) AS non_eligible_downloaded,
                 s.eligible,
                 s.email_required,
                 s.unknown,
