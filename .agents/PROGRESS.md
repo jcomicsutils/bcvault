@@ -64,6 +64,7 @@ Task: none (idle; next: AUTO_SYNC or MULTI_FOLDER, see `ROADMAP.md` §3)  ·  Br
 - none: release v0.1.2 bump
 - none: pre-push hook installing bcvault-fx to ~/.local/bin and updating desktop entry; tracked .agents in git
 - none: sync ROADMAP.md and AGENTS.md to list and track all plans including MULTI_FOLDER
+- none: decrement local_only_count when attaching orphan folder to release
 
 ## Milestones
 - [x] Base engine (Phase 0 - 5)
@@ -92,3 +93,4 @@ Task: none (idle; next: AUTO_SYNC or MULTI_FOLDER, see `ROADMAP.md` §3)  ·  Br
 - 2026-11-08: T0 tooling: integrated architectural guards (UI purity, square look, single gate, secrets in logs, migration immutability) into scripts/check.sh and scripts/guards.sh; skipped commit hook and commit message enforcement ceremony. Fixed synchronous settings JSON export in bcvault-fx to run off the UI thread via spawn_blocking.
 - 2026-11-08: Applied MISSING-FOLDER-FIX plan: when an artist's linked folder or out_dir is unavailable (Missing or Unreadable), verify emits FolderUnavailable instead of silently keeping Unknown releases. Attribution checks each release against its true root so releases elsewhere verify normally. Unavailable roots are never auto-resolved, even with on_missing = Auto; the Resolve Unavailable Folder dialog provides Keep, Repoint, and Deleted policies with single-batch undo and optional unlinking. Added FOLDER n warning dock chips, Resolve unavailable folder... sidebar actions, and derived FOLDER MISSING badges in both classic and FX front-ends. Excluded Unknown releases from mass-missing ratio calculations.
 - 2026-11-09: Fixed unavailable folder resolution stalling when releases under a missing folder are already archived or empty: `verify_files` now includes all unavailable linked folders in scope so `FolderUnavailable` is reliably emitted, allowing unlinking and repointing via the modal. Added monospace rectangular `ARCHIVED` badges on Wall view cards (matching `UPDATE`/`MISSING`), `ARCHIVED (FILES REMOVED)` status in detail drawer with suppressed "Open Folder" action, dimmed format labels in table view, and geometric `Archive` box icons in the artist sidebar for artists with archived releases.
+- 2026-11-09: Fixed sidebar badge retaining (+1) count after manually matching an orphan local folder to a release: implemented lib_repo::attach to decrement artist_folders.local_only_count and record event kind 'attached', and updated lib_repo::undo_batch to restore local_only_count on batch reversal.

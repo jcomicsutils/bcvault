@@ -1874,8 +1874,27 @@ impl LibraryService {
                             path,
                             format,
                             folder_mtime,
+                        } => {
+                            let mtime = folder_mtime.or_else(|| {
+                                std::fs::metadata(&path)
+                                    .and_then(|m| m.modified())
+                                    .ok()
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs() as i64)
+                            });
+                            lib_repo::adopt(
+                                c,
+                                key,
+                                &path,
+                                format,
+                                crate::types::Origin::Imported,
+                                mtime,
+                                actual_batch_id,
+                            )?;
+                            summary.adopted += 1;
+                            touched_keys.push(key);
                         }
-                        | MatchDecision::Attach {
+                        MatchDecision::Attach {
                             key,
                             path,
                             format,
@@ -1888,7 +1907,7 @@ impl LibraryService {
                                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                     .map(|d| d.as_secs() as i64)
                             });
-                            lib_repo::adopt(
+                            lib_repo::attach(
                                 c,
                                 key,
                                 &path,
@@ -2235,6 +2254,161 @@ mod tests {
         assert_eq!(stats_after_unlink.non_eligible_downloaded, 0);
         assert_eq!(stats_after_unlink.downloaded, 1);
         assert_eq!(stats_after_unlink.format_sidebar_badge(), "1/1/1");
+    }
+
+    #[tokio::test]
+    async fn test_attach_orphan_folder_decrements_local_only_and_clears_badge_plus() {
+        let dir = tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("attach_test.db");
+        let music_dir = root.join("music");
+        fs::create_dir_all(&music_dir).unwrap();
+
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 8888;
+        pool.writer
+            .call(move |c| {
+                let mut st = Settings::default();
+                st.folder_style.templates =
+                    vec!["{artist} - {title}".to_string(), "{title}".to_string()];
+                settings::set_settings(c, &st)?;
+
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "attach-artist",
+                        name: "AttachArtist",
+                        url: "https://attach.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+
+                // 2 releases on page, free & not yet downloaded
+                c.execute(
+                    "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+                     VALUES ('album', 201, ?1, 'Free 1', 'AttachArtist', 'https://attach.bandcamp.com/album/201', 'free', 0, 1000)",
+                    rusqlite::params![band_id],
+                )?;
+                c.execute(
+                    "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+                     VALUES ('album', 202, ?1, 'Free 2', 'AttachArtist', 'https://attach.bandcamp.com/album/202', 'free', 0, 1000)",
+                    rusqlite::params![band_id],
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        // Local artist folder has Free 1 (matches 201), plus 1 orphan folder
+        let artist_dir = music_dir.join("AttachArtist");
+        let album_free = artist_dir.join("AttachArtist - Free 1");
+        let album_orphan = artist_dir.join("AttachArtist - Unmatched Live 1999");
+        fs::create_dir_all(&album_free).unwrap();
+        fs::write(album_free.join("01.mp3"), b"audio").unwrap();
+        fs::create_dir_all(&album_orphan).unwrap();
+        fs::write(album_orphan.join("01.mp3"), b"audio").unwrap();
+
+        let cancel = CancellationToken::new();
+
+        // 1. Link artist folder with auto_apply_confident true
+        svc.link_artist_folder(band_id, artist_dir.clone(), true, cancel.clone())
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        let report_opt = events.iter().find_map(|e| match e {
+            WorkerToUiEvent::ReconcileReport { report } => Some(report),
+            _ => None,
+        });
+        let report = report_opt.expect("should have emitted ReconcileReport");
+        assert_eq!(report.linked.len(), 1);
+        assert_eq!(report.local_only.len(), 1);
+
+        // Verify initial badge is "1 (+1)/2/2"
+        let stats_before = pool
+            .reader
+            .call(move |c| releases::artist_stats_for_one(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(stats_before.total, 2);
+        assert_eq!(stats_before.eligible, 2);
+        assert_eq!(stats_before.eligible_downloaded, 1);
+        assert_eq!(stats_before.non_eligible_downloaded, 1);
+        assert_eq!(stats_before.downloaded, 2);
+        assert_eq!(stats_before.format_sidebar_badge(), "1 (+1)/2/2");
+
+        // 2. Attach the orphan folder to release 202
+        let key_202 = ItemKey::new(ItemType::Album, 202);
+        let decisions = vec![MatchDecision::Attach {
+            key: key_202,
+            path: album_orphan.clone(),
+            format: Some(crate::types::AudioFormat::Mp3_320),
+            folder_mtime: None,
+        }];
+        svc.apply_reconcile(report.batch_id, decisions).await;
+
+        // Verify local_only_count decremented to 0
+        let count_in_db: u32 = pool
+            .reader
+            .call(move |c| {
+                Ok(c.query_row(
+                    "SELECT local_only_count FROM artist_folders WHERE band_id = ?1",
+                    rusqlite::params![band_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count_in_db, 0);
+
+        // Verify stats: non_eligible_downloaded is 0, badge is "2/2/2" without (+1)
+        let stats_after = pool
+            .reader
+            .call(move |c| releases::artist_stats_for_one(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(stats_after.eligible_downloaded, 2);
+        assert_eq!(stats_after.non_eligible_downloaded, 0);
+        assert_eq!(stats_after.downloaded, 2);
+        assert_eq!(stats_after.format_sidebar_badge(), "2/2/2");
+
+        // 3. Undo the batch and verify stats revert back to "1 (+1)/2/2"
+        svc.undo_batch(report.batch_id).await;
+
+        let count_after_undo: u32 = pool
+            .reader
+            .call(move |c| {
+                Ok(c.query_row(
+                    "SELECT local_only_count FROM artist_folders WHERE band_id = ?1",
+                    rusqlite::params![band_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count_after_undo, 1);
+
+        let stats_after_undo = pool
+            .reader
+            .call(move |c| releases::artist_stats_for_one(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(stats_after_undo.eligible_downloaded, 1);
+        assert_eq!(stats_after_undo.non_eligible_downloaded, 1);
+        assert_eq!(stats_after_undo.format_sidebar_badge(), "1 (+1)/2/2");
     }
 
     #[tokio::test]

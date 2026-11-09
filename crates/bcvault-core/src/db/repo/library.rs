@@ -362,19 +362,22 @@ pub fn skip_missing(conn: &Connection, key: ItemKey) -> Result<(), DbError> {
     Ok(())
 }
 
-pub fn adopt(
-    conn: &mut Connection,
+struct AdoptArgs<'a> {
     key: ItemKey,
-    path: &Path,
+    path: &'a Path,
     format: Option<AudioFormat>,
     origin: Origin,
     folder_mtime: Option<Ts>,
     batch_id: i64,
-) -> Result<(), DbError> {
-    let old_snap = get_release_snapshot(conn, key)?
+    kind: &'a str,
+    decrement_local_only: bool,
+}
+
+fn adopt_internal(conn: &mut Connection, args: AdoptArgs<'_>) -> Result<(), DbError> {
+    let old_snap = get_release_snapshot(conn, args.key)?
         .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
-    let path_str = path.to_string_lossy().into_owned();
+    let path_str = args.path.to_string_lossy().into_owned();
     let tx = conn.transaction()?;
     tx.execute(
         "UPDATE releases SET
@@ -391,28 +394,85 @@ pub fn adopt(
              remote_update_reason = NULL
          WHERE item_type = ?1 AND item_id = ?2",
         params![
-            key.kind.as_str(),
-            key.id,
-            folder_mtime,
-            format.map(|f| f.as_str()),
+            args.key.kind.as_str(),
+            args.key.id,
+            args.folder_mtime,
+            args.format.map(|f| f.as_str()),
             path_str,
-            origin.as_str(),
+            args.origin.as_str(),
         ],
     )?;
 
-    let new_snap = get_release_snapshot(&tx, key)?
+    if args.decrement_local_only {
+        tx.execute(
+            "UPDATE artist_folders
+             SET local_only_count = MAX(0, local_only_count - 1)
+             WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)",
+            params![args.key.kind.as_str(), args.key.id],
+        )?;
+    }
+
+    let new_snap = get_release_snapshot(&tx, args.key)?
         .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
     record_library_event(
         &tx,
-        batch_id,
-        key,
-        "adopted",
+        args.batch_id,
+        args.key,
+        args.kind,
         Some(&old_snap),
         Some(&new_snap),
     )?;
     tx.commit()?;
     Ok(())
+}
+
+pub fn adopt(
+    conn: &mut Connection,
+    key: ItemKey,
+    path: &Path,
+    format: Option<AudioFormat>,
+    origin: Origin,
+    folder_mtime: Option<Ts>,
+    batch_id: i64,
+) -> Result<(), DbError> {
+    adopt_internal(
+        conn,
+        AdoptArgs {
+            key,
+            path,
+            format,
+            origin,
+            folder_mtime,
+            batch_id,
+            kind: "adopted",
+            decrement_local_only: false,
+        },
+    )
+}
+
+pub fn attach(
+    conn: &mut Connection,
+    key: ItemKey,
+    path: &Path,
+    format: Option<AudioFormat>,
+    origin: Origin,
+    folder_mtime: Option<Ts>,
+    batch_id: i64,
+) -> Result<(), DbError> {
+    adopt_internal(
+        conn,
+        AdoptArgs {
+            key,
+            path,
+            format,
+            origin,
+            folder_mtime,
+            batch_id,
+            kind: "attached",
+            decrement_local_only: true,
+        },
+    )
 }
 
 pub fn relink(
@@ -685,10 +745,18 @@ pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, 
     };
 
     let tx = conn.transaction()?;
-    for (key, _ev_kind, old_json) in events {
+    for (key, ev_kind, old_json) in events {
         if let Some(json_str) = old_json {
             let snap: ReleaseSnapshot = serde_json::from_str(&json_str)?;
             apply_release_snapshot(&tx, key, &snap)?;
+        }
+        if ev_kind == "attached" {
+            tx.execute(
+                "UPDATE artist_folders
+                 SET local_only_count = local_only_count + 1
+                 WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)",
+                params![key.kind.as_str(), key.id],
+            )?;
         }
     }
 
@@ -1036,5 +1104,58 @@ mod tests {
         set_local_status(&conn, key100, Some(LocalStatus::Present)).unwrap();
         // key100 has downloaded = 0, so set_local_status Some does not set local_status
         assert_library_invariants(&conn).unwrap();
+
+        // 10. Test attach decrements local_only_count and undo_batch restores it
+        update_folder_local_only_count(&conn, 1, 2).unwrap();
+        let b_attach = create_batch(
+            &conn,
+            "adopt",
+            &BatchSummary {
+                adopted: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        attach(
+            &mut conn,
+            key100,
+            path100,
+            Some(AudioFormat::Flac),
+            Origin::Imported,
+            None,
+            b_attach,
+        )
+        .unwrap();
+
+        let count_after_attach: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after_attach, 1);
+
+        let timeline_attach = get_item_timeline(&conn, key100).unwrap();
+        assert_eq!(timeline_attach.last().unwrap().kind, "attached");
+
+        let snap_attached = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert!(snap_attached.downloaded);
+        assert_eq!(snap_attached.local_status, Some(LocalStatus::Present));
+
+        // Undo attach
+        undo_batch(&mut conn, b_attach).unwrap();
+        let count_after_undo: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after_undo, 2);
+
+        let snap_after_undo = get_release_snapshot(&conn, key100).unwrap().unwrap();
+        assert!(!snap_after_undo.downloaded);
+        assert_eq!(snap_after_undo.local_status, None);
     }
 }
