@@ -216,6 +216,28 @@ pub fn paint_folder_glyph(ui: &mut Ui, state: FolderState) -> Response {
     resp
 }
 
+/// Painter-drawn archive box glyph for archived artists in the sidebar.
+pub fn paint_archive_glyph(ui: &mut Ui) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(16.0, 14.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let min = rect.min;
+        let body = Rect::from_min_max(
+            Pos2::new(min.x + 1.0, min.y + 2.0),
+            Pos2::new(min.x + 13.0, min.y + 12.0),
+        );
+        sharp_rect(painter, body, pal::BG2, Stroke::new(1.0_f32, pal::TEXT_DIM));
+        painter.line_segment(
+            [
+                Pos2::new(min.x + 4.0, min.y + 7.0),
+                Pos2::new(min.x + 10.0, min.y + 7.0),
+            ],
+            Stroke::new(1.5_f32, pal::BORDER_HI),
+        );
+    }
+    resp
+}
+
 /// Painter-drawn sort direction triangle.
 pub fn paint_sort_arrow(painter: &Painter, center: Pos2, dir: SortDir, color: Color32) {
     let pts = match dir {

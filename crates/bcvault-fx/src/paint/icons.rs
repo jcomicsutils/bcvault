@@ -16,6 +16,7 @@ pub enum IconKind {
     Artists,
     Stats,
     Sidebar,
+    Archive,
 }
 
 /// Paints geometric icons built exclusively from lines, square rects, and triangles.
@@ -136,6 +137,13 @@ pub fn paint_icon(painter: &Painter, rect: Rect, kind: IconKind, color: Color32)
             painter.rect_stroke(s, egui::CornerRadius::ZERO, stroke, StrokeKind::Inside);
             let x = s.min.x + s.width() * 0.35;
             painter.line_segment([Pos2::new(x, s.min.y), Pos2::new(x, s.max.y)], stroke);
+        }
+        IconKind::Archive => {
+            painter.rect_stroke(s, egui::CornerRadius::ZERO, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [Pos2::new(s.min.x + 2.5, c.y), Pos2::new(s.max.x - 2.5, c.y)],
+                stroke,
+            );
         }
     }
 }

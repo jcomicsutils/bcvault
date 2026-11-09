@@ -472,26 +472,55 @@ fn draw_artist_row(
             };
             let (glyph_rect, glyph_resp) =
                 child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
-            let tip = match folder.state {
-                FolderState::Ok => format!("Linked: {}\nStatus: Reachable", folder.path.display()),
-                FolderState::Missing => {
+            let (tip, icon_kind) = match folder.state {
+                FolderState::Ok => {
+                    if stats.archived > 0 && stats.downloaded == stats.archived {
+                        (
+                            format!(
+                                "Linked (all archived): {}\nStatus: Reachable\n{} release(s) archived",
+                                folder.path.display(),
+                                stats.archived
+                            ),
+                            paint::icons::IconKind::Archive,
+                        )
+                    } else {
+                        (
+                            format!("Linked: {}\nStatus: Reachable", folder.path.display()),
+                            paint::icons::IconKind::Folder,
+                        )
+                    }
+                }
+                FolderState::Missing => (
                     format!(
                         "Linked: {}\nStatus: Missing\nRight-click to resolve",
                         folder.path.display()
-                    )
-                }
-                FolderState::Unreadable => {
-                    format!("Linked: {}\nStatus: Unreadable", folder.path.display())
-                }
+                    ),
+                    paint::icons::IconKind::Folder,
+                ),
+                FolderState::Unreadable => (
+                    format!("Linked: {}\nStatus: Unreadable", folder.path.display()),
+                    paint::icons::IconKind::Folder,
+                ),
             };
             glyph_resp.on_hover_text(tip);
             let p = child.painter();
-            paint::icons::paint_icon(p, glyph_rect, paint::icons::IconKind::Folder, th.text_dim);
+            paint::icons::paint_icon(p, glyph_rect, icon_kind, th.text_dim);
             let dot = Rect::from_min_max(
                 Pos2::new(glyph_rect.max.x - 4.0, glyph_rect.max.y - 4.0),
                 glyph_rect.max,
             );
             paint::rect_filled(p, dot, dot_color);
+            child.add_space(3.0);
+        } else if stats.archived > 0 {
+            let (glyph_rect, glyph_resp) =
+                child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
+            let tip = format!(
+                "Archived: {} release(s) archived (files removed, kept as done)",
+                stats.archived
+            );
+            glyph_resp.on_hover_text(tip);
+            let p = child.painter();
+            paint::icons::paint_icon(p, glyph_rect, paint::icons::IconKind::Archive, th.text_dim);
             child.add_space(3.0);
         }
         child.add(egui::Label::new(RichText::new(name).color(th.text)).truncate());

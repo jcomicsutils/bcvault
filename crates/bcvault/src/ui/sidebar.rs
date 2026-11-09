@@ -3,7 +3,7 @@ use crate::{
     ui::{
         state::{LinkFolderModalState, RenameArtistModalState, UiState},
         theme::pal,
-        widgets::{paint_folder_glyph, sharp_button, sharp_rect},
+        widgets::{paint_archive_glyph, paint_folder_glyph, sharp_button, sharp_rect},
     },
     worker::messages::UiToWorkerCommand,
 };
@@ -344,7 +344,17 @@ fn draw_artist_row(
         );
         if let Some(folder) = linked_folder {
             let tip = match folder.state {
-                FolderState::Ok => format!("Linked: {}\nStatus: Reachable", folder.path.display()),
+                FolderState::Ok => {
+                    if stats.archived > 0 && stats.downloaded == stats.archived {
+                        format!(
+                            "Linked (all archived): {}\nStatus: Reachable\n{} release(s) archived",
+                            folder.path.display(),
+                            stats.archived
+                        )
+                    } else {
+                        format!("Linked: {}\nStatus: Reachable", folder.path.display())
+                    }
+                }
                 FolderState::Missing => {
                     format!(
                         "Linked: {}\nStatus: Missing\nRight-click to resolve",
@@ -356,6 +366,13 @@ fn draw_artist_row(
                 }
             };
             paint_folder_glyph(&mut child, folder.state).on_hover_text(tip);
+            child.add_space(2.0);
+        } else if stats.archived > 0 {
+            let tip = format!(
+                "Archived: {} release(s) archived (files removed, kept as done)",
+                stats.archived
+            );
+            paint_archive_glyph(&mut child).on_hover_text(tip);
             child.add_space(2.0);
         }
         child.add(egui::Label::new(RichText::new(name).color(pal::TEXT)).truncate());

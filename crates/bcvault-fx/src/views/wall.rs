@@ -482,7 +482,10 @@ pub fn show(
                     th.warn,
                 );
             } else if row.rel.downloaded || is_selected {
+                let is_archived =
+                    row.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
                 let is_folder_missing = if !is_selected
+                    && !is_archived
                     && let Some(folder) = state.folders.get(&row.rel.band_id)
                     && folder.state != bcvault_core::types::FolderState::Ok
                 {
@@ -511,6 +514,20 @@ pub fn show(
                         "MISSING",
                         FontId::monospace(9.5),
                         th.warn,
+                    );
+                } else if is_archived {
+                    let arch_r = Rect::from_min_size(
+                        Pos2::new(cov_rect.max.x - 60.0, cov_rect.min.y + 6.0),
+                        Vec2::new(54.0, 16.0),
+                    );
+                    let border_col = if is_selected { th.accent } else { th.border };
+                    paint::rect(painter, arch_r, th.bg0, Stroke::new(1.0_f32, border_col));
+                    painter.text(
+                        arch_r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "ARCHIVED",
+                        FontId::monospace(9.5),
+                        th.text_dim,
                     );
                 } else {
                     let chk_r = Rect::from_min_size(

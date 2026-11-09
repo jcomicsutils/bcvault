@@ -141,16 +141,26 @@ pub fn show_drawer(
                                         );
                                     }
                                     if row.rel.downloaded {
-                                        let fmt_s = row
-                                            .rel
-                                            .downloaded_format
-                                            .map(|f| f.label())
-                                            .unwrap_or("MANUAL");
-                                        ui.label(
-                                            RichText::new(format!("DOWNLOADED ({fmt_s})"))
-                                                .monospace()
-                                                .color(th.ok),
-                                        );
+                                        if row.rel.local_status
+                                            == Some(bcvault_core::types::LocalStatus::Archived)
+                                        {
+                                            ui.label(
+                                                RichText::new("ARCHIVED (FILES REMOVED)")
+                                                    .monospace()
+                                                    .color(th.text_dim),
+                                            );
+                                        } else {
+                                            let fmt_s = row
+                                                .rel
+                                                .downloaded_format
+                                                .map(|f| f.label())
+                                                .unwrap_or("MANUAL");
+                                            ui.label(
+                                                RichText::new(format!("DOWNLOADED ({fmt_s})"))
+                                                    .monospace()
+                                                    .color(th.ok),
+                                            );
+                                        }
                                     }
                                 });
 
@@ -170,7 +180,9 @@ pub fn show_drawer(
                                             pending_actions.push(FxAction::DownloadKey(key));
                                         }
                                     }
-                                    if row.rel.local_path.is_some()
+                                    if row.rel.local_status
+                                        != Some(bcvault_core::types::LocalStatus::Archived)
+                                        && row.rel.local_path.is_some()
                                         && paint::sharp_button(ui, "Open Folder").clicked()
                                     {
                                         pending_actions.push(FxAction::OpenFolder(key));

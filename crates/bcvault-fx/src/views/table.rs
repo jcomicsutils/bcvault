@@ -227,7 +227,15 @@ pub fn show(
 
                 row_ui.col(|ui| {
                     let fmt_s = w.rel.downloaded_format.map(|f| f.label()).unwrap_or("-");
-                    let col = if w.rel.downloaded { th.ok } else { th.text_dim };
+                    let is_archived =
+                        w.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
+                    let col = if is_archived {
+                        th.text_dim
+                    } else if w.rel.downloaded {
+                        th.ok
+                    } else {
+                        th.text_dim
+                    };
                     ui.label(RichText::new(fmt_s).monospace().size(11.0).color(col));
                 });
 
@@ -235,7 +243,9 @@ pub fn show(
                     if paint::sharp_button(ui, "Details").clicked() {
                         pending_actions.push(FxAction::OpenDrawer(key));
                     }
-                    if w.rel.downloaded {
+                    let is_archived =
+                        w.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
+                    if w.rel.downloaded && !is_archived {
                         if w.rel.local_path.is_some() && paint::sharp_button(ui, "Folder").clicked()
                         {
                             pending_actions.push(FxAction::OpenFolder(key));
