@@ -110,19 +110,28 @@ The settings sliders (`Auto-Match Min Score` and `Review Min Score`) control the
 During background synchronization (or on demand via **Verify Local Library Files**), `bcvault` verifies that all adopted releases are reachable on disk.
 
 ### Drive & Volume Probing
-Before checking individual files, `bcvault` probes the artist's linked folder:
-- **`FolderState::Ok`**: Path exists and is readable. File checks proceed normally.
-- **`FolderState::Missing`**: Folder was deleted or moved.
-- **`FolderState::Unreadable`**: Storage drive root is unmounted, volume is disconnected, or access timed out.
+Before checking individual files, `bcvault` probes each storage root once per run:
+- Each release is accurately attributed to its true root (`Linked { band_id }` if its path is under the artist's linked folder, or `OutDir` if stored under the global download directory). Releases outside an unavailable folder are still verified normally.
+- Folders evaluate to one of three states:
+  - **`FolderState::Ok`**: Path exists and is readable. File checks proceed normally.
+  - **`FolderState::Missing`**: Folder no longer exists.
+  - **`FolderState::Unreadable`**: Storage drive root is unmounted, volume is disconnected, or access timed out.
 
 > [!IMPORTANT]
-> If a folder probes `Missing` or `Unreadable`, all releases under that artist evaluate to `VerifyResult::Unknown`. They are **never** marked `missing`. An unmounted drive cannot mark your music collection as missing.
+> When a folder probes `Missing` or `Unreadable`, releases under that folder evaluate to `VerifyResult::Unknown` instead of `Missing`.
+> An unavailable folder **never auto-resolves**, even with `on_missing = Auto`. Instead, `bcvault` asks the user via the **Resolve Unavailable Folder** dialog:
+> 1. **Drive disconnected (`Keep as is`)**: dismisses for the session without writing to disk or database.
+> 2. **Moved folder (`Choose new folder...`)**: re-points the artist link and re-verifies.
+> 3. **Deleted on purpose (`Apply`)**: applies the chosen deletion policy (`KeepMarked` or `MarkNotDownloaded`) as an undoable batch, with optional folder unlinking.
+>
+> Background syncs of all artists leave a `FOLDER n` warning chip in the status dock without interrupting work; clicking the chip or manual verification opens the dialog.
 
 ### Mass-Missing Guard
 If more than 30% of verified releases (minimum 20 albums) disappear in a single pass:
 - Automatic policies are immediately halted.
 - No database marks are applied automatically.
 - The **Resolve Missing** dialog opens with an alert: *"Many albums are missing: is a drive disconnected?"*.
+- Releases from unavailable folders (`Unknown`) are excluded from mass-missing ratio calculations, ensuring unmounted drives do not trigger false alarms for available files.
 
 ---
 
@@ -133,9 +142,10 @@ When an album folder disappears, `bcvault` attempts resolution in the following 
 1. **Automatic Relinking**:
    If `auto_relink` is enabled (default), the linked artist folder is rescanned. If the album was moved to another subfolder or renamed with score >= 92%, `bcvault` relinks it silently with no user prompt.
 2. **Missing Album Policy (`on_missing`)**:
-   - **`Ask`** (default): Collects missing albums into the non-modal **Resolve Missing** queue and shows a warning chip in the status dock (`MISSING n`).
+   - **`Ask`** (default): Collects missing albums into the non-modal **Resolve Missing** queue and shows a warning chip in the status dock (`MISSING n`). Note that an unavailable folder always asks regardless of this setting.
    - **`Auto`**: Automatically applies the configured `deleted_policy`.
 3. **Deleted Policy (`deleted_policy`)**:
+   - Used when handled automatically, and as the default in resolution dialogs.
    - **`KeepMarked`** (default, Archive Workflow): Retains `downloaded = 1` and marks `local_status = 'archived'`. The album stays counted in your collection statistics and is visible in the *Archived* smart view, but is excluded from active disk checks.
    - **`MarkNotDownloaded`**: Clears `downloaded = 0`, `local_path = NULL`, and `local_status = NULL`.
 
@@ -148,6 +158,7 @@ When an album folder disappears, `bcvault` attempts resolution in the following 
 | **`Present`** | Green filled square with checkmark `[✓]` | Accent color badge | Files verified on disk with audio tracks. |
 | **`Archived`** | Hollow square with horizontal bar `[-]` | Dim `ARCHIVED` chip | Pruned from local disk but kept marked as downloaded. |
 | **`Missing`** | Warning square with exclamation `[!]` | Warning `MISSING` chip | Path unreachable on disk while folder is mounted. |
+| **`Folder Missing`** | Warning `FOLDER MISSING` badge | Warning `FOLDER MISSING` chip / card badge | Album's linked artist folder is missing or unreadable. |
 | **`Unverified`** | Solid neutral square `[■]` | Default row style | Awaiting local disk check. |
 
 ### Sidebar Download Badges
