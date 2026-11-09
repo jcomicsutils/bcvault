@@ -2,7 +2,8 @@ use crate::{
     bandcamp::redeem::validate_redeem_url,
     types::{
         DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MatchDecision, MissingAction,
-        MissingDecision, OnMissing, OutputLayout, RememberChoice,
+        MissingDecision, OnMissing, OutputLayout, RememberChoice, UnavailableAction,
+        UnavailableDecision, UnavailableRoot,
     },
     ui::{
         state::{LocalAction, MissingItemChoice, ReportTab, UiState},
@@ -25,6 +26,9 @@ pub fn show(
 
     if state.show_resolve_missing_window && state.resolve_missing_modal.is_some() {
         show_resolve_missing_modal(ctx, state, cmd_tx, rt_handle, esc);
+    }
+    if state.show_unavailable_window && state.unavailable_modal.is_some() {
+        show_unavailable_modal(ctx, state, cmd_tx, rt_handle, esc);
     }
 
     let any_modal = state.redeem_modal.is_some()
@@ -345,15 +349,15 @@ fn show_settings_modal(
                             ui.end_row();
 
                             ui.label("When Files Missing:")
-                                .on_hover_text("Ask: show resolve missing dialog on sync\nHandle automatically: apply deleted policy");
+                                .on_hover_text("Ask: show resolve missing dialog on sync\nHandle automatically: apply deleted policy\nNote: an unavailable folder always asks");
                             ui.horizontal(|ui| {
                                 ui.selectable_value(&mut draft.on_missing, OnMissing::Ask, "Ask");
                                 ui.selectable_value(&mut draft.on_missing, OnMissing::Auto, "Handle automatically");
                             });
                             ui.end_row();
 
-                            ui.label("If Deleted:")
-                                .on_hover_text("Keep marked: mark as archived and keep downloaded = 1\nMark as not downloaded: clear downloaded mark");
+                            ui.label("If Deleted (used when handled automatically, and as the default in the dialog):")
+                                .on_hover_text("Keep marked: mark as archived and keep downloaded = 1\nMark as not downloaded: clear downloaded mark\n(used when handled automatically, and as the default in the dialog)");
                             ui.horizontal(|ui| {
                                 ui.selectable_value(
                                     &mut draft.deleted_policy,
@@ -2171,5 +2175,282 @@ fn show_resolve_missing_modal(
         state.resolve_missing_modal = None;
     } else {
         state.resolve_missing_modal = Some(modal);
+    }
+}
+
+fn show_unavailable_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
+    esc: bool,
+) {
+    let Some(mut modal) = state.unavailable_modal.take() else {
+        return;
+    };
+
+    // Check asynchronous folder picker completions
+    if let Some((band_id, new_path)) = modal
+        .picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        modal.cards.retain(|c| match c.folder.root {
+            UnavailableRoot::Linked { band_id: b } => b != band_id,
+            UnavailableRoot::OutDir => true,
+        });
+        if modal.cards.is_empty() {
+            state.show_unavailable_window = false;
+            state.unavailable_modal = None;
+            return;
+        }
+    }
+
+    if esc {
+        let mut decisions = Vec::new();
+        for card in &modal.cards {
+            decisions.push(UnavailableDecision {
+                root: card.folder.root,
+                keys: card.folder.releases.iter().map(|r| r.key).collect(),
+                action: UnavailableAction::Keep,
+            });
+        }
+        let _ = cmd_tx.send(UiToWorkerCommand::ResolveUnavailable {
+            batch_id: modal.batch_id,
+            decisions,
+        });
+        state.show_unavailable_window = false;
+        state.unavailable_modal = None;
+        return;
+    }
+
+    let mut open = state.show_unavailable_window;
+    let mut close_requested = false;
+    let mut decisions_to_send = Vec::new();
+    let mut cards_to_remove = Vec::new();
+
+    let screen = ctx.content_rect();
+    let max_w = (screen.width() - 48.0).clamp(480.0, 860.0);
+    let max_h = (screen.height() - 48.0).clamp(360.0, 720.0);
+
+    egui::Window::new("Resolve Unavailable Folder")
+        .order(Order::Foreground)
+        .collapsible(true)
+        .resizable(true)
+        .default_size([700.0, 480.0])
+        .max_size([max_w, max_h])
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_max_width(ui.available_width());
+            ui.set_min_width(ui.available_width().min(600.0));
+
+            egui::ScrollArea::vertical()
+                .max_height(max_h - 110.0)
+                .show(ui, |ui| {
+                    for (idx, card) in modal.cards.iter_mut().enumerate() {
+                        let title = match card.folder.root {
+                            UnavailableRoot::Linked { .. } => {
+                                let artist_name = card
+                                    .folder
+                                    .releases
+                                    .first()
+                                    .map(|r| r.artist_name.as_str())
+                                    .unwrap_or("Artist");
+                                format!("{artist_name}: linked folder unavailable")
+                            }
+                            UnavailableRoot::OutDir => "Download folder unavailable".to_string(),
+                        };
+
+                        let state_text = match card.folder.state {
+                            FolderState::Missing => "This folder no longer exists.",
+                            FolderState::Unreadable => "This folder or its drive can't be read.",
+                            FolderState::Ok => "This folder is reachable.",
+                        };
+                        let count = card.folder.releases.len();
+
+                        egui::Frame::NONE
+                            .corner_radius(CornerRadius::ZERO)
+                            .fill(pal::BG1)
+                            .stroke(Stroke::new(1.0_f32, pal::BORDER))
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(&title).strong().color(pal::WARN));
+                                ui.label(
+                                    RichText::new(state_text)
+                                        .size(11.5)
+                                        .color(pal::TEXT_DIM),
+                                );
+                                ui.label(
+                                    RichText::new(format!("Path: {}", card.folder.path.display()))
+                                        .size(11.0)
+                                        .monospace()
+                                        .color(pal::TEXT_DIM),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{count} downloaded releases were last seen here. Their files can't be checked."
+                                    ))
+                                    .size(11.5)
+                                    .color(pal::TEXT_DIM),
+                                );
+                                ui.add_space(6.0);
+
+                                // Choice 1: Drive disconnected
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("The drive is disconnected, I'll reconnect it:").size(12.0));
+                                    if sharp_small_button(ui, "Keep as is").clicked() {
+                                        decisions_to_send.push(UnavailableDecision {
+                                            root: card.folder.root,
+                                            keys: card.folder.releases.iter().map(|r| r.key).collect(),
+                                            action: UnavailableAction::Keep,
+                                        });
+                                        cards_to_remove.push(idx);
+                                    }
+                                });
+
+                                // Choice 2: Moved folder (Linked only)
+                                if let UnavailableRoot::Linked { band_id } = card.folder.root {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("I moved the folder:").size(12.0));
+                                        if sharp_small_button(ui, "Choose new folder...").clicked() {
+                                            let picked = modal.picked_folder.clone();
+                                            rt_handle.spawn(async move {
+                                                if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                                    && let Ok(mut lock) = picked.lock()
+                                                {
+                                                    *lock = Some((band_id, folder.path().to_path_buf()));
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+
+                                // Choice 3: Deleted on purpose
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("I deleted it on purpose:").size(12.0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("Then:").size(11.5));
+                                    let curr_text = match card.policy {
+                                        DeletedPolicy::KeepMarked => "Keep marked as downloaded (archived)",
+                                        DeletedPolicy::MarkNotDownloaded => "Mark as not downloaded",
+                                    };
+                                    egui::ComboBox::from_id_salt(format!("card_del_policy_{idx}"))
+                                        .selected_text(curr_text)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut card.policy,
+                                                DeletedPolicy::KeepMarked,
+                                                "Keep marked as downloaded (archived)",
+                                            );
+                                            ui.selectable_value(
+                                                &mut card.policy,
+                                                DeletedPolicy::MarkNotDownloaded,
+                                                "Mark as not downloaded",
+                                            );
+                                        });
+                                    if matches!(card.folder.root, UnavailableRoot::Linked { .. }) {
+                                        ui.checkbox(&mut card.unlink, "Also unlink this folder")
+                                            .on_hover_text("Unlinking removes the link to this folder (marks and downloaded status are kept according to policy above; unlinking cannot be undone with Undo)");
+                                    }
+                                    if sharp_small_button(ui, "Apply").clicked() {
+                                        decisions_to_send.push(UnavailableDecision {
+                                            root: card.folder.root,
+                                            keys: card.folder.releases.iter().map(|r| r.key).collect(),
+                                            action: UnavailableAction::Deleted {
+                                                policy: card.policy,
+                                                unlink: card.unlink,
+                                            },
+                                        });
+                                        cards_to_remove.push(idx);
+                                    }
+                                });
+
+                                // Expandable list of releases
+                                ui.add_space(4.0);
+                                let toggle_label = if card.expanded {
+                                    format!("Hide releases ({count})")
+                                } else {
+                                    format!("Show releases ({count})")
+                                };
+                                if ui.small_button(toggle_label).clicked() {
+                                    card.expanded = !card.expanded;
+                                }
+                                if card.expanded {
+                                    egui::ScrollArea::vertical()
+                                        .max_height(120.0)
+                                        .id_salt(format!("card_rels_scroll_{idx}"))
+                                        .show(ui, |ui| {
+                                            for rel in &card.folder.releases {
+                                                let path_display = rel
+                                                    .last_known_path
+                                                    .as_ref()
+                                                    .map(|p| p.display().to_string())
+                                                    .unwrap_or_else(|| "Unknown path".to_string());
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new(&rel.title).size(11.0).color(pal::TEXT));
+                                                    ui.label(
+                                                        RichText::new(format!("({path_display})"))
+                                                            .size(10.5)
+                                                            .color(pal::TEXT_DIM),
+                                                    );
+                                                });
+                                            }
+                                        });
+                                }
+                            });
+                        ui.add_space(8.0);
+                    }
+                });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if sharp_button(ui, "Close").clicked() {
+                    close_requested = true;
+                }
+            });
+        });
+
+    if !decisions_to_send.is_empty() {
+        let _ = cmd_tx.send(UiToWorkerCommand::ResolveUnavailable {
+            batch_id: modal.batch_id,
+            decisions: decisions_to_send,
+        });
+    }
+
+    for idx in cards_to_remove.into_iter().rev() {
+        if idx < modal.cards.len() {
+            modal.cards.remove(idx);
+        }
+    }
+
+    if close_requested {
+        open = false;
+    }
+
+    if !open && !modal.cards.is_empty() {
+        let mut remaining_decisions = Vec::new();
+        for card in &modal.cards {
+            remaining_decisions.push(UnavailableDecision {
+                root: card.folder.root,
+                keys: card.folder.releases.iter().map(|r| r.key).collect(),
+                action: UnavailableAction::Keep,
+            });
+        }
+        let _ = cmd_tx.send(UiToWorkerCommand::ResolveUnavailable {
+            batch_id: modal.batch_id,
+            decisions: remaining_decisions,
+        });
+        state.show_unavailable_window = false;
+        state.unavailable_modal = None;
+    } else if modal.cards.is_empty() {
+        state.show_unavailable_window = false;
+        state.unavailable_modal = None;
+    } else {
+        state.show_unavailable_window = open;
+        state.unavailable_modal = Some(modal);
     }
 }

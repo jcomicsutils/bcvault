@@ -79,6 +79,20 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             draw_rate_limit_chip(ui, &state.rate_limit);
+            let unavail_artists = state.unavailable_folder_artists();
+            if !unavail_artists.is_empty() {
+                let count = unavail_artists.len();
+                let label = format!("FOLDER {count}");
+                let btn = ui.add(
+                    egui::Button::new(egui::RichText::new(&label).size(11.5).color(pal::WARN))
+                        .corner_radius(CornerRadius::ZERO),
+                );
+                if btn.clicked() {
+                    let _ = cmd_tx.send(UiToWorkerCommand::VerifyFiles {
+                        scope: crate::types::SyncScope::Selected(unavail_artists),
+                    });
+                }
+            }
             if let Some(modal) = &state.resolve_missing_modal {
                 let count = modal.items.len();
                 if count > 0 {

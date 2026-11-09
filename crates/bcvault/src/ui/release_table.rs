@@ -1,5 +1,5 @@
 use crate::{
-    types::{Classification, DownloadOpts, LocalStatus, SortDir, SortKey},
+    types::{Classification, DownloadOpts, FolderState, LocalStatus, SortDir, SortKey},
     ui::{
         state::{RedeemModalState, UiState},
         theme::pal,
@@ -187,6 +187,25 @@ pub fn show(
                             badge(ui, "ARCHIVED", pal::TEXT_DIM, pal::BORDER_HI);
                         } else if r.local_status == Some(LocalStatus::Missing) {
                             badge(ui, "MISSING", pal::WARN, pal::WARN);
+                        } else if let Some(folder) = state.folders.get(&r.band_id)
+                            && folder.state != FolderState::Ok
+                        {
+                            let is_under_folder = match &r.local_path {
+                                Some(p) => {
+                                    let rel_key =
+                                        bcvault_core::library::link::normalize_path_key(p);
+                                    let folder_key =
+                                        bcvault_core::library::link::normalize_path_key(
+                                            &folder.path,
+                                        );
+                                    rel_key == folder_key
+                                        || rel_key.starts_with(&format!("{folder_key}/"))
+                                }
+                                None => true,
+                            };
+                            if is_under_folder {
+                                badge(ui, "FOLDER MISSING", pal::WARN, pal::WARN);
+                            }
                         }
                     }
                     if r.has_remote_update

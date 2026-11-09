@@ -1,9 +1,10 @@
 use crate::{
     library::service::ReconcileReport,
     types::{
-        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, ItemKey, JobId, JobState, JobView,
-        LogEntry, LogLevel, MissingItem, RateLimitStatus, ReleaseFilter, ReleaseQuery, ReleaseRow,
-        Settings, SortDir, SortKey, SyncMode, SyncProgress,
+        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, FolderState, ItemKey, JobId,
+        JobState, JobView, LogEntry, LogLevel, MissingItem, RateLimitStatus, ReleaseFilter,
+        ReleaseQuery, ReleaseRow, Settings, SortDir, SortKey, SyncMode, SyncProgress,
+        UnavailableFolder, UnavailableRoot,
     },
     ui::{thumbs::ThumbCache, widgets::format_date},
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
@@ -260,6 +261,47 @@ impl ResolveMissingModalState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnavailableCardState {
+    pub folder: UnavailableFolder,
+    pub policy: DeletedPolicy,
+    pub unlink: bool,
+    pub expanded: bool,
+}
+
+#[derive(Clone)]
+pub struct UnavailableModalState {
+    pub batch_id: u64,
+    pub cards: Vec<UnavailableCardState>,
+    pub picked_folder: Arc<std::sync::Mutex<Option<(i64, std::path::PathBuf)>>>,
+}
+
+impl UnavailableModalState {
+    pub fn new(
+        batch_id: u64,
+        folders: Vec<UnavailableFolder>,
+        default_policy: DeletedPolicy,
+    ) -> Self {
+        let cards = folders
+            .into_iter()
+            .map(|folder| {
+                let unlink = matches!(folder.root, UnavailableRoot::Linked { .. });
+                UnavailableCardState {
+                    folder,
+                    policy: default_policy,
+                    unlink,
+                    expanded: false,
+                }
+            })
+            .collect();
+        Self {
+            batch_id,
+            cards,
+            picked_folder: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
 pub struct UiState {
     pub artists: Vec<ArtistView>,
     pub artist_filter: String,
@@ -307,6 +349,8 @@ pub struct UiState {
     pub undo_toast: Option<UndoToast>,
     pub resolve_missing_modal: Option<ResolveMissingModalState>,
     pub show_resolve_missing_window: bool,
+    pub unavailable_modal: Option<UnavailableModalState>,
+    pub show_unavailable_window: bool,
     pub relink_picked_folder: Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
 
     pub thumbs: ThumbCache,
@@ -370,6 +414,8 @@ impl UiState {
             undo_toast: None,
             resolve_missing_modal: None,
             show_resolve_missing_window: false,
+            unavailable_modal: None,
+            show_unavailable_window: false,
             relink_picked_folder: Arc::new(std::sync::Mutex::new(None)),
 
             thumbs: ThumbCache::new(),
@@ -385,6 +431,19 @@ impl UiState {
         } else {
             None
         }
+    }
+
+    pub fn unavailable_folder_artists(&self) -> Vec<i64> {
+        self.folders
+            .iter()
+            .filter_map(|(&band_id, f)| {
+                if f.state != FolderState::Ok {
+                    Some(band_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn mark_query_immediate(&mut self) {
@@ -654,7 +713,20 @@ impl UiState {
                     self.show_resolve_missing_window = false;
                 }
             }
-            WorkerToUiEvent::FolderUnavailable { .. } => {}
+            WorkerToUiEvent::FolderUnavailable {
+                batch_id,
+                folders,
+                prompt,
+            } => {
+                if prompt && !folders.is_empty() {
+                    self.unavailable_modal = Some(UnavailableModalState::new(
+                        batch_id,
+                        folders,
+                        self.settings.deleted_policy,
+                    ));
+                    self.show_unavailable_window = true;
+                }
+            }
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }
@@ -965,5 +1037,72 @@ mod tests {
         });
         assert!(!st.show_resolve_missing_window);
         assert!(st.resolve_missing_modal.is_none());
+    }
+
+    #[test]
+    fn test_unavailable_modal_state_and_chip() {
+        use crate::types::{
+            DeletedPolicy, FolderState, ItemType, UnavailableFolder, UnavailableRelease,
+            UnavailableRoot,
+        };
+        use std::path::PathBuf;
+
+        let mut st = UiState::new();
+
+        let folder = UnavailableFolder {
+            root: UnavailableRoot::Linked { band_id: 42 },
+            path: PathBuf::from("/music/aphex"),
+            state: FolderState::Missing,
+            releases: vec![UnavailableRelease {
+                key: ItemKey::new(ItemType::Album, 100),
+                band_id: 42,
+                artist_name: "Aphex Twin".to_string(),
+                title: "SAW II".to_string(),
+                last_known_path: Some(PathBuf::from("/music/aphex/saw2")),
+            }],
+        };
+
+        // 1. prompt: false does NOT open the modal
+        st.apply_event(WorkerToUiEvent::FolderUnavailable {
+            batch_id: 50,
+            folders: vec![folder.clone()],
+            prompt: false,
+        });
+        assert!(!st.show_unavailable_window);
+        assert!(st.unavailable_modal.is_none());
+
+        // 2. prompt: true opens the modal
+        st.apply_event(WorkerToUiEvent::FolderUnavailable {
+            batch_id: 51,
+            folders: vec![folder],
+            prompt: true,
+        });
+        assert!(st.show_unavailable_window);
+        assert!(st.unavailable_modal.is_some());
+        let modal = st.unavailable_modal.as_ref().unwrap();
+        assert_eq!(modal.batch_id, 51);
+        assert_eq!(modal.cards.len(), 1);
+        assert!(modal.cards[0].unlink, "Linked roots default unlink to true");
+        assert_eq!(modal.cards[0].policy, DeletedPolicy::KeepMarked);
+
+        // 3. unavailable_folder_artists tracks state.folders with state != Ok
+        assert_eq!(st.unavailable_folder_artists().len(), 0);
+        st.folders.insert(
+            42,
+            crate::types::ArtistFolder {
+                band_id: 42,
+                path: PathBuf::from("/music/aphex"),
+                state: FolderState::Missing,
+            },
+        );
+        st.folders.insert(
+            43,
+            crate::types::ArtistFolder {
+                band_id: 43,
+                path: PathBuf::from("/music/boc"),
+                state: FolderState::Ok,
+            },
+        );
+        assert_eq!(st.unavailable_folder_artists(), vec![42]);
     }
 }

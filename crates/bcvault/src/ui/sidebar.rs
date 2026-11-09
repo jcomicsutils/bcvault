@@ -148,6 +148,14 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             ui.close();
                         }
                         if let Some(folder) = state.folders.get(&artist.band_id) {
+                            if folder.state != FolderState::Ok
+                                && sharp_button(ui, "Resolve unavailable folder...").clicked()
+                            {
+                                let _ = cmd_tx.send(UiToWorkerCommand::VerifyFiles {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                });
+                                ui.close();
+                            }
                             if sharp_button(ui, "Change Folder...").clicked() {
                                 state.link_folder_modal = Some(LinkFolderModalState::for_artist(
                                     artist.band_id,
@@ -338,7 +346,10 @@ fn draw_artist_row(
             let tip = match folder.state {
                 FolderState::Ok => format!("Linked: {}\nStatus: Reachable", folder.path.display()),
                 FolderState::Missing => {
-                    format!("Linked: {}\nStatus: Missing", folder.path.display())
+                    format!(
+                        "Linked: {}\nStatus: Missing\nRight-click to resolve",
+                        folder.path.display()
+                    )
                 }
                 FolderState::Unreadable => {
                     format!("Linked: {}\nStatus: Unreadable", folder.path.display())
