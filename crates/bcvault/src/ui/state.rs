@@ -948,6 +948,7 @@ mod tests {
             conflicts: vec![],
             restorable: vec![],
             linked: vec![],
+            unavailable_folders: vec![],
         });
 
         let mut st = UiState::new();
@@ -1053,7 +1054,7 @@ mod tests {
         let mut st = UiState::new();
 
         let folder = UnavailableFolder {
-            root: UnavailableRoot::Linked { band_id: 42 },
+            root: UnavailableRoot::Linked { folder_id: 42 },
             path: PathBuf::from("/music/aphex"),
             state: FolderState::Missing,
             releases: vec![UnavailableRelease {

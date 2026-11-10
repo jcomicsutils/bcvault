@@ -130,32 +130,28 @@ pub fn is_mass_missing(missing_count: usize, total_checked: usize) -> bool {
 /// Determines the root folder and health state for a release during verification.
 pub fn attribute_release_root(
     rel: &ReleaseRow,
-    linked_folder: Option<&ArtistFolder>,
+    linked_folders: &[ArtistFolder],
     out_dir: &Path,
     out_dir_state: FolderState,
 ) -> (UnavailableRoot, PathBuf, FolderState) {
-    if let Some(folder) = linked_folder {
-        if let Some(local_p) = &rel.local_path {
-            let rel_key = crate::library::link::normalize_path_key(local_p);
-            let link_key = crate::library::link::normalize_path_key(&folder.path);
-            if rel_key == link_key || rel_key.starts_with(&format!("{link_key}/")) {
-                return (
-                    UnavailableRoot::Linked {
-                        band_id: folder.band_id,
-                    },
-                    folder.path.clone(),
-                    folder.state,
-                );
-            }
-        } else {
+    if let Some(local_p) = &rel.local_path {
+        if let Some(folder) = crate::db::repo::library::owning_folder(linked_folders, local_p) {
             return (
                 UnavailableRoot::Linked {
-                    band_id: folder.band_id,
+                    folder_id: folder.id,
                 },
                 folder.path.clone(),
                 folder.state,
             );
         }
+    } else if let Some(folder) = linked_folders.first() {
+        return (
+            UnavailableRoot::Linked {
+                folder_id: folder.id,
+            },
+            folder.path.clone(),
+            folder.state,
+        );
     }
     (
         UnavailableRoot::OutDir,
@@ -685,17 +681,30 @@ mod tests {
         // 1. Release under linked folder
         let key1 = ItemKey::new(ItemType::Album, 1);
         let rel1 = make_test_row(key1, true, Some(link_path.join("Album 1")));
-        let (root1, p1, st1) =
-            attribute_release_root(&rel1, Some(&linked), &out_dir, FolderState::Ok);
-        assert_eq!(root1, UnavailableRoot::Linked { band_id });
+        let (root1, p1, st1) = attribute_release_root(
+            &rel1,
+            std::slice::from_ref(&linked),
+            &out_dir,
+            FolderState::Ok,
+        );
+        assert_eq!(
+            root1,
+            UnavailableRoot::Linked {
+                folder_id: linked.id
+            }
+        );
         assert_eq!(p1, link_path);
         assert_eq!(st1, FolderState::Missing);
 
         // 2. Release outside linked folder (e.g. in out_dir)
         let key2 = ItemKey::new(ItemType::Album, 2);
         let rel2 = make_test_row(key2, true, Some(out_dir.join("Album 2")));
-        let (root2, p2, st2) =
-            attribute_release_root(&rel2, Some(&linked), &out_dir, FolderState::Ok);
+        let (root2, p2, st2) = attribute_release_root(
+            &rel2,
+            std::slice::from_ref(&linked),
+            &out_dir,
+            FolderState::Ok,
+        );
         assert_eq!(root2, UnavailableRoot::OutDir);
         assert_eq!(p2, out_dir);
         assert_eq!(st2, FolderState::Ok);
@@ -703,15 +712,24 @@ mod tests {
         // 3. Release without path but artist has link
         let key3 = ItemKey::new(ItemType::Album, 3);
         let rel3 = make_test_row(key3, true, None);
-        let (root3, p3, st3) =
-            attribute_release_root(&rel3, Some(&linked), &out_dir, FolderState::Ok);
-        assert_eq!(root3, UnavailableRoot::Linked { band_id });
+        let (root3, p3, st3) = attribute_release_root(
+            &rel3,
+            std::slice::from_ref(&linked),
+            &out_dir,
+            FolderState::Ok,
+        );
+        assert_eq!(
+            root3,
+            UnavailableRoot::Linked {
+                folder_id: linked.id
+            }
+        );
         assert_eq!(p3, link_path);
         assert_eq!(st3, FolderState::Missing);
 
         // 4. Release without path and no link
         let (root4, p4, st4) =
-            attribute_release_root(&rel3, None, &out_dir, FolderState::Unreadable);
+            attribute_release_root(&rel3, &[], &out_dir, FolderState::Unreadable);
         assert_eq!(root4, UnavailableRoot::OutDir);
         assert_eq!(p4, out_dir);
         assert_eq!(st4, FolderState::Unreadable);
@@ -739,7 +757,7 @@ mod tests {
         rel4.title = "Other".to_string();
         rel4.artist_name = "Other Artist".to_string();
 
-        let root_linked = UnavailableRoot::Linked { band_id: 10 };
+        let root_linked = UnavailableRoot::Linked { folder_id: 10 };
         let root_out = UnavailableRoot::OutDir;
 
         let items = vec![

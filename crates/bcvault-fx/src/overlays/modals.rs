@@ -2229,15 +2229,21 @@ fn show_unavailable_modal(
         return;
     };
 
-    if let Some((band_id, new_path)) = modal
+    if let Some((folder_id, new_path)) = modal
         .picked_folder
         .lock()
         .ok()
         .and_then(|mut lock| lock.take())
     {
+        let band_id = state
+            .folders
+            .values()
+            .find(|f| f.id == folder_id)
+            .map(|f| f.band_id)
+            .unwrap_or(folder_id);
         let _ = core_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
         modal.cards.retain(|c| match c.folder.root {
-            UnavailableRoot::Linked { band_id: b } => b != band_id,
+            UnavailableRoot::Linked { folder_id: fid } => fid != folder_id,
             UnavailableRoot::OutDir => true,
         });
         if modal.cards.is_empty() {
@@ -2296,11 +2302,10 @@ fn show_unavailable_modal(
                 .show(ui, |ui| {
                     for (idx, card) in modal.cards.iter_mut().enumerate() {
                         let title = match card.folder.root {
-                            UnavailableRoot::Linked { band_id } => {
-                                let artist_name = state
-                                    .artists
-                                    .iter()
-                                    .find(|a| a.band_id == band_id)
+                            UnavailableRoot::Linked { folder_id } => {
+                                let folder = state.folders.values().find(|f| f.id == folder_id);
+                                let artist_name = folder
+                                    .and_then(|f| state.artists.iter().find(|a| a.band_id == f.band_id))
                                     .map(|a| a.display_name())
                                     .or_else(|| {
                                         card.folder
@@ -2361,7 +2366,7 @@ fn show_unavailable_modal(
                                 });
 
                                 // Choice 2: Moved folder (Linked only)
-                                if let UnavailableRoot::Linked { band_id } = card.folder.root {
+                                if let UnavailableRoot::Linked { folder_id } = card.folder.root {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new("I moved the folder:").size(12.0));
                                         if paint::sharp_small_button(ui, "Choose new folder...").clicked() {
@@ -2370,7 +2375,7 @@ fn show_unavailable_modal(
                                                 if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
                                                     && let Ok(mut lock) = picked.lock()
                                                 {
-                                                    *lock = Some((band_id, folder.path().to_path_buf()));
+                                                    *lock = Some((folder_id, folder.path().to_path_buf()));
                                                 }
                                             });
                                         }

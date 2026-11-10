@@ -1484,6 +1484,7 @@ mod tests {
             conflicts: vec![],
             restorable: vec![],
             linked: vec![],
+            unavailable_folders: vec![],
         });
 
         let mut modal = FxReconcileReportModalState::new(report);
@@ -1661,6 +1662,7 @@ mod tests {
                 conflicts: vec![],
                 restorable: vec![],
                 linked: vec![],
+                unavailable_folders: vec![],
             },
         )));
         assert!(state.has_open_modal());
@@ -1695,7 +1697,7 @@ mod tests {
         let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let folder = UnavailableFolder {
-            root: UnavailableRoot::Linked { band_id: 42 },
+            root: UnavailableRoot::Linked { folder_id: 42 },
             path: PathBuf::from("/music/aphex"),
             state: FolderState::Missing,
             releases: vec![UnavailableRelease {

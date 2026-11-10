@@ -292,7 +292,7 @@ impl DeletedPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnavailableRoot {
-    Linked { band_id: i64 },
+    Linked { folder_id: i64 },
     OutDir,
 }
 
