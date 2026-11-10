@@ -57,11 +57,16 @@ pub enum Classification {
     Nyp,
     EmailRequired,
     Paid,
+    Unavailable,
 }
 
 impl Classification {
     pub const fn auto_downloadable(self) -> bool {
         matches!(self, Self::Free | Self::Nyp)
+    }
+
+    pub const fn is_eligible(self) -> bool {
+        matches!(self, Self::Free | Self::Nyp | Self::EmailRequired)
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -71,6 +76,7 @@ impl Classification {
             Self::Nyp => "nyp",
             Self::EmailRequired => "email_required",
             Self::Paid => "paid",
+            Self::Unavailable => "unavailable",
         }
     }
 
@@ -81,6 +87,7 @@ impl Classification {
             "nyp" => Some(Self::Nyp),
             "email_required" => Some(Self::EmailRequired),
             "paid" => Some(Self::Paid),
+            "unavailable" => Some(Self::Unavailable),
             _ => None,
         }
     }
@@ -92,6 +99,7 @@ impl Classification {
             Self::Nyp => "NYP",
             Self::EmailRequired => "EMAIL",
             Self::Paid => "PAID",
+            Self::Unavailable => "UNAVAILABLE",
         }
     }
 }
@@ -633,6 +641,7 @@ pub enum ReleaseFilter {
     Nyp,
     EmailRequired,
     Paid,
+    Unavailable,
     NotDownloaded,
     Updated,
     Archived,
@@ -640,12 +649,13 @@ pub enum ReleaseFilter {
 }
 
 impl ReleaseFilter {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::All,
         Self::Free,
         Self::Nyp,
         Self::EmailRequired,
         Self::Paid,
+        Self::Unavailable,
         Self::NotDownloaded,
         Self::Updated,
         Self::Archived,
@@ -659,6 +669,7 @@ impl ReleaseFilter {
             Self::Nyp => "NYP",
             Self::EmailRequired => "Email Required",
             Self::Paid => "Paid",
+            Self::Unavailable => "Unavailable",
             Self::NotDownloaded => "Not Downloaded",
             Self::Updated => "Updated/Modified",
             Self::Archived => "Archived",
@@ -1003,6 +1014,7 @@ mod tests {
             Classification::Nyp,
             Classification::EmailRequired,
             Classification::Paid,
+            Classification::Unavailable,
         ];
         for c in all {
             assert_eq!(Classification::parse(c.as_str()), Some(c));
@@ -1012,6 +1024,14 @@ mod tests {
         assert!(!Classification::Unknown.auto_downloadable());
         assert!(!Classification::EmailRequired.auto_downloadable());
         assert!(!Classification::Paid.auto_downloadable());
+        assert!(!Classification::Unavailable.auto_downloadable());
+
+        assert!(Classification::Free.is_eligible());
+        assert!(Classification::Nyp.is_eligible());
+        assert!(Classification::EmailRequired.is_eligible());
+        assert!(!Classification::Paid.is_eligible());
+        assert!(!Classification::Unavailable.is_eligible());
+        assert!(!Classification::Unknown.is_eligible());
         assert_eq!(Classification::parse("bogus"), None);
     }
 
@@ -1102,6 +1122,7 @@ mod tests {
         for filter in ReleaseFilter::ALL {
             assert!(!filter.label().is_empty());
         }
+        assert!(ReleaseFilter::ALL.contains(&ReleaseFilter::Unavailable));
         assert!(ReleaseFilter::ALL.contains(&ReleaseFilter::Archived));
         assert!(ReleaseFilter::ALL.contains(&ReleaseFilter::MissingFiles));
 

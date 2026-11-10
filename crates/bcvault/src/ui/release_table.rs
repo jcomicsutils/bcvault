@@ -342,6 +342,22 @@ pub fn show(
                         }
                     }
 
+                    if r.classification == Classification::Unavailable {
+                        if sharp_small_button(ui, "Unmark Unavailable").clicked() {
+                            let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseUnavailable {
+                                keys: vec![key],
+                                unavailable: false,
+                            });
+                            ui.close();
+                        }
+                    } else if sharp_small_button(ui, "Mark as Unavailable").clicked() {
+                        let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseUnavailable {
+                            keys: vec![key],
+                            unavailable: true,
+                        });
+                        ui.close();
+                    }
+
                     if state.selected.len() > 1 && state.selected.contains(&key) {
                         ui.separator();
                         let sel_count = state.selected.len();
@@ -363,6 +379,19 @@ pub fn show(
                         {
                             let keys = state.selected.iter().copied().collect();
                             let _ = cmd_tx.send(UiToWorkerCommand::UnmarkDownloaded { keys });
+                            ui.close();
+                        }
+                        if sharp_small_button(
+                            ui,
+                            &format!("Mark Selected as Unavailable ({sel_count})"),
+                        )
+                        .clicked()
+                        {
+                            let keys = state.selected.iter().copied().collect();
+                            let _ = cmd_tx.send(UiToWorkerCommand::SetReleaseUnavailable {
+                                keys,
+                                unavailable: true,
+                            });
                             ui.close();
                         }
                     }
@@ -572,7 +601,7 @@ fn draw_row_actions(
                 });
             }
         }
-        Classification::Paid | Classification::Unknown => {
+        Classification::Paid | Classification::Unavailable | Classification::Unknown => {
             if sharp_small_button(ui, "Open").clicked() {
                 let _ = open::that_detached(&r.url);
             }

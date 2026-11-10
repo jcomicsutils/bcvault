@@ -1,6 +1,6 @@
 # ROADMAP: order of work across plans
 
-*Companion to `AGENTS.md`. Prepared 7 Nov 2026, revised 10 Nov 2026 (synced with the codebase: library L0 to L6, MATCH-FIX, badge rework, MISSING-FOLDER-FIX, and MULTI_FOLDER landed; auto-sync, archive, mail-redeem, and file-themes plans tracked).*
+*Companion to `AGENTS.md`. Prepared 7 Nov 2026, revised 10 Nov 2026 (synced with the codebase: library L0 to L6, MATCH-FIX, badge rework, MISSING-FOLDER-FIX, MULTI_FOLDER, and unavailable classification landed; auto-sync, archive, mail-redeem, and file-themes plans tracked).*
 
 ## 1. Status snapshot (live status is in `PROGRESS.md`)
 
@@ -14,6 +14,7 @@
 | Missing folder handling (`PLANS/LIBRARY_SYNC/MISSING-FOLDER-FIX.md`) | Implemented (Steps 1 to 5) in `v0.1.1` and `v0.1.2` |
 | Multiple linked folders (`PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`) | Implemented (Steps 1 to 6) in `main` (migration `0006_artist_folders_multi.sql`) |
 | Download dir link guard and local-only fix (`PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md`) | Implemented (Steps 1 and 2, no migration) in `main` |
+| Unavailable classification (`0007_unavailable.sql`) | Implemented in `main` (0-track detection, manual unavailable toggle, and folder matching support) |
 | Tooling (T0) | In progress: architectural guards, `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed. |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync. |
@@ -43,7 +44,7 @@ F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, MISSING-FOLDER-FIX, and MULTI_FOLDE
 
 | Step | Work | Why now |
 | --- | --- | --- |
-| 1 | **AUTO_SYNC** | Unblocked. Takes migration `0007_auto_sync.sql`, verifying and rescanning multiple folders cleanly. |
+| 1 | **AUTO_SYNC** | Unblocked. Takes next free migration (`0008_auto_sync.sql`), verifying and rescanning multiple folders cleanly. |
 | 2 | **ARCHIVE** | Merges after `AUTO_SYNC` and rebases onto it (both touch `worker/sync.rs`). |
 | 3 | **M0 to M4** mail core | Needs the real-mailbox fixture and cock.li check. Takes the next free migration number when it lands. |
 | 4 | **M5 and M6** mail UI in both front-ends | Both apps exist; wires mail redeem into classic and FX. |
@@ -65,8 +66,9 @@ A single agent works one phase or plan at a time. If you run two agents, split b
 | `0004_library` | Library columns on `releases`, `artist_folders`, `artist_folder_ignored`, `library_batches`/`library_events` | L0.1 | Breaking (`feat(db)!`) |
 | `0005_artist_folder_local_only` | `artist_folders.local_only_count` | Badge rework (`Task: none`) | Breaking (`feat(library)!`) |
 | `0006_artist_folders_multi` | Multi-folder links per artist (`artist_folders` multi-link schema) | `MULTI_FOLDER.md` (`Task: none`) | Breaking (`feat(db)!`) |
-| `0007` (lowest free) | `0007_auto_sync.sql` | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
-| `0008` (or next free) | `0008_archive.sql` | `ARCHIVE.md` | Breaking (`feat(db)!`) |
+| `0007_unavailable` | `'unavailable'` release classification CHECK constraint and 0-track backfill | Unavailable release fix (`Task: none`) | Breaking (`feat(core)!`) |
+| `0008` (lowest free) | `0008_auto_sync.sql` | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
+| `0009` (or next free) | `0009_archive.sql` | `ARCHIVE.md` | Breaking (`feat(db)!`) |
 | next free | Mail accounts, messages, links, wait list | `MAIL_REDEEM_PLAN.md` (M0.4) | Breaking (`feat(db)!`) |
 
 Number by landing order: whichever plan lands first takes the lowest free number; rename the unmerged file (and the plan text) before merging. The runner list is in `crates/bcvault-core/src/db/migrations.rs`. FX's sidecar database has its own numbering (`fx.sqlite`, `0001_fx_init.sql`) and is unaffected.

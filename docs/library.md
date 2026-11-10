@@ -93,7 +93,7 @@ Any releases and candidates not resolved in the exact pass are evaluated with fu
 - **Fuzzy Token Similarity**: Normalized Levenshtein distance on token sequences.
 - **Digit Guard**: If both names contain numeric tokens (e.g., `Volume 1` vs `Volume 2`, or `Leiche 73` vs `Leiche 75`), their multisets of digit tokens must match identically. If numbers differ, similarity is clamped to `0.0`. Numbered series can never falsely match or create conflict cascades.
 - **Containment Rule**: If one title is a strict token subset of the other (e.g., `Album` vs `Album Deluxe`), similarity is capped at `0.85` and flagged as `auto_eligible = false`. It will appear in **Review** and is never adopted automatically, regardless of score bonuses or slider settings.
-- **Track Count & Year Signals**: Small score bonuses or penalties for matching track counts and release years.
+- **Track Count & Year Signals**: Small score bonuses or penalties for matching track counts and release years. Releases with `0` tracks on Bandcamp (such as external-download showcase pages classified as `Unavailable`) skip track-count comparison so local folders with audio files are never penalized.
 
 ### 4.3 Match Thresholds & Report Tabs
 The settings sliders (`Auto-Match Min Score` and `Review Min Score`) control the acceptance of **non-exact (fuzzy) matches only**:
@@ -104,13 +104,14 @@ The settings sliders (`Auto-Match Min Score` and `Review Min Score`) control the
 5. **Conflicts**: Genuine duplicate formats or conflicting tag/folder identities from the exact pass. Fuzzy scoring never creates conflicts.
 6. **Found Again (Restorable)**: Releases marked as `archived` whose audio files reappeared on disk.
 
-### 4.4 Releases Downloaded by the App
+### 4.4 Releases Downloaded by the App & Unavailable Releases
 
 A release downloaded with the app's own download function is stored in the download directory (`out_dir`), outside every linked folder. When you later move the album into your library and link that folder, the library copy is matched against the release like any other album:
 - Releases are offered to the matcher when they are not downloaded, are archived, or are downloaded to a path outside **every** linked folder of the artist. A release inside a linked folder stays as it is, and so does a release under a linked folder that is currently unavailable.
 - A match re-points the release to the library copy. The files left in the download directory are never touched.
 - While no library copy exists, such a release is not listed as **On Page Only**, because it still has files.
 - The albums in the linked folder therefore never count as **Local Only** merely because the release was downloaded earlier.
+- **Unavailable Releases (`UNAVAILABLE`)**: Releases with `0` tracks on Bandcamp (where Bandcamp never displays a download button, even if priced as free or NYP, often linking to an external download in the description) and releases manually marked as **Unavailable** by the user do not count toward `eligible` downloads. However, they remain fully matchable: you can download the album manually from an external link, place it in your linked artist folder (or use **Relink to Folder...** / the Match Report's **Local Only** attach picker), and match it to the Bandcamp page entry. Once matched, it counts in the `(+N)` non-eligible download badge.
 
 ---
 
@@ -182,8 +183,8 @@ When an album folder disappears, `bcvault` attempts resolution in the following 
 
 Each artist row in the sidebar displays a download count badge summarizing collection completeness:
 - **Standard Format (`{eligible dl}/{eligible}/{total}`)**: When an artist has only eligible (Free, NYP, Email Required) downloads, the badge shows `X/Y/Z` (e.g., `20/20/20`).
-- **Expanded Format (`{eligible dl} (+{non-eligible dl})/eligible/page total`)**: When the user has downloaded paid releases or extra albums not listed on the live Bandcamp page, the non-eligible downloads are highlighted with `(+N)`.
-  - Example: `2 (+1)/2/3` indicates 2 free releases downloaded, 1 paid release downloaded, out of 2 eligible and 3 total on the page.
+- **Expanded Format (`{eligible dl} (+{non-eligible dl})/eligible/page total`)**: When the user has downloaded paid/unavailable releases or extra albums not listed on the live Bandcamp page, the non-eligible downloads are highlighted with `(+N)`.
+  - Example: `2 (+1)/2/3` indicates 2 free releases downloaded, 1 paid or unavailable release downloaded, out of 2 eligible and 3 total on the page.
   - Example: `40 (+2)/40/40` indicates all 40 free releases downloaded, plus 2 extra downloaded off-page albums.
 Hovering over the badge displays a breakdown of eligible downloads, paid/extra downloads, eligible catalog total, and total page releases.
 

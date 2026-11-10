@@ -202,6 +202,8 @@ pub enum FxAction {
     OpenFolder(ItemKey),
     RedeemDialog(ItemKey),
     SetReleaseDownloaded(ItemKey, bool),
+    SetReleaseUnavailable(ItemKey, bool),
+    RelinkReleaseModal(ItemKey),
     SyncSelected(SyncMode),
     SyncAll(SyncMode),
     CardSize(i8),

@@ -620,10 +620,15 @@ pub fn relink(
     let tx = conn.transaction()?;
     tx.execute(
         "UPDATE releases SET
+             downloaded = 1,
+             downloaded_at = COALESCE(downloaded_at, unixepoch()),
+             downloaded_track_count = COALESCE(downloaded_track_count, track_count),
+             downloaded_modified_at = COALESCE(downloaded_modified_at, modified_at),
              local_path = ?3,
              local_status = 'present',
-             local_checked_at = unixepoch()
-         WHERE item_type = ?1 AND item_id = ?2 AND downloaded = 1",
+             local_checked_at = unixepoch(),
+             origin = COALESCE(origin, 'manual')
+         WHERE item_type = ?1 AND item_id = ?2",
         params![key.kind.as_str(), key.id, path_str],
     )?;
 

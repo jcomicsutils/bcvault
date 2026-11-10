@@ -75,7 +75,12 @@ pub fn update_metadata(conn: &mut Connection, meta: &ReleaseMetadata<'_>) -> Res
     let tx = conn.transaction()?;
     tx.execute(
         "UPDATE releases SET
-             classification = ?3,
+             classification = CASE
+                 WHEN releases.classification = 'unavailable'
+                      AND (releases.metadata_fetched_at IS NULL OR COALESCE(releases.track_count, 1) > 0)
+                 THEN 'unavailable'
+                 ELSE ?3
+             END,
              pricing_json = ?4,
              is_preorder = ?5,
              track_count = ?6,
@@ -123,6 +128,53 @@ pub fn set_classification(
         "UPDATE releases SET classification = ?3 WHERE item_type = ?1 AND item_id = ?2",
         params![key.kind.as_str(), key.id, classification.as_str()],
     )?;
+    Ok(())
+}
+
+pub fn set_unavailable_manual(
+    conn: &mut Connection,
+    keys: &[ItemKey],
+    unavailable: bool,
+) -> Result<(), DbError> {
+    let tx = conn.transaction()?;
+    for &key in keys {
+        if unavailable {
+            tx.execute(
+                "UPDATE releases SET
+                     classification = 'unavailable',
+                     has_remote_update = 0,
+                     remote_update_reason = NULL
+                 WHERE item_type = ?1 AND item_id = ?2",
+                params![key.kind.as_str(), key.id],
+            )?;
+        } else {
+            let pricing_json: Option<String> = tx
+                .query_row(
+                    "SELECT pricing_json FROM releases WHERE item_type = ?1 AND item_id = ?2",
+                    params![key.kind.as_str(), key.id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            let restored = pricing_json
+                .as_deref()
+                .and_then(|s| {
+                    serde_json::from_str::<crate::bandcamp::classify::PricingSignals>(s).ok()
+                })
+                .map(|mut signals| {
+                    signals.track_count = None;
+                    crate::bandcamp::classify::classify(&signals)
+                })
+                .unwrap_or(Classification::Unknown);
+
+            tx.execute(
+                "UPDATE releases SET classification = ?3 WHERE item_type = ?1 AND item_id = ?2",
+                params![key.kind.as_str(), key.id, restored.as_str()],
+            )?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -262,9 +314,9 @@ fn parse_key_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemKey> {
 }
 
 pub fn reclassify_from_pricing_json(conn: &mut Connection) -> Result<(), DbError> {
-    let rows: Vec<(String, i64, String, String)> = {
+    let rows: Vec<(String, i64, String, String, Option<u32>)> = {
         let mut stmt = conn.prepare(
-            "SELECT item_type, item_id, classification, pricing_json
+            "SELECT item_type, item_id, classification, pricing_json, track_count
              FROM releases
              WHERE pricing_json IS NOT NULL AND classification IN ('free', 'nyp')",
         )?;
@@ -274,6 +326,7 @@ pub fn reclassify_from_pricing_json(conn: &mut Connection) -> Result<(), DbError
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, Option<u32>>(4)?,
             ))
         })?;
         let mut v = Vec::new();
@@ -284,10 +337,13 @@ pub fn reclassify_from_pricing_json(conn: &mut Connection) -> Result<(), DbError
     };
 
     let tx = conn.transaction()?;
-    for (item_type, item_id, old_class, pricing_json) in rows {
-        if let Ok(signals) =
+    for (item_type, item_id, old_class, pricing_json, track_count) in rows {
+        if let Ok(mut signals) =
             serde_json::from_str::<crate::bandcamp::classify::PricingSignals>(&pricing_json)
         {
+            if signals.track_count.is_none() {
+                signals.track_count = track_count;
+            }
             let new_class = crate::bandcamp::classify::classify(&signals);
             if new_class.as_str() != old_class {
                 tx.execute(
@@ -559,6 +615,7 @@ pub fn build_query_sql(query: &ReleaseQuery) -> (String, Vec<Value>) {
         ReleaseFilter::Nyp => where_parts.push("r.classification = 'nyp'"),
         ReleaseFilter::EmailRequired => where_parts.push("r.classification = 'email_required'"),
         ReleaseFilter::Paid => where_parts.push("r.classification = 'paid'"),
+        ReleaseFilter::Unavailable => where_parts.push("r.classification = 'unavailable'"),
         ReleaseFilter::NotDownloaded => where_parts.push(
             "r.downloaded = 0 AND r.classification IN ('free','nyp','email_required','unknown')",
         ),
@@ -836,5 +893,94 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all.get(&1), Some(&stats1));
         assert_eq!(all.get(&2), Some(&stats2));
+    }
+
+    #[test]
+    fn unavailable_releases_excluded_from_eligible_and_manual_toggle_works() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'burialgarden', 'Burial Garden', 'https://burialgarden.bandcamp.com')",
+            [],
+        ).unwrap();
+
+        let signals_free = crate::bandcamp::classify::PricingSignals {
+            minimum_price: Some(0.0),
+            set_price: Some(0.0),
+            is_set_price: Some(true),
+            has_free_download_page: true,
+            track_count: Some(3),
+            ..Default::default()
+        };
+        let pricing_free = serde_json::to_string(&signals_free).unwrap();
+
+        let signals_zero = crate::bandcamp::classify::PricingSignals {
+            minimum_price: Some(0.0),
+            set_price: Some(9.0),
+            download_pref: Some(2),
+            has_free_download_page: true,
+            track_count: Some(0),
+            ..Default::default()
+        };
+        let pricing_zero = serde_json::to_string(&signals_zero).unwrap();
+
+        // 2 normal free releases (1 downloaded), 1 zero-track unavailable release (not downloaded yet)
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, pricing_json, track_count, metadata_fetched_at, downloaded, last_seen_at)
+             VALUES ('album', 1, 1, 'Free 1', 'Burial Garden', 'https://burialgarden.bandcamp.com/album/1', 'free', ?1, 3, 1000, 1, 2000),
+                    ('album', 2, 1, 'Free 2', 'Burial Garden', 'https://burialgarden.bandcamp.com/album/2', 'free', ?1, 3, 1000, 0, 2000),
+                    ('album', 3, 1, 'Zero Track', 'Burial Garden', 'https://burialgarden.bandcamp.com/album/3', 'unavailable', ?2, 0, 1000, 0, 2000)",
+            params![pricing_free, pricing_zero],
+        ).unwrap();
+
+        let stats = artist_stats_for_one(&conn, 1).unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.eligible, 2); // Only Free 1 and Free 2 count as eligible
+        assert_eq!(stats.eligible_downloaded, 1);
+        assert_eq!(stats.non_eligible_downloaded, 0);
+        assert_eq!(stats.format_sidebar_badge(), "1/2/3");
+
+        // User manually marks Free 2 as unavailable
+        let k2 = ItemKey::new(ItemType::Album, 2);
+        set_unavailable_manual(&mut conn, &[k2], true).unwrap();
+        let r2 = get_release(&conn, k2).unwrap().unwrap();
+        assert_eq!(r2.classification, Classification::Unavailable);
+
+        let stats_after_mark = artist_stats_for_one(&conn, 1).unwrap();
+        assert_eq!(stats_after_mark.total, 3);
+        assert_eq!(stats_after_mark.eligible, 1); // Only Free 1 is eligible now
+        assert_eq!(stats_after_mark.format_sidebar_badge(), "1/1/3");
+
+        // Syncing metadata for a manually marked unavailable release preserves its unavailable status
+        update_metadata(
+            &mut conn,
+            &ReleaseMetadata {
+                key: k2,
+                classification: Classification::Free,
+                pricing_json: Some(&pricing_free),
+                is_preorder: false,
+                track_count: Some(3),
+                published_at: Some(1000),
+                modified_at: Some(1500),
+                art_id: None,
+            },
+        )
+        .unwrap();
+        let r2_after_sync = get_release(&conn, k2).unwrap().unwrap();
+        assert_eq!(r2_after_sync.classification, Classification::Unavailable);
+
+        // When the unavailable release is matched/downloaded manually, it counts as non-eligible download (+1)
+        let k3 = ItemKey::new(ItemType::Album, 3);
+        set_downloaded_manual(&conn, k3, true).unwrap();
+        let stats_matched = artist_stats_for_one(&conn, 1).unwrap();
+        assert_eq!(stats_matched.eligible_downloaded, 1);
+        assert_eq!(stats_matched.non_eligible_downloaded, 1);
+        assert_eq!(stats_matched.format_sidebar_badge(), "1 (+1)/1/3");
+
+        // User unmarks Free 2 from unavailable -> restores Free from pricing_json
+        set_unavailable_manual(&mut conn, &[k2], false).unwrap();
+        let r2_restored = get_release(&conn, k2).unwrap().unwrap();
+        assert_eq!(r2_restored.classification, Classification::Free);
     }
 }

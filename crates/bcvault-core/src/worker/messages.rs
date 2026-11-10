@@ -46,6 +46,10 @@ pub enum UiToWorkerCommand {
         key: ItemKey,
         downloaded: bool,
     },
+    SetReleaseUnavailable {
+        keys: Vec<ItemKey>,
+        unavailable: bool,
+    },
     CancelJob(JobId),
     RetryJob(JobId),
     CancelAllJobs,

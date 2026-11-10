@@ -43,6 +43,7 @@ pub fn class_badge(ui: &mut Ui, class: Classification) {
         Classification::Nyp => (pal::ACCENT, pal::ACCENT),
         Classification::EmailRequired => (pal::WARN, pal::WARN),
         Classification::Paid => (pal::TEXT_DIM, pal::BORDER),
+        Classification::Unavailable => (pal::TEXT_DIM, pal::BORDER),
         Classification::Unknown => (pal::TEXT_DIM, pal::BORDER),
     };
     badge(ui, class.label(), fg, border);

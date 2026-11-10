@@ -239,6 +239,7 @@ fn parse_tralbum_json_with_dom(
         has_free_download_page,
         download_pref: tr.current.download_pref,
         has_nyp_badge,
+        track_count: Some(track_count),
     };
 
     let pricing_json = serde_json::to_string(&signals)?;
@@ -356,5 +357,50 @@ mod tests {
         assert_eq!(parsed.classification, Classification::Nyp);
         assert_eq!(parsed.signals.download_pref, Some(2));
         assert!(parsed.signals.has_nyp_badge);
+    }
+
+    #[test]
+    fn zero_track_album_with_free_pricing_classifies_as_unavailable() {
+        let html = r#"<!doctype html>
+<html>
+<head>
+  <script data-tralbum='{
+    "FREE": 1,
+    "PAID": 2,
+    "id": 4112009107,
+    "item_type": "album",
+    "freeDownloadPage": "https://bandcamp.com/download?fsig=00000000000000000000000000000000&id=4112009107&ts=1794351138.0&type=album",
+    "art_id": 3549813623,
+    "artist": "Burial Garden",
+    "trackinfo": [],
+    "current": {
+      "id": 4112009107,
+      "type": "album",
+      "band_id": 1467807624,
+      "title": "i usually don&#39;t like going too loud when mixing stuff but i felt like i had to make an exception for this one",
+      "download_pref": 2,
+      "minimum_price": 0.0,
+      "set_price": 9.0,
+      "is_set_price": null,
+      "require_email": null,
+      "publish_date": "01 Oct 2025 19:50:58 GMT",
+      "mod_date": "01 Oct 2025 20:00:19 GMT",
+      "is_preorder": false
+    }
+  }'></script>
+</head>
+<body>
+  <ul class="tralbumCommands">
+    <li id="collect-item-placeholder"></li>
+  </ul>
+  <table class="track_list track_table" id="track_table"></table>
+</body>
+</html>"#;
+        let parsed = parse_release_html(html).unwrap();
+        assert_eq!(parsed.item_id, Some(4_112_009_107));
+        assert_eq!(parsed.item_type, Some(ItemType::Album));
+        assert_eq!(parsed.track_count, 0);
+        assert_eq!(parsed.classification, Classification::Unavailable);
+        assert!(!parsed.classification.auto_downloadable());
     }
 }

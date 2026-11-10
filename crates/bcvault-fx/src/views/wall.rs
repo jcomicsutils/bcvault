@@ -449,9 +449,14 @@ pub fn show(
             // Top-left classification badge on cover
             let badge_col = class_color(row.rel.classification, &th);
             let badge_txt = row.rel.classification.label();
+            let badge_w = if badge_txt.len() > 6 {
+                (badge_txt.len() as f32 * 6.2 + 10.0).ceil()
+            } else {
+                42.0
+            };
             let badge_r = Rect::from_min_size(
                 Pos2::new(cov_rect.min.x + 6.0, cov_rect.min.y + 6.0),
-                Vec2::new(42.0, 16.0),
+                Vec2::new(badge_w, 16.0),
             );
             paint::rect(
                 painter,
@@ -607,12 +612,18 @@ pub fn show(
                     pending_actions.push(FxAction::OpenDrawer(key));
                     ui.close();
                 }
-                if paint::sharp_button(ui, "Download").clicked() {
+                if row.rel.classification.auto_downloadable()
+                    && paint::sharp_button(ui, "Download").clicked()
+                {
                     pending_actions.push(FxAction::DownloadKey(key));
                     ui.close();
                 }
                 if paint::sharp_button(ui, "Open in Browser").clicked() {
                     pending_actions.push(FxAction::OpenInBrowser(key));
+                    ui.close();
+                }
+                if paint::sharp_button(ui, "Relink to Folder...").clicked() {
+                    pending_actions.push(FxAction::RelinkReleaseModal(key));
                     ui.close();
                 }
                 if row.rel.downloaded {
@@ -622,6 +633,15 @@ pub fn show(
                     }
                 } else if paint::sharp_button(ui, "Mark Downloaded").clicked() {
                     pending_actions.push(FxAction::SetReleaseDownloaded(key, true));
+                    ui.close();
+                }
+                if row.rel.classification == Classification::Unavailable {
+                    if paint::sharp_button(ui, "Unmark Unavailable").clicked() {
+                        pending_actions.push(FxAction::SetReleaseUnavailable(key, false));
+                        ui.close();
+                    }
+                } else if paint::sharp_button(ui, "Mark as Unavailable").clicked() {
+                    pending_actions.push(FxAction::SetReleaseUnavailable(key, true));
                     ui.close();
                 }
             });
@@ -731,7 +751,7 @@ pub fn class_color(c: Classification, th: &crate::theme::FxTheme) -> Color32 {
         Classification::Nyp => th.accent,
         Classification::EmailRequired => th.warn,
         Classification::Paid => th.err,
-        Classification::Unknown => th.text_dim,
+        Classification::Unavailable | Classification::Unknown => th.text_dim,
     }
 }
 

@@ -879,7 +879,7 @@ fn score_candidate_internal(
     let expected_tracks = if *item_type == ItemType::Track {
         Some(1)
     } else {
-        track_count.map(|c| c as usize)
+        track_count.filter(|&c| c > 0).map(|c| c as usize)
     };
 
     if let Some(expected) = expected_tracks.filter(|_| name_evidence) {
@@ -1851,5 +1851,48 @@ mod tests {
 
         assert_eq!(res.local_only.len(), 1);
         assert_eq!(res.local_only[0].name, "Unrelated Bootleg");
+    }
+
+    #[test]
+    fn zero_track_and_unavailable_releases_match_folders_without_track_count_penalty() {
+        let cand_exact = make_candidate(
+            "i usually don't like going too loud when mixing stuff",
+            1,
+            None,
+            None,
+            None,
+        );
+        let cand_fuzzy = make_candidate("Special Bonus Mix", 6, None, None, None);
+
+        let mut rel_zero = make_release(
+            4112009107,
+            "i usually don't like going too loud when mixing stuff",
+            0,
+            None,
+        );
+        rel_zero.classification = Classification::Unavailable;
+
+        let mut rel_fuzzy = make_release(4112009108, "Special Bonus Mixes", 0, None);
+        rel_fuzzy.classification = Classification::Unavailable;
+
+        // Fuzzy score on 0-track release does not suffer -0.10 penalty when local candidate has 6 tracks
+        let fuzzy_score = score_release(&cand_fuzzy, &rel_fuzzy, &FolderStyle::default());
+        assert!(
+            fuzzy_score.value > 0.85,
+            "expected no track count penalty on 0-track unavailable release, got {}",
+            fuzzy_score.value
+        );
+
+        let res = assign_matches(
+            &[cand_exact, cand_fuzzy],
+            &[rel_zero, rel_fuzzy],
+            0.85,
+            0.70,
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 2);
+        assert!(res.local_only.is_empty());
+        assert!(res.page_only.is_empty());
     }
 }

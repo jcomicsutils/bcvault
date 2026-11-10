@@ -17,9 +17,10 @@ pub const MIGRATIONS: &[(i32, &str)] = &[
         6,
         include_str!("../../migrations/0006_artist_folders_multi.sql"),
     ),
+    (7, include_str!("../../migrations/0007_unavailable.sql")),
 ];
 
-pub const MAX_VERSION: i32 = 6;
+pub const MAX_VERSION: i32 = 7;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     run_with(conn, MIGRATIONS)
@@ -59,14 +60,14 @@ mod tests {
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
 
         // Re-running is a no-op
         run(&mut conn).unwrap();
         let v2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v2, 6);
+        assert_eq!(v2, 7);
 
         // Bump to version 99 and verify TooNew
         conn.pragma_update(None, "user_version", 99).unwrap();
@@ -75,7 +76,7 @@ mod tests {
             err,
             DbError::TooNew {
                 found: 99,
-                max_supported: 6
+                max_supported: 7
             }
         ));
     }
@@ -215,7 +216,7 @@ mod tests {
             [],
         ).unwrap();
 
-        // Upgrade to migration 6
+        // Upgrade to migration 6 (and 7)
         run(&mut conn).unwrap();
 
         // All rows preserved
@@ -293,5 +294,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining_ignores, 0);
+    }
+
+    #[test]
+    fn migration_0007_allows_unavailable_and_updates_zero_track_releases() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        run_with(&mut conn, &MIGRATIONS[..6]).unwrap();
+
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'artist1', 'Artist 1', 'https://artist1.bandcamp.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, track_count, metadata_fetched_at)
+             VALUES ('album', 101, 1, 'Zero Track Album', 'Artist 1', 'https://artist1.bandcamp.com/album/1', 'nyp', 0, 1000),
+                    ('album', 102, 1, 'Normal Album', 'Artist 1', 'https://artist1.bandcamp.com/album/2', 'free', 4, 1000)",
+            [],
+        ).unwrap();
+
+        run(&mut conn).unwrap();
+
+        let class101: String = conn
+            .query_row(
+                "SELECT classification FROM releases WHERE item_id = 101",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(class101, "unavailable");
+
+        let class102: String = conn
+            .query_row(
+                "SELECT classification FROM releases WHERE item_id = 102",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(class102, "free");
+
+        // Manual update to unavailable works
+        conn.execute(
+            "UPDATE releases SET classification = 'unavailable' WHERE item_id = 102",
+            [],
+        )
+        .unwrap();
     }
 }

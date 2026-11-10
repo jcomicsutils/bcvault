@@ -195,6 +195,9 @@ pub fn show_drawer(
                                     {
                                         pending_actions.push(FxAction::RedeemDialog(key));
                                     }
+                                    if paint::sharp_button(ui, "Relink to Folder...").clicked() {
+                                        pending_actions.push(FxAction::RelinkReleaseModal(key));
+                                    }
                                     if row.rel.downloaded {
                                         if paint::sharp_button(ui, "Unmark Downloaded").clicked() {
                                             pending_actions
@@ -203,6 +206,16 @@ pub fn show_drawer(
                                     } else if paint::sharp_button(ui, "Mark Downloaded").clicked() {
                                         pending_actions
                                             .push(FxAction::SetReleaseDownloaded(key, true));
+                                    }
+                                    if row.rel.classification == Classification::Unavailable {
+                                        if paint::sharp_button(ui, "Unmark Unavailable").clicked() {
+                                            pending_actions
+                                                .push(FxAction::SetReleaseUnavailable(key, false));
+                                        }
+                                    } else if paint::sharp_button(ui, "Mark Unavailable").clicked()
+                                    {
+                                        pending_actions
+                                            .push(FxAction::SetReleaseUnavailable(key, true));
                                     }
                                 });
 

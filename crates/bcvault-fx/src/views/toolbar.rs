@@ -196,6 +196,11 @@ pub fn show(
             ),
             (ReleaseFilter::Paid, "Paid", state.facets.paid),
             (
+                ReleaseFilter::Unavailable,
+                "Unavail",
+                state.facets.unavailable,
+            ),
+            (
                 ReleaseFilter::NotDownloaded,
                 "Not DL",
                 state.facets.not_downloaded,

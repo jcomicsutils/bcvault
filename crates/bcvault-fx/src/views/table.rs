@@ -6,7 +6,10 @@ use crate::{
     state::{FxState, paint_cover_slot},
     views::wall::class_color,
 };
-use bcvault_core::{types::SortDir, worker::messages::UiToWorkerCommand};
+use bcvault_core::{
+    types::{Classification, SortDir},
+    worker::messages::UiToWorkerCommand,
+};
 use chrono::{TimeZone, Utc};
 use egui::{Align, Color32, FontId, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 use egui_extras::{Column, TableBuilder};
@@ -34,7 +37,7 @@ pub fn show(
         .column(Column::exact(58.0)) // Type
         .column(Column::exact(86.0)) // Released
         .column(Column::exact(52.0)) // Tracks
-        .column(Column::exact(68.0)) // Class
+        .column(Column::exact(84.0)) // Class
         .column(Column::exact(62.0)) // Format
         .column(Column::exact(156.0)); // Actions
 
@@ -153,6 +156,38 @@ pub fn show(
                     if resp.clicked() {
                         pending_actions.push(FxAction::OpenDrawer(key));
                     }
+                    resp.context_menu(|ui| {
+                        if paint::sharp_button(ui, "Inspect Details").clicked() {
+                            pending_actions.push(FxAction::OpenDrawer(key));
+                            ui.close();
+                        }
+                        if paint::sharp_button(ui, "Open in Browser").clicked() {
+                            pending_actions.push(FxAction::OpenInBrowser(key));
+                            ui.close();
+                        }
+                        if paint::sharp_button(ui, "Relink to Folder...").clicked() {
+                            pending_actions.push(FxAction::RelinkReleaseModal(key));
+                            ui.close();
+                        }
+                        if w.rel.downloaded {
+                            if paint::sharp_button(ui, "Unmark Downloaded").clicked() {
+                                pending_actions.push(FxAction::SetReleaseDownloaded(key, false));
+                                ui.close();
+                            }
+                        } else if paint::sharp_button(ui, "Mark Downloaded").clicked() {
+                            pending_actions.push(FxAction::SetReleaseDownloaded(key, true));
+                            ui.close();
+                        }
+                        if w.rel.classification == Classification::Unavailable {
+                            if paint::sharp_button(ui, "Unmark Unavailable").clicked() {
+                                pending_actions.push(FxAction::SetReleaseUnavailable(key, false));
+                                ui.close();
+                            }
+                        } else if paint::sharp_button(ui, "Mark as Unavailable").clicked() {
+                            pending_actions.push(FxAction::SetReleaseUnavailable(key, true));
+                            ui.close();
+                        }
+                    });
                     if w.rel.downloaded {
                         if w.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived) {
                             paint_table_badge(ui, "ARCHIVED", th.text_dim, th.border);

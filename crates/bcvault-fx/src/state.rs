@@ -381,6 +381,7 @@ pub struct FxState {
     pub folders: HashMap<i64, Vec<ArtistFolder>>,
     pub relink_picked_folder:
         std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
+    pub pending_relink_pick: Option<ItemKey>,
 
     // Jobs, Speed Sparkline, Rate limit, Toasts & Logs
     pub jobs: Vec<FxJob>,
@@ -489,6 +490,7 @@ impl FxState {
             show_unavailable_window: false,
             folders: HashMap::new(),
             relink_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            pending_relink_pick: None,
             jobs: Vec::new(),
             speed_samples: std::collections::VecDeque::from(vec![0.0; 30]),
             last_speed_sample_at: now,
@@ -1228,6 +1230,15 @@ impl FxState {
             }
             FxAction::SetReleaseDownloaded(key, downloaded) => {
                 let _ = core_tx.send(UiToWorkerCommand::SetReleaseDownloaded { key, downloaded });
+            }
+            FxAction::SetReleaseUnavailable(key, unavailable) => {
+                let _ = core_tx.send(UiToWorkerCommand::SetReleaseUnavailable {
+                    keys: vec![key],
+                    unavailable,
+                });
+            }
+            FxAction::RelinkReleaseModal(key) => {
+                self.pending_relink_pick = Some(key);
             }
             FxAction::SyncSelected(mode) => {
                 if let Some(bid) = self.query.base.band_id {

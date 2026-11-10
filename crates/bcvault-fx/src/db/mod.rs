@@ -81,6 +81,7 @@ pub struct Facets {
     pub nyp: u32,
     pub email_required: u32,
     pub paid: u32,
+    pub unavailable: u32,
     pub not_downloaded: u32,
     pub updated: u32,
 }
@@ -91,7 +92,7 @@ pub struct Stats {
     pub downloaded_releases: u32,
     pub eligible_releases: u32,
     pub total_bytes: u64,
-    pub by_class: [(Classification, u32); 5],
+    pub by_class: [(Classification, u32); 6],
     pub artist_cells: Vec<(i64, String, Classification, u32)>,
     pub daily_downloads: Vec<(String, u32, u64)>,
     pub yearly_releases: Vec<(i32, Classification, u32)>,
@@ -581,6 +582,7 @@ pub fn build_wall_query_sql(query: &FxQuery) -> (String, Vec<Value>) {
             ReleaseFilter::Nyp => where_parts.push("r.classification = 'nyp'"),
             ReleaseFilter::EmailRequired => where_parts.push("r.classification = 'email_required'"),
             ReleaseFilter::Paid => where_parts.push("r.classification = 'paid'"),
+            ReleaseFilter::Unavailable => where_parts.push("r.classification = 'unavailable'"),
             ReleaseFilter::NotDownloaded => where_parts.push(
                 "r.downloaded = 0 AND r.classification IN ('free','nyp','email_required','unknown')",
             ),
@@ -796,6 +798,9 @@ pub fn query_facets(conn: &Connection, query: &FxQuery) -> Result<Facets, DbErro
             Some(Classification::Paid) => {
                 facets.paid += count;
             }
+            Some(Classification::Unavailable) => {
+                facets.unavailable += count;
+            }
             Some(Classification::Unknown) => {
                 facets.not_downloaded += not_dl;
             }
@@ -812,6 +817,7 @@ pub fn query_stats(conn: &Connection) -> Result<Stats, DbError> {
             (Classification::Nyp, 0),
             (Classification::EmailRequired, 0),
             (Classification::Paid, 0),
+            (Classification::Unavailable, 0),
             (Classification::Unknown, 0),
         ],
         ..Default::default()

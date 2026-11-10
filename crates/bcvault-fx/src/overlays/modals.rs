@@ -30,6 +30,26 @@ pub fn show_modals(
     let mut pending_actions: Vec<FxAction> = Vec::new();
     let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
 
+    if let Some((key, path)) = state
+        .relink_picked_folder
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        let _ = core_tx.send(UiToWorkerCommand::RelinkRelease { key, path });
+    }
+
+    if let Some(key) = state.pending_relink_pick.take() {
+        let slot = state.relink_picked_folder.clone();
+        rt_handle.spawn(async move {
+            if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                && let Ok(mut lock) = slot.lock()
+            {
+                *lock = Some((key, folder.path().to_path_buf()));
+            }
+        });
+    }
+
     // 1. Settings Modal (FX Preferences + Core Engine Settings)
     if state.settings_modal_open {
         let mut close_modal = esc;

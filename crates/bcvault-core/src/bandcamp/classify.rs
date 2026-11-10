@@ -12,11 +12,17 @@ pub struct PricingSignals {
     pub download_pref: Option<i64>,
     #[serde(default)]
     pub has_nyp_badge: bool,
+    #[serde(default)]
+    pub track_count: Option<u32>,
 }
 
 const EPSILON: f64 = 0.005;
 
 pub fn classify(signals: &PricingSignals) -> Classification {
+    if signals.track_count == Some(0) {
+        return Classification::Unavailable;
+    }
+
     let Some(min_price) = signals.minimum_price else {
         return Classification::Unknown;
     };
@@ -76,6 +82,31 @@ mod tests {
                 ..Default::default()
             }),
             Classification::Unknown
+        );
+
+        // 0 tracks -> Unavailable regardless of free or NYP pricing signals
+        assert_eq!(
+            classify(&PricingSignals {
+                minimum_price: Some(0.0),
+                set_price: Some(9.0),
+                download_pref: Some(2),
+                has_free_download_page: true,
+                track_count: Some(0),
+                ..Default::default()
+            }),
+            Classification::Unavailable
+        );
+
+        assert_eq!(
+            classify(&PricingSignals {
+                minimum_price: Some(0.0),
+                set_price: Some(0.0),
+                is_set_price: Some(true),
+                has_free_download_page: true,
+                track_count: Some(0),
+                ..Default::default()
+            }),
+            Classification::Unavailable
         );
 
         // Paid (> 0)
@@ -147,6 +178,7 @@ mod tests {
                 has_free_download_page: true,
                 download_pref: Some(2),
                 has_nyp_badge: true,
+                track_count: Some(1),
             }),
             Classification::Nyp
         );
@@ -161,6 +193,7 @@ mod tests {
                 has_free_download_page: true,
                 download_pref: None,
                 has_nyp_badge: false,
+                track_count: None,
             }),
             Classification::Nyp
         );

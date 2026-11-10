@@ -345,6 +345,49 @@ impl Supervisor {
                     }
                 });
             }
+            UiToWorkerCommand::SetReleaseUnavailable { keys, unavailable } => {
+                let pool = self.pool.clone();
+                let bridge = self.bridge.clone();
+                tokio::spawn(async move {
+                    let res = pool
+                        .writer
+                        .call(move |c| {
+                            releases::set_unavailable_manual(c, &keys, unavailable)?;
+                            let mut updated = Vec::new();
+                            let mut bands = std::collections::HashSet::new();
+                            for &key in &keys {
+                                if let Some(r) = releases::get_release(c, key)? {
+                                    bands.insert(r.band_id);
+                                    updated.push(r);
+                                }
+                            }
+                            let mut stats_list = Vec::new();
+                            for band_id in bands {
+                                stats_list.push((band_id, artists::stats_with_quota(c, band_id)?));
+                            }
+                            Ok::<_, DbError>((updated, stats_list))
+                        })
+                        .await;
+                    match res {
+                        Ok((rows, stats_list)) => {
+                            for r in rows {
+                                bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(r)));
+                            }
+                            for (band_id, stats) in stats_list {
+                                bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                            }
+                        }
+                        Err(e) => {
+                            bridge.log(
+                                LogLevel::Error,
+                                "db",
+                                format!("Failed to update unavailable status: {e}"),
+                                None,
+                            );
+                        }
+                    }
+                });
+            }
             UiToWorkerCommand::CancelJob(job_id) => {
                 self.dl_manager.cancel_job(job_id);
             }

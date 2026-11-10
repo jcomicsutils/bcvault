@@ -609,9 +609,15 @@ impl UiState {
             }
             WorkerToUiEvent::ReleaseUpdated(row) => {
                 let key = row.key;
+                if !row.classification.auto_downloadable() || row.is_preorder {
+                    self.selected.remove(&key);
+                }
                 if let Some(&idx) = self.index.get(&key) {
                     if let Some(slot) = self.rows.get_mut(idx) {
                         *slot = CachedRow::from_row(*row, &mut self.artist_interner);
+                    }
+                    if self.filter != ReleaseFilter::All {
+                        self.mark_query_debounced();
                     }
                 } else {
                     // New release discovered during sync; if it matches active artist scope and filter All, insert or trigger query refresh

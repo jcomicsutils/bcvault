@@ -36,6 +36,7 @@ Pre-compiled release archives are available on the [GitHub Releases](https://git
   - `NYP` (Name-Your-Price): Free download eligible via zero-dollar checkout.
   - `EMAIL`: Free download gated behind an email submission.
   - `PAID`: Fixed-price commercial releases (flagged, never scraped or bypassed).
+  - `UNAVAILABLE`: Releases with no Bandcamp download available (e.g., 0-track showcase/external-link pages or releases manually marked unavailable by the user; excluded from eligible download counts while still supporting local folder matching).
   - `UNKNOWN`: Unresolved release awaiting metadata inspection.
 
 ### Smart Incremental Synchronization
