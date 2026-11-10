@@ -13,9 +13,13 @@ pub const MIGRATIONS: &[(i32, &str)] = &[
         5,
         include_str!("../../migrations/0005_artist_folder_local_only.sql"),
     ),
+    (
+        6,
+        include_str!("../../migrations/0006_artist_folders_multi.sql"),
+    ),
 ];
 
-pub const MAX_VERSION: i32 = 5;
+pub const MAX_VERSION: i32 = 6;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     run_with(conn, MIGRATIONS)
@@ -55,14 +59,14 @@ mod tests {
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
 
         // Re-running is a no-op
         run(&mut conn).unwrap();
         let v2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v2, 5);
+        assert_eq!(v2, 6);
 
         // Bump to version 99 and verify TooNew
         conn.pragma_update(None, "user_version", 99).unwrap();
@@ -71,7 +75,7 @@ mod tests {
             err,
             DbError::TooNew {
                 found: 99,
-                max_supported: 5
+                max_supported: 6
             }
         ));
     }
@@ -170,5 +174,124 @@ mod tests {
             )
             .unwrap();
         assert_eq!(updated, 5);
+    }
+
+    #[test]
+    fn migration_0006_upgrades_to_multi_artist_folders() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        // Run migrations 1..=5
+        run_with(&mut conn, &MIGRATIONS[..5]).unwrap();
+
+        // Populate 0005 DB with artist, release, folder, ignored row, batch and event
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'artist1', 'Artist 1', 'https://artist1.bandcamp.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, downloaded, local_status)
+             VALUES ('album', 101, 1, 'Album 1', 'Artist 1', 'https://artist1.bandcamp.com/album/1', 1, 'present')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO artist_folders (band_id, path, path_key, added_at, local_only_count)
+             VALUES (1, '/music/a1', 'a1', 1000, 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO artist_folder_ignored (band_id, path_key) VALUES (1, 'a1/extra')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO library_batches (id, kind, summary_json) VALUES (1, 'adopt', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO library_events (id, batch_id, item_type, item_id, kind) VALUES (1, 1, 'album', 101, 'adopted')",
+            [],
+        ).unwrap();
+
+        // Upgrade to migration 6
+        run(&mut conn).unwrap();
+
+        // All rows preserved
+        let (id, band_id, path, path_key, local_only_count): (i64, i64, String, String, u32) = conn
+            .query_row(
+                "SELECT id, band_id, path, path_key, local_only_count FROM artist_folders WHERE band_id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert!(id > 0);
+        assert_eq!(band_id, 1);
+        assert_eq!(path, "/music/a1");
+        assert_eq!(path_key, "a1");
+        assert_eq!(local_only_count, 3);
+
+        let ignored_key: String = conn
+            .query_row(
+                "SELECT path_key FROM artist_folder_ignored WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ignored_key, "a1/extra");
+
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM library_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(event_count, 1);
+
+        // PRAGMA foreign_key_check must be empty
+        let fk_violations: Vec<String> = conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(fk_violations.is_empty(), "FK violations: {fk_violations:?}");
+
+        // PRAGMA integrity_check must be 'ok'
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+
+        // Inserting two folders for one band works
+        conn.execute(
+            "INSERT INTO artist_folders (band_id, path, path_key, added_at, local_only_count)
+             VALUES (1, '/music/a2', 'a2', 2000, 2)",
+            [],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artist_folders WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // Deleting the artist cascades folders and ignores
+        conn.execute("DELETE FROM artists WHERE band_id = 1", [])
+            .unwrap();
+        let remaining_folders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artist_folders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining_folders, 0);
+
+        let remaining_ignores: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artist_folder_ignored", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining_ignores, 0);
     }
 }

@@ -806,11 +806,13 @@ mod tests {
         assert!(st.folders.is_empty());
 
         let f1 = ArtistFolder {
+            id: 1,
             band_id: 10,
             path: PathBuf::from("/music/artist10"),
             state: FolderState::Ok,
         };
         let f2 = ArtistFolder {
+            id: 2,
             band_id: 20,
             path: PathBuf::from("/music/artist20"),
             state: FolderState::Missing,
@@ -828,6 +830,7 @@ mod tests {
 
         // 2. FolderStatus updates an existing folder state
         let f2_updated = ArtistFolder {
+            id: 2,
             band_id: 20,
             path: PathBuf::from("/music/artist20"),
             state: FolderState::Ok,
@@ -1090,6 +1093,7 @@ mod tests {
         st.folders.insert(
             42,
             crate::types::ArtistFolder {
+                id: 1,
                 band_id: 42,
                 path: PathBuf::from("/music/aphex"),
                 state: FolderState::Missing,
@@ -1098,6 +1102,7 @@ mod tests {
         st.folders.insert(
             43,
             crate::types::ArtistFolder {
+                id: 2,
                 band_id: 43,
                 path: PathBuf::from("/music/boc"),
                 state: FolderState::Ok,

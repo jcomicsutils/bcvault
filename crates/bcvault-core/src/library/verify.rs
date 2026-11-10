@@ -675,6 +675,7 @@ mod tests {
         let band_id = 42;
         let link_path = PathBuf::from("/music/Artist");
         let linked = ArtistFolder {
+            id: 1,
             band_id,
             path: link_path.clone(),
             state: FolderState::Missing,

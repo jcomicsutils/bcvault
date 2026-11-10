@@ -95,6 +95,10 @@ pub enum LinkFolderError {
         band_id: i64,
         path: std::path::PathBuf,
     },
+    #[error("already covered by {path}")]
+    AlreadyCovered { path: std::path::PathBuf },
+    #[error("contains {path}; unlink that first")]
+    ContainsOwnFolder { path: std::path::PathBuf },
     #[error("Database error: {0}")]
     Db(String),
 }

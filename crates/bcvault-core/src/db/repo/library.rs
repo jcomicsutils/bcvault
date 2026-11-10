@@ -64,12 +64,13 @@ pub fn probe_folder_state(path: &Path) -> FolderState {
     }
 }
 
-pub fn link_folder(
-    conn: &mut Connection,
+fn validate_folder_path(
+    conn: &Connection,
     band_id: i64,
+    ignore_folder_id: Option<i64>,
     path: &Path,
     out_dir: &Path,
-) -> Result<ArtistFolder, LinkFolderError> {
+) -> Result<(PathBuf, String), LinkFolderError> {
     if !path.exists() {
         return Err(LinkFolderError::NotFound(path.to_path_buf()));
     }
@@ -97,23 +98,24 @@ pub fn link_folder(
         }
     }
 
-    // Validate against existing artist folders (excluding this artist)
-    {
-        let mut stmt = conn.prepare("SELECT band_id, path, path_key FROM artist_folders")?;
-        let existing_rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
+    // Validate against existing artist folders
+    let mut stmt = conn.prepare("SELECT id, band_id, path, path_key FROM artist_folders")?;
+    let existing_rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
 
-        for row in existing_rows {
-            let (other_band_id, other_path_str, other_key) = row?;
-            if other_band_id == band_id {
-                continue; // Re-linking the same artist is allowed (replaces link)
-            }
-            let other_canon = PathBuf::from(&other_path_str);
+    for row in existing_rows {
+        let (other_id, other_band_id, other_path_str, other_key) = row?;
+        if Some(other_id) == ignore_folder_id {
+            continue;
+        }
+        let other_canon = PathBuf::from(&other_path_str);
+        if other_band_id != band_id {
             if path_key == other_key
                 || canon == other_canon
                 || canon.starts_with(&other_canon)
@@ -124,51 +126,184 @@ pub fn link_folder(
                     path: other_canon,
                 });
             }
+        } else {
+            // Equal to, or inside, an existing link of the same artist: AlreadyCovered
+            if path_key == other_key || canon == other_canon || canon.starts_with(&other_canon) {
+                return Err(LinkFolderError::AlreadyCovered { path: other_canon });
+            }
+            // Contains an existing link of the same artist: ContainsOwnFolder
+            if other_canon.starts_with(&canon) {
+                return Err(LinkFolderError::ContainsOwnFolder { path: other_canon });
+            }
         }
     }
 
-    let tx = conn.transaction()?;
+    Ok((canon, path_key))
+}
+
+pub fn add_folder(
+    conn: &mut Connection,
+    band_id: i64,
+    path: &Path,
+    out_dir: &Path,
+) -> Result<ArtistFolder, LinkFolderError> {
+    let (canon, path_key) = validate_folder_path(conn, band_id, None, path, out_dir)?;
+
     let path_str = canon.to_string_lossy().into_owned();
+    let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO artist_folders (band_id, path, path_key, added_at)
-         VALUES (?1, ?2, ?3, unixepoch())
-         ON CONFLICT(band_id) DO UPDATE SET
-             path = excluded.path,
-             path_key = excluded.path_key,
-             added_at = unixepoch(),
-             local_only_count = 0",
+        "INSERT INTO artist_folders (band_id, path, path_key, added_at, local_only_count)
+         VALUES (?1, ?2, ?3, unixepoch(), 0)",
         params![band_id, path_str, path_key],
     )?;
+    let id = tx.last_insert_rowid();
     tx.commit()?;
 
     Ok(ArtistFolder {
+        id,
         band_id,
         path: canon,
         state: FolderState::Ok,
     })
 }
 
-pub fn unlink_folder(conn: &Connection, band_id: i64) -> Result<bool, DbError> {
-    let affected = conn.execute(
-        "DELETE FROM artist_folders WHERE band_id = ?1",
-        params![band_id],
+pub fn replace_folder(
+    conn: &mut Connection,
+    folder_id: i64,
+    new_path: &Path,
+    out_dir: &Path,
+) -> Result<ArtistFolder, LinkFolderError> {
+    let band_id: i64 = conn
+        .query_row(
+            "SELECT band_id FROM artist_folders WHERE id = ?1",
+            params![folder_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| LinkFolderError::NotFound(new_path.to_path_buf()))?;
+
+    let (canon, path_key) =
+        validate_folder_path(conn, band_id, Some(folder_id), new_path, out_dir)?;
+
+    let path_str = canon.to_string_lossy().into_owned();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE artist_folders
+         SET path = ?1, path_key = ?2, local_only_count = 0
+         WHERE id = ?3",
+        params![path_str, path_key, folder_id],
     )?;
-    Ok(affected > 0)
+    tx.commit()?;
+
+    Ok(ArtistFolder {
+        id: folder_id,
+        band_id,
+        path: canon,
+        state: FolderState::Ok,
+    })
 }
 
-pub fn get_folder(conn: &Connection, band_id: i64) -> Result<Option<ArtistFolder>, DbError> {
-    let path_opt: Option<String> = conn
+pub fn link_folder(
+    conn: &mut Connection,
+    band_id: i64,
+    path: &Path,
+    out_dir: &Path,
+) -> Result<ArtistFolder, LinkFolderError> {
+    let first = get_folders(conn, band_id)?.into_iter().next();
+    if let Some(f) = first {
+        replace_folder(conn, f.id, path, out_dir)
+    } else {
+        add_folder(conn, band_id, path, out_dir)
+    }
+}
+
+pub fn unlink_folder(conn: &Connection, folder_or_band_id: i64) -> Result<bool, DbError> {
+    let folder: Option<(i64, String, i64)> = conn
         .query_row(
-            "SELECT path FROM artist_folders WHERE band_id = ?1",
-            params![band_id],
-            |r| r.get(0),
+            "SELECT id, path_key, band_id FROM artist_folders WHERE id = ?1",
+            params![folder_or_band_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
 
-    Ok(path_opt.map(|p| {
-        let path = PathBuf::from(p);
+    if let Some((fid, path_key, band_id)) = folder {
+        conn.execute(
+            "DELETE FROM artist_folder_ignored
+             WHERE band_id = ?1 AND (path_key = ?2 OR substr(path_key, 1, length(?2) + 1) = ?2 || '/')",
+            params![band_id, path_key],
+        )?;
+        let affected = conn.execute("DELETE FROM artist_folders WHERE id = ?1", params![fid])?;
+        return Ok(affected > 0);
+    }
+
+    // Fallback if called by band_id (during transition)
+    let folders: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, path_key FROM artist_folders WHERE band_id = ?1")?;
+        let rows = stmt.query_map(params![folder_or_band_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        list
+    };
+    if folders.is_empty() {
+        return Ok(false);
+    }
+    for (fid, path_key) in folders {
+        conn.execute(
+            "DELETE FROM artist_folder_ignored
+             WHERE band_id = ?1 AND (path_key = ?2 OR substr(path_key, 1, length(?2) + 1) = ?2 || '/')",
+            params![folder_or_band_id, path_key],
+        )?;
+        conn.execute("DELETE FROM artist_folders WHERE id = ?1", params![fid])?;
+    }
+    Ok(true)
+}
+
+pub fn get_folder(conn: &Connection, band_id: i64) -> Result<Option<ArtistFolder>, DbError> {
+    Ok(get_folders(conn, band_id)?.into_iter().next())
+}
+
+pub fn get_folders(conn: &Connection, band_id: i64) -> Result<Vec<ArtistFolder>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, band_id, path FROM artist_folders WHERE band_id = ?1 ORDER BY added_at, id",
+    )?;
+    let rows = stmt.query_map(params![band_id], |r| {
+        let id: i64 = r.get(0)?;
+        let band_id: i64 = r.get(1)?;
+        let path_str: String = r.get(2)?;
+        let path = PathBuf::from(path_str);
+        let state = probe_folder_state(&path);
+        Ok(ArtistFolder {
+            id,
+            band_id,
+            path,
+            state,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub fn get_folder_by_id(
+    conn: &Connection,
+    folder_id: i64,
+) -> Result<Option<ArtistFolder>, DbError> {
+    let row: Option<(i64, i64, String)> = conn
+        .query_row(
+            "SELECT id, band_id, path FROM artist_folders WHERE id = ?1",
+            params![folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(id, band_id, path_str)| {
+        let path = PathBuf::from(path_str);
         let state = probe_folder_state(&path);
         ArtistFolder {
+            id,
             band_id,
             path,
             state,
@@ -177,13 +312,16 @@ pub fn get_folder(conn: &Connection, band_id: i64) -> Result<Option<ArtistFolder
 }
 
 pub fn all_folders(conn: &Connection) -> Result<Vec<ArtistFolder>, DbError> {
-    let mut stmt = conn.prepare("SELECT band_id, path FROM artist_folders ORDER BY band_id")?;
+    let mut stmt =
+        conn.prepare("SELECT id, band_id, path FROM artist_folders ORDER BY added_at, id")?;
     let rows = stmt.query_map([], |r| {
-        let band_id: i64 = r.get(0)?;
-        let path_str: String = r.get(1)?;
+        let id: i64 = r.get(0)?;
+        let band_id: i64 = r.get(1)?;
+        let path_str: String = r.get(2)?;
         let path = PathBuf::from(path_str);
         let state = probe_folder_state(&path);
         Ok(ArtistFolder {
+            id,
             band_id,
             path,
             state,
@@ -195,6 +333,17 @@ pub fn all_folders(conn: &Connection) -> Result<Vec<ArtistFolder>, DbError> {
         out.push(r?);
     }
     Ok(out)
+}
+
+pub fn owning_folder<'a>(folders: &'a [ArtistFolder], path: &Path) -> Option<&'a ArtistFolder> {
+    let target_key = normalize_path_key(path);
+    folders
+        .iter()
+        .filter(|f| {
+            let f_key = normalize_path_key(&f.path);
+            target_key == f_key || target_key.starts_with(&format!("{f_key}/"))
+        })
+        .max_by_key(|f| normalize_path_key(&f.path).len())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,12 +553,32 @@ fn adopt_internal(conn: &mut Connection, args: AdoptArgs<'_>) -> Result<(), DbEr
     )?;
 
     if args.decrement_local_only {
-        tx.execute(
-            "UPDATE artist_folders
-             SET local_only_count = MAX(0, local_only_count - 1)
-             WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)",
-            params![args.key.kind.as_str(), args.key.id],
-        )?;
+        let path_key = normalize_path_key(args.path);
+        let folder_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM artist_folders
+                 WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)
+                   AND (?3 = path_key OR substr(?3, 1, length(path_key) + 1) = path_key || '/')
+                 ORDER BY length(path_key) DESC
+                 LIMIT 1",
+                params![args.key.kind.as_str(), args.key.id, path_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(fid) = folder_id {
+            tx.execute(
+                "UPDATE artist_folders SET local_only_count = MAX(0, local_only_count - 1) WHERE id = ?1",
+                params![fid],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE artist_folders
+                 SET local_only_count = MAX(0, local_only_count - 1)
+                 WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)",
+                params![args.key.kind.as_str(), args.key.id],
+            )?;
+        }
     }
 
     let new_snap = get_release_snapshot(&tx, args.key)?
@@ -619,13 +788,19 @@ pub fn restore(
 
 pub fn update_folder_local_only_count(
     conn: &Connection,
-    band_id: i64,
+    folder_or_band_id: i64,
     count: u32,
 ) -> Result<(), DbError> {
-    conn.execute(
-        "UPDATE artist_folders SET local_only_count = ?1, last_scan_at = unixepoch() WHERE band_id = ?2",
-        params![count, band_id],
+    let affected = conn.execute(
+        "UPDATE artist_folders SET local_only_count = ?1, last_scan_at = unixepoch() WHERE id = ?2",
+        params![count, folder_or_band_id],
     )?;
+    if affected == 0 {
+        conn.execute(
+            "UPDATE artist_folders SET local_only_count = ?1, last_scan_at = unixepoch() WHERE band_id = ?2",
+            params![count, folder_or_band_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -635,10 +810,22 @@ pub fn ignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result<(
         params![band_id, path_key],
     )?;
     if affected > 0 {
-        conn.execute(
-            "UPDATE artist_folders SET local_only_count = MAX(0, local_only_count - 1) WHERE band_id = ?1",
-            params![band_id],
-        )?;
+        let owning_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM artist_folders
+                 WHERE band_id = ?1 AND (?2 = path_key OR substr(?2, 1, length(path_key) + 1) = path_key || '/')
+                 ORDER BY length(path_key) DESC
+                 LIMIT 1",
+                params![band_id, path_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(fid) = owning_id {
+            conn.execute(
+                "UPDATE artist_folders SET local_only_count = MAX(0, local_only_count - 1) WHERE id = ?1",
+                params![fid],
+            )?;
+        }
     }
     Ok(())
 }
@@ -649,10 +836,22 @@ pub fn unignore_local(conn: &Connection, band_id: i64, path_key: &str) -> Result
         params![band_id, path_key],
     )?;
     if affected > 0 {
-        conn.execute(
-            "UPDATE artist_folders SET local_only_count = local_only_count + 1 WHERE band_id = ?1",
-            params![band_id],
-        )?;
+        let owning_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM artist_folders
+                 WHERE band_id = ?1 AND (?2 = path_key OR substr(?2, 1, length(path_key) + 1) = path_key || '/')
+                 ORDER BY length(path_key) DESC
+                 LIMIT 1",
+                params![band_id, path_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(fid) = owning_id {
+            conn.execute(
+                "UPDATE artist_folders SET local_only_count = local_only_count + 1 WHERE id = ?1",
+                params![fid],
+            )?;
+        }
     }
     Ok(())
 }
@@ -726,7 +925,7 @@ pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, 
     // Fetch events in reverse order
     let events = {
         let mut stmt = conn.prepare(
-            "SELECT item_type, item_id, kind, old_json FROM library_events
+            "SELECT item_type, item_id, kind, old_json, new_json FROM library_events
              WHERE batch_id = ?1 ORDER BY id DESC",
         )?;
         let rows = stmt.query_map(params![batch_id], |r| {
@@ -735,7 +934,8 @@ pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, 
             let id: i64 = r.get(1)?;
             let ev_kind: String = r.get(2)?;
             let old_json: Option<String> = r.get(3)?;
-            Ok((ItemKey { kind, id }, ev_kind, old_json))
+            let new_json: Option<String> = r.get(4)?;
+            Ok((ItemKey { kind, id }, ev_kind, old_json, new_json))
         })?;
         let mut evs = Vec::new();
         for r in rows {
@@ -745,18 +945,49 @@ pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, 
     };
 
     let tx = conn.transaction()?;
-    for (key, ev_kind, old_json) in events {
+    for (key, ev_kind, old_json, new_json) in events {
         if let Some(json_str) = old_json {
             let snap: ReleaseSnapshot = serde_json::from_str(&json_str)?;
             apply_release_snapshot(&tx, key, &snap)?;
         }
         if ev_kind == "attached" {
-            tx.execute(
-                "UPDATE artist_folders
-                 SET local_only_count = local_only_count + 1
-                 WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)",
-                params![key.kind.as_str(), key.id],
-            )?;
+            let path_opt: Option<PathBuf> = if let Some(new_json_str) = new_json {
+                serde_json::from_str::<ReleaseSnapshot>(&new_json_str)
+                    .ok()
+                    .and_then(|s| s.local_path)
+            } else {
+                None
+            };
+
+            let folder_id: Option<i64> = if let Some(p) = path_opt {
+                let path_key = normalize_path_key(&p);
+                tx.query_row(
+                    "SELECT id FROM artist_folders
+                     WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)
+                       AND (?3 = path_key OR substr(?3, 1, length(path_key) + 1) = path_key || '/')
+                     ORDER BY length(path_key) DESC
+                     LIMIT 1",
+                    params![key.kind.as_str(), key.id, path_key],
+                    |r| r.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+
+            if let Some(fid) = folder_id {
+                tx.execute(
+                    "UPDATE artist_folders SET local_only_count = local_only_count + 1 WHERE id = ?1",
+                    params![fid],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE artist_folders
+                     SET local_only_count = local_only_count + 1
+                     WHERE band_id = (SELECT band_id FROM releases WHERE item_type = ?1 AND item_id = ?2)",
+                    params![key.kind.as_str(), key.id],
+                )?;
+            }
         }
     }
 
@@ -1157,5 +1388,270 @@ mod tests {
         let snap_after_undo = get_release_snapshot(&conn, key100).unwrap().unwrap();
         assert!(!snap_after_undo.downloaded);
         assert_eq!(snap_after_undo.local_status, None);
+    }
+
+    #[test]
+    fn test_two_folders_for_one_artist_ordered_and_probed() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let f1_dir = tmp.path().join("project1");
+        let f2_dir = tmp.path().join("project2");
+        std::fs::create_dir(&f1_dir).unwrap();
+        std::fs::create_dir(&f2_dir).unwrap();
+
+        let f1 = add_folder(&mut conn, 1, &f1_dir, &out_dir).unwrap();
+        let f2 = add_folder(&mut conn, 1, &f2_dir, &out_dir).unwrap();
+
+        assert_eq!(f1.band_id, 1);
+        assert_eq!(f2.band_id, 1);
+        assert_ne!(f1.id, f2.id);
+
+        let folders = get_folders(&conn, 1).unwrap();
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].id, f1.id);
+        assert_eq!(folders[1].id, f2.id);
+        assert_eq!(folders[0].state, FolderState::Ok);
+        assert_eq!(folders[1].state, FolderState::Ok);
+
+        // Delete f2 on disk: get_folders probes its state as Missing
+        std::fs::remove_dir(&f2_dir).unwrap();
+        let folders_after = get_folders(&conn, 1).unwrap();
+        assert_eq!(folders_after[0].state, FolderState::Ok);
+        assert_eq!(folders_after[1].state, FolderState::Missing);
+    }
+
+    #[test]
+    fn test_same_artist_overlap_already_covered_and_contains_own_folder() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let parent = tmp.path().join("artist1");
+        let sub = parent.join("album");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Add parent folder first
+        let f1 = add_folder(&mut conn, 1, &parent, &out_dir).unwrap();
+
+        // 1. Same path added twice -> AlreadyCovered
+        let err1 = add_folder(&mut conn, 1, &parent, &out_dir).unwrap_err();
+        assert!(matches!(err1, LinkFolderError::AlreadyCovered { ref path } if path == &f1.path));
+
+        // 2. Subfolder inside own folder -> AlreadyCovered
+        let err2 = add_folder(&mut conn, 1, &sub, &out_dir).unwrap_err();
+        assert!(matches!(err2, LinkFolderError::AlreadyCovered { ref path } if path == &f1.path));
+
+        // Unlink parent, add subfolder first, then try to add parent containing it
+        unlink_folder(&conn, f1.id).unwrap();
+        let f_sub = add_folder(&mut conn, 1, &sub, &out_dir).unwrap();
+
+        // 3. Parent containing existing own subfolder -> ContainsOwnFolder
+        let err3 = add_folder(&mut conn, 1, &parent, &out_dir).unwrap_err();
+        assert!(
+            matches!(err3, LinkFolderError::ContainsOwnFolder { ref path } if path == &f_sub.path)
+        );
+
+        // Ensure no extra row was written
+        let folders = get_folders(&conn, 1).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].id, f_sub.id);
+    }
+
+    #[test]
+    fn test_second_folder_overlap_other_artist_and_out_dir() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let f1_dir = tmp.path().join("f1");
+        let f2_other = tmp.path().join("f2_other");
+        std::fs::create_dir(&f1_dir).unwrap();
+        std::fs::create_dir(&f2_other).unwrap();
+
+        // Artist 1 links f1
+        add_folder(&mut conn, 1, &f1_dir, &out_dir).unwrap();
+
+        // Artist 2 links f2_other
+        let f2 = add_folder(&mut conn, 2, &f2_other, &out_dir).unwrap();
+
+        // Artist 1 tries to add f2_other as second folder -> OverlapsExisting
+        let err = add_folder(&mut conn, 1, &f2_other, &out_dir).unwrap_err();
+        assert!(
+            matches!(err, LinkFolderError::OverlapsExisting { band_id: 2, ref path } if path == &f2.path)
+        );
+
+        // Artist 1 tries to add subfolder of out_dir -> OverlapsOutDir
+        let sub_out = out_dir.join("sub");
+        std::fs::create_dir(&sub_out).unwrap();
+        let err2 = add_folder(&mut conn, 1, &sub_out, &out_dir).unwrap_err();
+        assert!(matches!(err2, LinkFolderError::OverlapsOutDir(_)));
+    }
+
+    #[test]
+    fn test_replace_folder_preserves_id_and_resets_count() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let f1_dir = tmp.path().join("f1");
+        let f1_new = tmp.path().join("f1_new");
+        let other_dir = tmp.path().join("other");
+        std::fs::create_dir(&f1_dir).unwrap();
+        std::fs::create_dir(&f1_new).unwrap();
+        std::fs::create_dir(&other_dir).unwrap();
+
+        let f1 = add_folder(&mut conn, 1, &f1_dir, &out_dir).unwrap();
+        let _other = add_folder(&mut conn, 2, &other_dir, &out_dir).unwrap();
+        update_folder_local_only_count(&conn, f1.id, 5).unwrap();
+
+        // Replace with invalid overlap with artist 2
+        let err = replace_folder(&mut conn, f1.id, &other_dir, &out_dir).unwrap_err();
+        assert!(matches!(
+            err,
+            LinkFolderError::OverlapsExisting { band_id: 2, .. }
+        ));
+
+        // Replace with valid new path
+        let rep = replace_folder(&mut conn, f1.id, &f1_new, &out_dir).unwrap();
+        assert_eq!(rep.id, f1.id);
+        assert_eq!(rep.band_id, 1);
+        assert_eq!(rep.path, dunce::canonicalize(&f1_new).unwrap());
+
+        let count: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE id = ?1",
+                params![f1.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "replace_folder must reset local_only_count to 0");
+    }
+
+    #[test]
+    fn test_unlink_folder_with_two_folders_and_ignores() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let root1 = tmp.path().join("root1");
+        let root2 = tmp.path().join("root2");
+        std::fs::create_dir(&root1).unwrap();
+        std::fs::create_dir(&root2).unwrap();
+
+        let f1 = add_folder(&mut conn, 1, &root1, &out_dir).unwrap();
+        let f2 = add_folder(&mut conn, 1, &root2, &out_dir).unwrap();
+
+        // Add ignores under both folders
+        let key1 = normalize_path_key(&f1.path.join("orphan1"));
+        let key2 = normalize_path_key(&f2.path.join("orphan2"));
+        ignore_local(&conn, 1, &key1).unwrap();
+        ignore_local(&conn, 1, &key2).unwrap();
+
+        let ignored_before = get_ignored_local(&conn, 1).unwrap();
+        assert!(ignored_before.contains(&key1));
+        assert!(ignored_before.contains(&key2));
+
+        // Unlink folder 1: only key1 is deleted; key2 and folder 2 are untouched
+        assert!(unlink_folder(&conn, f1.id).unwrap());
+
+        let remaining_folders = get_folders(&conn, 1).unwrap();
+        assert_eq!(remaining_folders.len(), 1);
+        assert_eq!(remaining_folders[0].id, f2.id);
+
+        let ignored_after = get_ignored_local(&conn, 1).unwrap();
+        assert!(!ignored_after.contains(&key1));
+        assert!(ignored_after.contains(&key2));
+    }
+
+    #[test]
+    fn test_folder_name_with_percent_and_underscore_not_matching_sibling() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let dir1 = tmp.path().join("100%_pure");
+        let dir2 = tmp.path().join("100%_pure_extra");
+        std::fs::create_dir(&dir1).unwrap();
+        std::fs::create_dir(&dir2).unwrap();
+
+        let f1 = add_folder(&mut conn, 1, &dir1, &out_dir).unwrap();
+        let f2 = add_folder(&mut conn, 1, &dir2, &out_dir).unwrap();
+        update_folder_local_only_count(&conn, f1.id, 2).unwrap();
+        update_folder_local_only_count(&conn, f2.id, 3).unwrap();
+
+        // An orphan inside dir2 must NOT match dir1 even though dir1 is a prefix of dir2's name
+        let orphan2 = normalize_path_key(&dir2.join("album"));
+        ignore_local(&conn, 1, &orphan2).unwrap();
+
+        let c1: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE id = ?1",
+                params![f1.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let c2: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE id = ?1",
+                params![f2.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(c1, 2, "dir1 count must not change");
+        assert_eq!(c2, 2, "dir2 count decremented from 3 to 2");
+
+        // Unlinking dir1 does not touch orphan2
+        unlink_folder(&conn, f1.id).unwrap();
+        let ignored = get_ignored_local(&conn, 1).unwrap();
+        assert!(ignored.contains(&orphan2));
+    }
+
+    #[test]
+    fn test_owning_folder_nested_name_collisions() {
+        let f_ab = ArtistFolder {
+            id: 1,
+            band_id: 1,
+            path: PathBuf::from("/music/a/b"),
+            state: FolderState::Ok,
+        };
+        let f_abc = ArtistFolder {
+            id: 2,
+            band_id: 1,
+            path: PathBuf::from("/music/a/bc"),
+            state: FolderState::Ok,
+        };
+        let f_ab_nested = ArtistFolder {
+            id: 3,
+            band_id: 1,
+            path: PathBuf::from("/music/a/b/sub"),
+            state: FolderState::Ok,
+        };
+
+        let folders = [f_ab.clone(), f_abc.clone(), f_ab_nested.clone()];
+
+        // Path in /music/a/bc/album belongs to /music/a/bc, not /music/a/b
+        let target_bc = Path::new("/music/a/bc/album");
+        assert_eq!(owning_folder(&folders, target_bc).map(|f| f.id), Some(2));
+
+        // Path in /music/a/b/sub/album belongs to /music/a/b/sub (longest wins over /music/a/b)
+        let target_sub = Path::new("/music/a/b/sub/album");
+        assert_eq!(owning_folder(&folders, target_sub).map(|f| f.id), Some(3));
+
+        // Path in /music/a/b/other belongs to /music/a/b
+        let target_b = Path::new("/music/a/b/other");
+        assert_eq!(owning_folder(&folders, target_b).map(|f| f.id), Some(1));
+
+        // Path outside belongs to None
+        let target_outside = Path::new("/music/other/album");
+        assert_eq!(owning_folder(&folders, target_outside), None);
     }
 }

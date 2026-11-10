@@ -1551,6 +1551,7 @@ mod tests {
 
         // 1. Ready event sets folders
         let f1 = ArtistFolder {
+            id: 1,
             band_id: 10,
             path: std::path::PathBuf::from("/music/artist10"),
             state: bcvault_core::types::FolderState::Ok,
@@ -1568,6 +1569,7 @@ mod tests {
 
         // 2. FolderStatus updates folder
         let f1_missing = ArtistFolder {
+            id: 1,
             band_id: 10,
             path: std::path::PathBuf::from("/music/artist10"),
             state: bcvault_core::types::FolderState::Missing,
@@ -1744,6 +1746,7 @@ mod tests {
         st.folders.insert(
             42,
             bcvault_core::types::ArtistFolder {
+                id: 1,
                 band_id: 42,
                 path: PathBuf::from("/music/aphex"),
                 state: FolderState::Missing,
@@ -1752,6 +1755,7 @@ mod tests {
         st.folders.insert(
             43,
             bcvault_core::types::ArtistFolder {
+                id: 2,
                 band_id: 43,
                 path: PathBuf::from("/music/boc"),
                 state: FolderState::Ok,

@@ -101,14 +101,15 @@ impl LibraryService {
             .call(move |c| Ok(lib_repo::link_folder(c, band_id, &link_path, &st.out_dir)?))
             .await;
 
-        match link_res {
-            Ok(_) => {
+        let linked_af = match link_res {
+            Ok(af) => {
                 bridge.log(
                     LogLevel::Info,
                     "library",
                     format!("Linked folder '{}' to artist {band_id}", path.display()),
                     None,
                 );
+                af
             }
             Err(e) => {
                 bridge.log(
@@ -119,10 +120,11 @@ impl LibraryService {
                 );
                 return;
             }
-        }
+        };
 
         let state = probe_folder(&path);
         let af = ArtistFolder {
+            id: linked_af.id,
             band_id,
             path: path.clone(),
             state,
@@ -500,6 +502,7 @@ impl LibraryService {
                 );
                 let state = probe_folder(&af.path);
                 let updated_af = ArtistFolder {
+                    id: af.id,
                     band_id,
                     path: af.path.clone(),
                     state,
@@ -1391,6 +1394,7 @@ impl LibraryService {
 
         let state = probe_folder(&folder.path);
         let updated_af = ArtistFolder {
+            id: folder.id,
             band_id,
             path: folder.path.clone(),
             state,
@@ -1617,6 +1621,7 @@ impl LibraryService {
 
         let state = probe_folder(&folder.path);
         let updated_af = ArtistFolder {
+            id: folder.id,
             band_id,
             path: folder.path.clone(),
             state,

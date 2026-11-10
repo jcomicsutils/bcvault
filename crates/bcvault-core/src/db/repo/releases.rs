@@ -347,7 +347,7 @@ pub fn all_artist_stats(conn: &Connection) -> Result<HashMap<i64, ArtistStats>, 
                 s.archived,
                 s.missing_files
          FROM rel_stats s
-         LEFT JOIN artist_folders af ON af.band_id = s.band_id",
+         LEFT JOIN (SELECT band_id, SUM(local_only_count) AS local_only_count FROM artist_folders GROUP BY band_id) af ON af.band_id = s.band_id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -384,9 +384,9 @@ pub fn artist_stats_for_one(conn: &Connection, band_id: i64) -> Result<ArtistSta
                  WHERE band_id = ?1
              )
              SELECT COUNT(CASE WHEN r.last_seen_at >= m.latest_seen THEN 1 END) AS total,
-                    COALESCE(SUM(r.downloaded), 0) + COALESCE((SELECT local_only_count FROM artist_folders WHERE band_id = ?1), 0) AS downloaded,
+                    COALESCE(SUM(r.downloaded), 0) + COALESCE((SELECT COALESCE(SUM(local_only_count), 0) FROM artist_folders WHERE band_id = ?1), 0) AS downloaded,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') AND r.downloaded = 1 THEN 1 ELSE 0 END), 0) AS eligible_downloaded,
-                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) + COALESCE((SELECT local_only_count FROM artist_folders WHERE band_id = ?1), 0) AS non_eligible_downloaded,
+                    COALESCE(SUM(CASE WHEN r.downloaded = 1 AND (r.last_seen_at < m.latest_seen OR r.classification NOT IN ('free','nyp','email_required')) THEN 1 ELSE 0 END), 0) + COALESCE((SELECT COALESCE(SUM(local_only_count), 0) FROM artist_folders WHERE band_id = ?1), 0) AS non_eligible_downloaded,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification IN ('free','nyp','email_required') THEN 1 ELSE 0 END), 0) AS eligible,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'email_required' THEN 1 ELSE 0 END), 0) AS email_required,
                     COALESCE(SUM(CASE WHEN r.last_seen_at >= m.latest_seen AND r.classification = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown,
@@ -778,5 +778,63 @@ mod tests {
         assert_eq!(all.get(&10), Some(&nfc_stats));
         assert_eq!(all.get(&20), Some(&leichen_stats));
         assert_eq!(all.get(&30), Some(&clean_stats));
+    }
+
+    #[test]
+    fn test_stats_artist_with_two_links_and_local_only_counts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&mut conn).unwrap();
+
+        // Artist 1 with 2 releases on page (both eligible, 1 downloaded)
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'art1', 'Artist 1', 'https://art1.bandcamp.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+             VALUES ('album', 101, 1, 'A1', 'Art1', 'https://art1.bandcamp.com/album/101', 'free', 1, 1000),
+                    ('album', 102, 1, 'A2', 'Art1', 'https://art1.bandcamp.com/album/102', 'free', 0, 1000)",
+            [],
+        ).unwrap();
+
+        // Artist 2 without links (1 release, downloaded)
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (2, 'art2', 'Artist 2', 'https://art2.bandcamp.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded, last_seen_at)
+             VALUES ('album', 201, 2, 'B1', 'Art2', 'https://art2.bandcamp.com/album/201', 'free', 1, 1000)",
+            [],
+        ).unwrap();
+
+        // Two linked folders for artist 1 with local_only_counts 2 and 3
+        conn.execute(
+            "INSERT INTO artist_folders (band_id, path, path_key, added_at, local_only_count)
+             VALUES (1, '/music/project1', 'project1', 1000, 2),
+                    (1, '/music/project2', 'project2', 2000, 3)",
+            [],
+        )
+        .unwrap();
+
+        let stats1 = artist_stats_for_one(&conn, 1).unwrap();
+        assert_eq!(stats1.total, 2);
+        assert_eq!(stats1.eligible, 2);
+        assert_eq!(stats1.eligible_downloaded, 1);
+        // downloaded = 1 (release) + 5 (local_only) = 6
+        assert_eq!(stats1.downloaded, 6);
+        // non_eligible_downloaded = 0 + 5 = 5
+        assert_eq!(stats1.non_eligible_downloaded, 5);
+
+        let stats2 = artist_stats_for_one(&conn, 2).unwrap();
+        assert_eq!(stats2.total, 1);
+        assert_eq!(stats2.downloaded, 1);
+        assert_eq!(stats2.non_eligible_downloaded, 0);
+
+        let all = all_artist_stats(&conn).unwrap();
+        // Artist 1 must have exactly 1 row in the aggregated map
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get(&1), Some(&stats1));
+        assert_eq!(all.get(&2), Some(&stats2));
     }
 }

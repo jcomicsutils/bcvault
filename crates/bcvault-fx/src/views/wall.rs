@@ -916,6 +916,7 @@ mod tests {
         state.folders.insert(
             band_id,
             ArtistFolder {
+                id: 1,
                 band_id,
                 path: PathBuf::from("/music/Artist"),
                 state: FolderState::Missing,

@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (idle; next: AUTO_SYNC or MULTI_FOLDER, see `ROADMAP.md` §3)  ·  Branch: main  ·  Updated: 2026-11-09
+Task: none (MULTI_FOLDER step 2; next: scan, match and verify across artist's folders)  ·  Branch: main  ·  Updated: 2026-11-09
 
 ## Done
+- MULTI-FOLDER 1: allow several folders per artist (migration 0006, breaking)
 - B0.1 to B5.x: base engine (phase-sized commits, before the commit convention)
 - F0 to F8: FX front-end (one squashed commit plus fixes; details in `FX/PROGRESS-FX.md`)
 - L0.1: add library status columns and artist folder link schema

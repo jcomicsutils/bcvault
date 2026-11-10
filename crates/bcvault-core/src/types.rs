@@ -382,6 +382,7 @@ impl LibraryPhase {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtistFolder {
+    pub id: i64,
     pub band_id: i64,
     pub path: PathBuf,
     pub state: FolderState,
@@ -1090,6 +1091,7 @@ mod tests {
         }
 
         let folder = ArtistFolder {
+            id: 1,
             band_id: 42,
             path: PathBuf::from("/music/artist"),
             state: FolderState::Ok,

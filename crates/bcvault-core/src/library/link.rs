@@ -24,6 +24,10 @@ pub enum FolderLinkError {
     OverlapsOutDir(String),
     #[error("Folder overlaps with existing artist folder ({other_artist}): {path}")]
     OverlapsOtherFolder { other_artist: String, path: String },
+    #[error("already covered by {path}")]
+    AlreadyCovered { path: String },
+    #[error("contains {path}; unlink that first")]
+    ContainsOwnFolder { path: String },
 }
 
 /// A validated artist folder link ready to be stored in the database.
@@ -259,6 +263,7 @@ mod tests {
         fs::create_dir_all(&artist1).unwrap();
 
         let other = ArtistFolder {
+            id: 1,
             band_id: 1234,
             path: dunce::canonicalize(&artist1).unwrap(),
             state: FolderState::Ok,
