@@ -4,6 +4,7 @@
 Task: none (MULTI_FOLDER plan completed; ready for next plan)  ·  Branch: main  ·  Updated: 2026-11-10
 
 ## Done
+- none: plan the download dir link guard and local-only matching fix (`DOWNLOAD-DIR-FIX.md`)
 - MULTI-FOLDER 6: document several folders per artist
 - MULTI-FOLDER 5: add, unlink and change several folders per artist in fx UI
 - MULTI-FOLDER 4: add, unlink and change several folders per artist in classic UI
