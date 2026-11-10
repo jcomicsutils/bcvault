@@ -9,7 +9,9 @@ use crate::error::DbError;
 use crate::library::link::probe_folder;
 use crate::library::matcher::assign_matches;
 use crate::library::scan::scan_linked_folder;
-use crate::library::service::ReconcileReport;
+use crate::library::service::{
+    ReconcileReport, drop_downloaded_page_only, split_matchable_releases,
+};
 use crate::library::verify::{
     VerifyResult, attribute_release_root, find_relink_candidates, group_unavailable_releases,
     is_mass_missing, verify_single_release,
@@ -1549,31 +1551,14 @@ impl LibraryService {
             ..Default::default()
         };
         let ok_roots: Vec<PathBuf> = ok_folders.iter().map(|f| f.path.clone()).collect();
+        let all_roots: Vec<PathBuf> = folders.iter().map(|f| f.path.clone()).collect();
         let rel_res = pool
             .reader
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
-                let active_linked_keys: std::collections::HashSet<String> = rels
-                    .iter()
-                    .filter(|r| r.downloaded && r.local_status != Some(LocalStatus::Archived))
-                    .filter_map(|r| r.local_path.as_ref())
-                    .map(|p| lib_repo::normalize_path_key(p))
-                    .collect();
-                let mut linked = Vec::new();
-                let mut seen_linked = std::collections::HashSet::new();
-                for root in &ok_roots {
-                    for lr in crate::library::service::linked_releases_under(&rels, root) {
-                        if seen_linked.insert(lr.release_key) {
-                            linked.push(lr);
-                        }
-                    }
-                }
-                let adoptable: Vec<ReleaseRow> = rels
-                    .into_iter()
-                    .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
-                    .collect();
-                Ok::<_, DbError>((adoptable, ign, active_linked_keys, linked))
+                let split = split_matchable_releases(rels, &all_roots, &ok_roots);
+                Ok::<_, DbError>((split.adoptable, ign, split.active_linked_keys, split.linked))
             })
             .await;
 
@@ -1602,7 +1587,7 @@ impl LibraryService {
             current: None,
         });
 
-        let assignment = assign_matches(
+        let mut assignment = assign_matches(
             &unlinked_candidates,
             &releases,
             st.auto_match_min,
@@ -1610,6 +1595,7 @@ impl LibraryService {
             &ignored,
             &st.folder_style,
         );
+        drop_downloaded_page_only(&mut assignment, &releases);
 
         let mut adopted_count = 0_u32;
         let mut linked = linked;
@@ -1832,31 +1818,14 @@ impl LibraryService {
             ..Default::default()
         };
         let ok_roots: Vec<PathBuf> = ok_folders.iter().map(|f| f.path.clone()).collect();
+        let all_roots: Vec<PathBuf> = folders.iter().map(|f| f.path.clone()).collect();
         let rel_res = pool
             .reader
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
-                let active_linked_keys: std::collections::HashSet<String> = rels
-                    .iter()
-                    .filter(|r| r.downloaded && r.local_status != Some(LocalStatus::Archived))
-                    .filter_map(|r| r.local_path.as_ref())
-                    .map(|p| lib_repo::normalize_path_key(p))
-                    .collect();
-                let mut linked = Vec::new();
-                let mut seen_linked = std::collections::HashSet::new();
-                for root in &ok_roots {
-                    for lr in crate::library::service::linked_releases_under(&rels, root) {
-                        if seen_linked.insert(lr.release_key) {
-                            linked.push(lr);
-                        }
-                    }
-                }
-                let adoptable: Vec<ReleaseRow> = rels
-                    .into_iter()
-                    .filter(|r| !r.downloaded || r.local_status == Some(LocalStatus::Archived))
-                    .collect();
-                Ok::<_, DbError>((adoptable, ign, active_linked_keys, linked))
+                let split = split_matchable_releases(rels, &all_roots, &ok_roots);
+                Ok::<_, DbError>((split.adoptable, ign, split.active_linked_keys, split.linked))
             })
             .await;
 
@@ -1885,7 +1854,7 @@ impl LibraryService {
             current: None,
         });
 
-        let assignment = assign_matches(
+        let mut assignment = assign_matches(
             &unlinked_candidates,
             &releases,
             st.auto_match_min,
@@ -1893,6 +1862,7 @@ impl LibraryService {
             &ignored,
             &st.folder_style,
         );
+        drop_downloaded_page_only(&mut assignment, &releases);
 
         let mut batch_id = match pool
             .writer

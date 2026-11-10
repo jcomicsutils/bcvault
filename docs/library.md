@@ -104,6 +104,14 @@ The settings sliders (`Auto-Match Min Score` and `Review Min Score`) control the
 5. **Conflicts**: Genuine duplicate formats or conflicting tag/folder identities from the exact pass. Fuzzy scoring never creates conflicts.
 6. **Found Again (Restorable)**: Releases marked as `archived` whose audio files reappeared on disk.
 
+### 4.4 Releases Downloaded by the App
+
+A release downloaded with the app's own download function is stored in the download directory (`out_dir`), outside every linked folder. When you later move the album into your library and link that folder, the library copy is matched against the release like any other album:
+- Releases are offered to the matcher when they are not downloaded, are archived, or are downloaded to a path outside **every** linked folder of the artist. A release inside a linked folder stays as it is, and so does a release under a linked folder that is currently unavailable.
+- A match re-points the release to the library copy. The files left in the download directory are never touched.
+- While no library copy exists, such a release is not listed as **On Page Only**, because it still has files.
+- The albums in the linked folder therefore never count as **Local Only** merely because the release was downloaded earlier.
+
 ---
 
 ## 5. Verification & Safeguards

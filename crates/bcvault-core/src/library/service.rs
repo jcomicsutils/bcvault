@@ -1,11 +1,16 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::db::repo::{library as lib_repo, releases as rel_repo};
 use crate::library::folder_style::FolderStyle;
 use crate::library::link::probe_folder;
-use crate::library::matcher::{Conflict, LocalOrphan, MatchProposal, ReviewItem, assign_matches};
+use crate::library::matcher::{
+    Conflict, LocalOrphan, MatchAssignment, MatchProposal, ReviewItem, assign_matches,
+};
 use crate::library::scan::scan_linked_folder;
-use crate::types::{FolderState, ItemKey, LibraryPhase, ReleaseQuery};
+use crate::types::{FolderState, ItemKey, LibraryPhase, LocalStatus, ReleaseQuery, ReleaseRow};
 
 /// Reconcile report containing all match proposals, review items, and unlinked tracks/folders.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +67,92 @@ pub fn linked_releases_under(
         .collect()
 }
 
+/// Releases of one artist, split for a single scan and match pass.
+#[derive(Debug, Default)]
+pub struct MatchableReleases {
+    /// Releases offered to `assign_matches`: not downloaded, archived, or downloaded to a path
+    /// outside every linked folder (for example the download directory).
+    pub adoptable: Vec<ReleaseRow>,
+    /// Path keys of all active downloaded releases; candidates at these paths are already linked.
+    pub active_linked_keys: HashSet<String>,
+    /// Releases whose active path lies inside an available linked folder.
+    pub linked: Vec<LinkedRelease>,
+}
+
+/// A downloaded release that has not been archived.
+fn is_active_download(r: &ReleaseRow) -> bool {
+    r.downloaded && r.local_status != Some(LocalStatus::Archived)
+}
+
+/// True when the release has a stored path that is none of the `root_keys` nor inside one.
+fn is_stored_outside(r: &ReleaseRow, root_keys: &[String]) -> bool {
+    r.local_path.as_ref().is_some_and(|p| {
+        let key = lib_repo::normalize_path_key(p);
+        !root_keys
+            .iter()
+            .any(|root| key == *root || key.starts_with(&format!("{root}/")))
+    })
+}
+
+/// Splits an artist's releases for matching.
+///
+/// A release downloaded by the app lives in the download directory, outside every linked
+/// folder. Once the user moves the album into a linked folder, that copy must be able to match
+/// the release, or it is reported as local only. Such releases are therefore adoptable, while
+/// releases inside a linked folder stay linked. `all_roots` holds every linked folder of the
+/// artist, available or not, so that releases under a disconnected drive are never freed.
+/// `ok_roots` holds the available folders and only feeds the informational `linked` list.
+pub fn split_matchable_releases(
+    releases: Vec<ReleaseRow>,
+    all_roots: &[PathBuf],
+    ok_roots: &[PathBuf],
+) -> MatchableReleases {
+    let active_linked_keys: HashSet<String> = releases
+        .iter()
+        .filter(|r| is_active_download(r))
+        .filter_map(|r| r.local_path.as_ref())
+        .map(|p| lib_repo::normalize_path_key(p))
+        .collect();
+
+    let mut linked = Vec::new();
+    let mut seen_linked = HashSet::new();
+    for root in ok_roots {
+        for lr in linked_releases_under(&releases, root) {
+            if seen_linked.insert(lr.release_key) {
+                linked.push(lr);
+            }
+        }
+    }
+
+    let root_keys: Vec<String> = all_roots
+        .iter()
+        .map(|r| lib_repo::normalize_path_key(r))
+        .collect();
+    let adoptable = releases
+        .into_iter()
+        .filter(|r| !is_active_download(r) || is_stored_outside(r, &root_keys))
+        .collect();
+
+    MatchableReleases {
+        adoptable,
+        active_linked_keys,
+        linked,
+    }
+}
+
+/// Removes releases that are still downloaded from the on-page-only list.
+///
+/// Releases downloaded outside the linked folders are adoptable, so the matcher reports them as
+/// page-only when no folder matches. They do have files, just not in a linked folder.
+pub fn drop_downloaded_page_only(assignment: &mut MatchAssignment, adoptable: &[ReleaseRow]) {
+    assignment.page_only.retain(|key| {
+        adoptable
+            .iter()
+            .find(|r| r.key == *key)
+            .is_none_or(|r| !is_active_download(r))
+    });
+}
+
 /// Callback invoked for library progress updates: (phase, done, total, current item/path).
 pub type LibraryProgressCallback<'a> = &'a dyn Fn(LibraryPhase, u32, u32, Option<String>);
 
@@ -85,6 +176,7 @@ pub fn run_scan_and_match(
         return Ok(None);
     }
 
+    let all_roots: Vec<PathBuf> = folders.iter().map(|f| f.path.clone()).collect();
     let mut ok_folders = Vec::new();
     let mut unavailable_folders = Vec::new();
     for f in folders {
@@ -125,27 +217,12 @@ pub fn run_scan_and_match(
     let all_releases = rel_repo::query_releases(conn, &query)?;
     let ignored = lib_repo::get_ignored_local(conn, band_id)?;
 
-    let active_linked_keys: std::collections::HashSet<String> = all_releases
-        .iter()
-        .filter(|r| r.downloaded && r.local_status != Some(crate::types::LocalStatus::Archived))
-        .filter_map(|r| r.local_path.as_ref())
-        .map(|p| lib_repo::normalize_path_key(p))
-        .collect();
-
-    let mut linked = Vec::new();
-    let mut seen_linked = std::collections::HashSet::new();
-    for folder in &ok_folders {
-        for lr in linked_releases_under(&all_releases, &folder.path) {
-            if seen_linked.insert(lr.release_key) {
-                linked.push(lr);
-            }
-        }
-    }
-
-    let adoptable: Vec<_> = all_releases
-        .into_iter()
-        .filter(|r| !r.downloaded || r.local_status == Some(crate::types::LocalStatus::Archived))
-        .collect();
+    let ok_roots: Vec<PathBuf> = ok_folders.iter().map(|f| f.path.clone()).collect();
+    let MatchableReleases {
+        adoptable,
+        active_linked_keys,
+        linked,
+    } = split_matchable_releases(all_releases, &all_roots, &ok_roots);
 
     let unlinked_candidates: Vec<_> = all_candidates
         .into_iter()
@@ -161,7 +238,7 @@ pub fn run_scan_and_match(
         );
     }
 
-    let assignment = assign_matches(
+    let mut assignment = assign_matches(
         &unlinked_candidates,
         &adoptable,
         auto_match_min,
@@ -169,6 +246,7 @@ pub fn run_scan_and_match(
         &ignored,
         style,
     );
+    drop_downloaded_page_only(&mut assignment, &adoptable);
 
     let batch_id = lib_repo::create_batch(conn, "adopt", &crate::types::BatchSummary::default())?;
 
@@ -684,5 +762,173 @@ mod tests {
         .unwrap();
 
         assert_eq!(report, None);
+    }
+
+    fn add_release(conn: &rusqlite::Connection, band_id: i64, id: i64, title: &str) {
+        rel_repo::upsert_discovered(
+            conn,
+            &DiscoveredRelease {
+                key: ItemKey::new(ItemType::Album, id),
+                band_id,
+                title,
+                artist_name: "Artist 42",
+                url: &format!("https://artist42.bandcamp.com/album/{id}"),
+                cover_url: None,
+                art_id: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn mark_downloaded_at(conn: &rusqlite::Connection, id: i64, path: &std::path::Path) {
+        conn.execute(
+            "UPDATE releases SET downloaded = 1, local_path = ?1, local_status = 'present'
+             WHERE item_type = 'album' AND item_id = ?2",
+            rusqlite::params![path.to_string_lossy().into_owned(), id],
+        )
+        .unwrap();
+    }
+
+    fn add_artist_42(conn: &rusqlite::Connection) -> i64 {
+        let band_id = 42;
+        artists::upsert(
+            conn,
+            &UpsertArtist {
+                band_id,
+                slug: "artist-42",
+                name: "Artist 42",
+                url: "https://artist42.bandcamp.com",
+                cover_url: None,
+            },
+        )
+        .unwrap();
+        band_id
+    }
+
+    #[test]
+    fn test_15_library_album_matches_release_downloaded_to_out_dir() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrations::run(&mut conn).unwrap();
+        let band_id = add_artist_42(&conn);
+        add_release(&conn, band_id, 1, "Album One");
+        add_release(&conn, band_id, 2, "Album Two");
+
+        // The app downloaded Album One into the download directory...
+        let dir = tempdir().unwrap();
+        let out_dir = dir.path().join("Downloads");
+        let downloaded = out_dir.join("Artist 42").join("Album One");
+        fs::create_dir_all(&downloaded).unwrap();
+        fs::write(downloaded.join("01.mp3"), b"audio").unwrap();
+        mark_downloaded_at(&conn, 1, &downloaded);
+
+        // ...and the user then moved the album into the library and linked that folder.
+        let artist_dir = dir.path().join("Music").join("Artist 42");
+        let album = artist_dir.join("Album One");
+        fs::create_dir_all(&album).unwrap();
+        fs::write(album.join("01.mp3"), b"audio").unwrap();
+        let folder = lib_repo::add_folder(&mut conn, band_id, &artist_dir, &out_dir).unwrap();
+
+        let cancel = CancellationToken::new();
+        let report = run_scan_and_match(
+            &mut conn,
+            band_id,
+            0.85,
+            0.70,
+            &cancel,
+            None,
+            &FolderStyle::default(),
+        )
+        .unwrap()
+        .expect("report should be returned");
+
+        assert_eq!(report.matched.len(), 1);
+        assert_eq!(report.matched[0].release_key.id, 1);
+        assert!(report.local_only.is_empty(), "{:?}", report.local_only);
+        // Album Two has no files anywhere; Album One must not be listed as page-only.
+        assert_eq!(report.page_only, vec![ItemKey::new(ItemType::Album, 2)]);
+
+        let count: u32 = conn
+            .query_row(
+                "SELECT local_only_count FROM artist_folders WHERE id = ?1",
+                rusqlite::params![folder.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_16_downloaded_release_without_library_copy_is_not_page_only() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrations::run(&mut conn).unwrap();
+        let band_id = add_artist_42(&conn);
+        add_release(&conn, band_id, 1, "Album One");
+
+        let dir = tempdir().unwrap();
+        let out_dir = dir.path().join("Downloads");
+        let downloaded = out_dir.join("Artist 42").join("Album One");
+        fs::create_dir_all(&downloaded).unwrap();
+        mark_downloaded_at(&conn, 1, &downloaded);
+
+        let artist_dir = dir.path().join("Music").join("Artist 42");
+        fs::create_dir_all(&artist_dir).unwrap();
+        lib_repo::add_folder(&mut conn, band_id, &artist_dir, &out_dir).unwrap();
+
+        let cancel = CancellationToken::new();
+        let report = run_scan_and_match(
+            &mut conn,
+            band_id,
+            0.85,
+            0.70,
+            &cancel,
+            None,
+            &FolderStyle::default(),
+        )
+        .unwrap()
+        .expect("report should be returned");
+
+        assert!(report.matched.is_empty());
+        assert!(report.page_only.is_empty(), "{:?}", report.page_only);
+        assert!(report.local_only.is_empty());
+    }
+
+    #[test]
+    fn test_17_split_only_frees_releases_outside_every_linked_folder() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrations::run(&mut conn).unwrap();
+        let band_id = add_artist_42(&conn);
+        for id in 1..=4 {
+            add_release(&conn, band_id, id, &format!("Album {id}"));
+        }
+
+        let artist_dir = std::path::PathBuf::from("/music/Artist 42");
+        let offline_dir = std::path::PathBuf::from("/mnt/usb/Artist 42");
+        mark_downloaded_at(&conn, 1, &artist_dir.join("Album 1"));
+        mark_downloaded_at(
+            &conn,
+            2,
+            &std::path::PathBuf::from("/downloads/Artist 42/Album 2"),
+        );
+        mark_downloaded_at(&conn, 3, &offline_dir.join("Album 3"));
+        // Release 4 stays not downloaded.
+
+        let query = ReleaseQuery {
+            band_id: Some(band_id),
+            ..Default::default()
+        };
+        let rows = rel_repo::query_releases(&conn, &query).unwrap();
+        let split = split_matchable_releases(
+            rows,
+            &[artist_dir.clone(), offline_dir],
+            std::slice::from_ref(&artist_dir),
+        );
+
+        let mut adoptable: Vec<i64> = split.adoptable.iter().map(|r| r.key.id).collect();
+        adoptable.sort_unstable();
+        // 2 lives in the download directory and 4 was never downloaded. 1 is inside a linked
+        // folder and 3 sits under an offline linked folder, so neither may be re-matched.
+        assert_eq!(adoptable, vec![2, 4]);
+        let linked: Vec<i64> = split.linked.iter().map(|l| l.release_key.id).collect();
+        assert_eq!(linked, vec![1]);
     }
 }

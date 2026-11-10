@@ -13,7 +13,7 @@
 | Badge reform (`PROGRESS.md`, migration `0005`) | Implemented (Steps 1 to 6) in `v0.1.0` |
 | Missing folder handling (`PLANS/LIBRARY_SYNC/MISSING-FOLDER-FIX.md`) | Implemented (Steps 1 to 5) in `v0.1.1` and `v0.1.2` |
 | Multiple linked folders (`PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`) | Implemented (Steps 1 to 6) in `main` (migration `0006_artist_folders_multi.sql`) |
-| Download dir link guard and local-only fix (`PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md`) | Planned (Steps 1 and 2, no migration) |
+| Download dir link guard and local-only fix (`PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md`) | Implemented (Steps 1 and 2, no migration) in `main` |
 | Tooling (T0) | In progress: architectural guards, `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed. |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync. |

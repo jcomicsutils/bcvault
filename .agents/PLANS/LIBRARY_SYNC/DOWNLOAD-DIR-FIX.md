@@ -2,7 +2,7 @@
 
 For the coding agent. Repo: bcvault (Rust workspace). Scope: `crates/bcvault-core/src/worker/{library,supervisor}.rs`, `crates/bcvault-core/src/library/service.rs`, docs.
 
-> Status 10 Nov 2026: **planned**; will land on `main` as `Task: none` commits. Amends `LIBRARY_SYNC_PLAN.md` §5 and `MULTI_FOLDER.md`.
+> Status 10 Nov 2026: **implemented** on `main` (`Task: none` commits). Amends `LIBRARY_SYNC_PLAN.md` §5 and `MULTI_FOLDER.md`.
 
 ## 0. Ground rules
 
