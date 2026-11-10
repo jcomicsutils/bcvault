@@ -15,6 +15,7 @@
 | Multiple linked folders (`PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`) | Implemented (Steps 1 to 6) in `main` (migration `0006_artist_folders_multi.sql`) |
 | Download dir link guard and local-only fix (`PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md`) | Implemented (Steps 1 and 2, no migration) in `main` |
 | Unavailable classification (`0007_unavailable.sql`) | Implemented in `main` (0-track detection, manual unavailable toggle, and folder matching support) |
+| Review rejection & URL/slug match picker (`PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md`) | Planned, not started; persistent pair rejection (`0008_rejected_matches.sql`), conflict resolution UI, and searchable URL/slug release picker. |
 | Tooling (T0) | In progress: architectural guards, `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed. |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync. |
@@ -44,10 +45,11 @@ F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, MISSING-FOLDER-FIX, and MULTI_FOLDE
 
 | Step | Work | Why now |
 | --- | --- | --- |
-| 1 | **AUTO_SYNC** | Unblocked. Takes next free migration (`0008_auto_sync.sql`), verifying and rescanning multiple folders cleanly. |
-| 2 | **ARCHIVE** | Merges after `AUTO_SYNC` and rebases onto it (both touch `worker/sync.rs`). |
-| 3 | **M0 to M4** mail core | Needs the real-mailbox fixture and cock.li check. Takes the next free migration number when it lands. |
-| 4 | **M5 and M6** mail UI in both front-ends | Both apps exist; wires mail redeem into classic and FX. |
+| 1 | **REVIEW-AND-MATCH-FIX** | Unblocked. Fixes repeated false review prompts and adds URL/slug release matching (`0008_rejected_matches.sql`). |
+| 2 | **AUTO_SYNC** | Unblocked. Takes next free migration (`0009_auto_sync.sql`), verifying and rescanning multiple folders cleanly. |
+| 3 | **ARCHIVE** | Merges after `AUTO_SYNC` and rebases onto it (both touch `worker/sync.rs`). |
+| 4 | **M0 to M4** mail core | Needs the real-mailbox fixture and cock.li check. Takes the next free migration number when it lands. |
+| 5 | **M5 and M6** mail UI in both front-ends | Both apps exist; wires mail redeem into classic and FX. |
 | any | **USER_THEMES** | FX-only, no migration; can interleave with anything. |
 | any | **T0** remaining tooling | Commit message checks, `.gitmessage`, and changelog generation with `git-cliff`. |
 
@@ -67,8 +69,9 @@ A single agent works one phase or plan at a time. If you run two agents, split b
 | `0005_artist_folder_local_only` | `artist_folders.local_only_count` | Badge rework (`Task: none`) | Breaking (`feat(library)!`) |
 | `0006_artist_folders_multi` | Multi-folder links per artist (`artist_folders` multi-link schema) | `MULTI_FOLDER.md` (`Task: none`) | Breaking (`feat(db)!`) |
 | `0007_unavailable` | `'unavailable'` release classification CHECK constraint and 0-track backfill | Unavailable release fix (`Task: none`) | Breaking (`feat(core)!`) |
-| `0008` (lowest free) | `0008_auto_sync.sql` | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
-| `0009` (or next free) | `0009_archive.sql` | `ARCHIVE.md` | Breaking (`feat(db)!`) |
+| `0008` (lowest free) | `0008_rejected_matches.sql` (`artist_folder_rejected` table) | `REVIEW-AND-MATCH-FIX.md` (`Task: none`) | Breaking (`feat(db)!`) |
+| `0009` (or next free) | `0009_auto_sync.sql` | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
+| `0010` (or next free) | `0010_archive.sql` | `ARCHIVE.md` | Breaking (`feat(db)!`) |
 | next free | Mail accounts, messages, links, wait list | `MAIL_REDEEM_PLAN.md` (M0.4) | Breaking (`feat(db)!`) |
 
 Number by landing order: whichever plan lands first takes the lowest free number; rename the unmerged file (and the plan text) before merging. The runner list is in `crates/bcvault-core/src/db/migrations.rs`. FX's sidecar database has its own numbering (`fx.sqlite`, `0001_fx_init.sql`) and is unaffected.
@@ -114,6 +117,9 @@ All crates share `workspace.package.version`. While `0.x`: `feat` bumps minor, `
 Every release that includes a new main-DB migration must ship `bcvault` and `bcvault-fx` together.
 
 ## 9. Kickoff prompts (paste one per phase or group)
+
+**Review rejection and URL/slug match picker**
+> Read `AGENTS.md`, `ROADMAP.md`, and `PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md`. Execute the 5 steps in §6 in order, one commit per step, keeping tests green at every step. Add `artist_folder_rejected` (migration `0008_rejected_matches.sql`), filter rejected `(release, folder)` pairs in `assign_matches` and `find_relink_candidates`, add URL/slug release resolution and disambiguated labels, and wire "Wrong, don't ask again", conflict resolution, and the searchable URL/slug release picker into both front-ends.
 
 **Multi-folder library sync**
 > Read `AGENTS.md`, `ROADMAP.md`, `PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`. Execute the 6 steps in §6 in order, one commit per step, keeping tests green at every step. Generalise linked folders from one-per-artist to many-per-artist while maintaining one-artist-per-folder isolation and updating the stats aggregation, verify attribution, and both front-ends.
