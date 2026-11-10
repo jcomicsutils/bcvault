@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (MULTI_FOLDER step 5; next: add, unlink and change several folders per artist in fx UI)  ·  Branch: main  ·  Updated: 2026-11-10
+Task: none (MULTI_FOLDER step 6; next: docs and plan tracking updates)  ·  Branch: main  ·  Updated: 2026-11-10
 
 ## Done
+- MULTI-FOLDER 5: add, unlink and change several folders per artist in fx UI
 - MULTI-FOLDER 4: add, unlink and change several folders per artist in classic UI
 - MULTI-FOLDER 3: address linked folders by id (tests 18-23)
 - MULTI-FOLDER 2: scan, match and verify across an artist's folders (tests 10-17)

@@ -243,9 +243,19 @@ pub fn show(
                             });
                             ui.close();
                         }
-                        if let Some(folder) =
-                            state.folders.get(&artist.band_id).and_then(|v| v.first())
-                        {
+                        let artist_folders = state
+                            .folders
+                            .get(&artist.band_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        if artist_folders.is_empty() {
+                            if paint::sharp_button(ui, "Link Folder...").clicked() {
+                                state.link_folder_modal =
+                                    Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
+                                ui.close();
+                            }
+                        } else if artist_folders.len() == 1 {
+                            let folder = &artist_folders[0];
                             if folder.state != FolderState::Ok
                                 && paint::sharp_button(ui, "Resolve unavailable folder...")
                                     .clicked()
@@ -255,11 +265,18 @@ pub fn show(
                                 });
                                 ui.close();
                             }
+                            if paint::sharp_button(ui, "Add Folder...").clicked() {
+                                state.link_folder_modal =
+                                    Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
+                                ui.close();
+                            }
                             if paint::sharp_button(ui, "Change Folder...").clicked() {
-                                state.link_folder_modal = Some(FxLinkFolderModalState::new(
-                                    Some(artist.band_id),
-                                    folder.path.display().to_string(),
-                                ));
+                                state.link_folder_modal =
+                                    Some(FxLinkFolderModalState::for_repoint(
+                                        artist.band_id,
+                                        folder.id,
+                                        folder.path.display().to_string(),
+                                    ));
                                 ui.close();
                             }
                             if paint::sharp_button(ui, "Match Folder").clicked() {
@@ -282,9 +299,66 @@ pub fn show(
                                 ui.close();
                             }
                         } else {
-                            if paint::sharp_button(ui, "Link Folder...").clicked() {
+                            if artist_folders.iter().any(|f| f.state != FolderState::Ok)
+                                && paint::sharp_button(ui, "Resolve unavailable folder...")
+                                    .clicked()
+                            {
+                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                });
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Add Folder...").clicked() {
                                 state.link_folder_modal =
                                     Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Match Folder").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::MatchArtistFolder {
+                                    band_id: artist.band_id,
+                                    auto_apply_confident: true,
+                                });
+                                ui.close();
+                            }
+                            ui.menu_button("Change folder...", |ui| {
+                                for folder in &artist_folders {
+                                    let label =
+                                        crate::state::folder_display_label(folder, &artist_folders);
+                                    if paint::sharp_button(
+                                        ui,
+                                        format!("Folder moved: change {label}..."),
+                                    )
+                                    .clicked()
+                                    {
+                                        state.link_folder_modal =
+                                            Some(FxLinkFolderModalState::for_repoint(
+                                                artist.band_id,
+                                                folder.id,
+                                                folder.path.display().to_string(),
+                                            ));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            ui.menu_button("Unlink folder...", |ui| {
+                                for folder in &artist_folders {
+                                    let label =
+                                        crate::state::folder_display_label(folder, &artist_folders);
+                                    if paint::sharp_button(ui, format!("Unlink {label}..."))
+                                        .clicked()
+                                    {
+                                        let _ =
+                                            core_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                                folder_id: folder.id,
+                                            });
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            if paint::sharp_button(ui, "Verify Files").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                });
                                 ui.close();
                             }
                         }
@@ -363,10 +437,15 @@ fn draw_artist_row(
     let th = state.active_theme;
     let desired = Vec2::new(ui.available_width(), 26.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
-    let linked_folder = if band_id > 0 {
-        state.folders.get(&band_id).and_then(|v| v.first()).cloned()
+    let empty_folders = Vec::new();
+    let artist_folders = if band_id > 0 {
+        state
+            .folders
+            .get(&band_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&empty_folders)
     } else {
-        None
+        &empty_folders
     };
 
     if ui.is_rect_visible(rect) {
@@ -466,43 +545,60 @@ fn draw_artist_row(
                 .max_rect(name_rect)
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        if let Some(folder) = &linked_folder {
-            let dot_color = match folder.state {
+        if let Some(worst) = crate::state::worst_folder_state(artist_folders) {
+            let dot_color = match worst {
                 FolderState::Ok => th.accent,
                 FolderState::Missing => th.err,
                 FolderState::Unreadable => th.warn,
             };
             let (glyph_rect, glyph_resp) =
                 child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
-            let (tip, icon_kind) = match folder.state {
-                FolderState::Ok => {
-                    if stats.archived > 0 && stats.downloaded == stats.archived {
-                        (
+            let tip = if artist_folders.len() == 1 {
+                let folder = &artist_folders[0];
+                match folder.state {
+                    FolderState::Ok => {
+                        if stats.archived > 0 && stats.downloaded == stats.archived {
                             format!(
                                 "Linked (all archived): {}\nStatus: Reachable\n{} release(s) archived",
                                 folder.path.display(),
                                 stats.archived
-                            ),
-                            paint::icons::IconKind::Archive,
-                        )
-                    } else {
-                        (
-                            format!("Linked: {}\nStatus: Reachable", folder.path.display()),
-                            paint::icons::IconKind::Folder,
+                            )
+                        } else {
+                            format!("Linked: {}\nStatus: Reachable", folder.path.display())
+                        }
+                    }
+                    FolderState::Missing => {
+                        format!(
+                            "Linked: {}\nStatus: Missing\nRight-click to resolve",
+                            folder.path.display()
                         )
                     }
+                    FolderState::Unreadable => {
+                        format!("Linked: {}\nStatus: Unreadable", folder.path.display())
+                    }
                 }
-                FolderState::Missing => (
-                    format!(
-                        "Linked: {}\nStatus: Missing\nRight-click to resolve",
-                        folder.path.display()
-                    ),
-                    paint::icons::IconKind::Folder,
-                ),
-                FolderState::Unreadable => (
-                    format!("Linked: {}\nStatus: Unreadable", folder.path.display()),
-                    paint::icons::IconKind::Folder,
-                ),
+            } else {
+                let mut lines = vec![format!("Linked folders ({}):", artist_folders.len())];
+                for f in artist_folders {
+                    let st_str = match f.state {
+                        FolderState::Ok => "Reachable",
+                        FolderState::Missing => "Missing",
+                        FolderState::Unreadable => "Unreadable",
+                    };
+                    lines.push(format!("- {}: {}", f.path.display(), st_str));
+                }
+                if worst != FolderState::Ok {
+                    lines.push("Right-click to resolve".to_string());
+                }
+                lines.join("\n")
+            };
+            let icon_kind = if worst == FolderState::Ok
+                && stats.archived > 0
+                && stats.downloaded == stats.archived
+            {
+                paint::icons::IconKind::Archive
+            } else {
+                paint::icons::IconKind::Folder
             };
             glyph_resp.on_hover_text(tip);
             let p = child.painter();
@@ -528,13 +624,20 @@ fn draw_artist_row(
         child.add(egui::Label::new(RichText::new(name).color(th.text)).truncate());
     }
 
-    let folder_tooltip = match &linked_folder {
-        Some(f) => format!(
+    let folder_tooltip = if artist_folders.is_empty() {
+        String::new()
+    } else if artist_folders.len() == 1 {
+        format!(
             "\nLinked folder: {}\nFolder status: {:?}",
-            f.path.display(),
-            f.state
-        ),
-        None => String::new(),
+            artist_folders[0].path.display(),
+            artist_folders[0].state
+        )
+    } else {
+        let mut s = format!("\nLinked folders ({}):", artist_folders.len());
+        for f in artist_folders {
+            s.push_str(&format!("\n- {}: {:?}", f.path.display(), f.state));
+        }
+        s
     };
 
     let dl_desc = if stats.non_eligible_downloaded > 0 {

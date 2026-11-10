@@ -486,22 +486,29 @@ pub fn show(
                     row.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
                 let is_folder_missing = !is_archived
                     && (row.rel.local_status == Some(bcvault_core::types::LocalStatus::Missing)
-                        || if let Some(folder) =
-                            state.folders.get(&row.rel.band_id).and_then(|v| v.first())
-                            && folder.state != bcvault_core::types::FolderState::Ok
-                        {
+                        || if let Some(folders) = state.folders.get(&row.rel.band_id) {
                             match &row.rel.local_path {
                                 Some(p) => {
                                     let rel_key =
                                         bcvault_core::library::link::normalize_path_key(p);
-                                    let folder_key =
-                                        bcvault_core::library::link::normalize_path_key(
-                                            &folder.path,
-                                        );
-                                    rel_key == folder_key
-                                        || rel_key.starts_with(&format!("{folder_key}/"))
+                                    let owning = folders
+                                        .iter()
+                                        .filter(|f| {
+                                            let folder_key =
+                                                bcvault_core::library::link::normalize_path_key(
+                                                    &f.path,
+                                                );
+                                            rel_key == folder_key
+                                                || rel_key.starts_with(&format!("{folder_key}/"))
+                                        })
+                                        .max_by_key(|f| f.path.as_os_str().len());
+                                    owning
+                                        .map(|f| f.state != bcvault_core::types::FolderState::Ok)
+                                        .unwrap_or(false)
                                 }
-                                None => true,
+                                None => folders
+                                    .iter()
+                                    .any(|f| f.state != bcvault_core::types::FolderState::Ok),
                             }
                         } else {
                             false

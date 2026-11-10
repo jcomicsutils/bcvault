@@ -160,24 +160,31 @@ pub fn show(
                             == Some(bcvault_core::types::LocalStatus::Missing)
                         {
                             paint_table_badge(ui, "MISSING", th.warn, th.warn);
-                        } else if let Some(folder) =
-                            state.folders.get(&w.rel.band_id).and_then(|v| v.first())
-                            && folder.state != bcvault_core::types::FolderState::Ok
-                        {
-                            let is_under_folder = match &w.rel.local_path {
+                        } else if let Some(folders) = state.folders.get(&w.rel.band_id) {
+                            let folder_missing = match &w.rel.local_path {
                                 Some(p) => {
                                     let rel_key =
                                         bcvault_core::library::link::normalize_path_key(p);
-                                    let folder_key =
-                                        bcvault_core::library::link::normalize_path_key(
-                                            &folder.path,
-                                        );
-                                    rel_key == folder_key
-                                        || rel_key.starts_with(&format!("{folder_key}/"))
+                                    let owning = folders
+                                        .iter()
+                                        .filter(|f| {
+                                            let folder_key =
+                                                bcvault_core::library::link::normalize_path_key(
+                                                    &f.path,
+                                                );
+                                            rel_key == folder_key
+                                                || rel_key.starts_with(&format!("{folder_key}/"))
+                                        })
+                                        .max_by_key(|f| f.path.as_os_str().len());
+                                    owning
+                                        .map(|f| f.state != bcvault_core::types::FolderState::Ok)
+                                        .unwrap_or(false)
                                 }
-                                None => true,
+                                None => folders
+                                    .iter()
+                                    .any(|f| f.state != bcvault_core::types::FolderState::Ok),
                             };
-                            if is_under_folder {
+                            if folder_missing {
                                 paint_table_badge(ui, "FOLDER MISSING", th.warn, th.warn);
                             }
                         }

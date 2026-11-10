@@ -216,6 +216,7 @@ pub struct FxLinkFolderModalState {
     pub auto_apply_confident: bool,
     pub picked_folder: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     pub error: Option<String>,
+    pub repoint_folder_id: Option<i64>,
 }
 
 impl FxLinkFolderModalState {
@@ -227,11 +228,66 @@ impl FxLinkFolderModalState {
             auto_apply_confident: true,
             picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             error: None,
+            repoint_folder_id: None,
         }
     }
 
     pub fn new_empty(band_id: Option<i64>) -> Self {
         Self::new(band_id, String::new())
+    }
+
+    pub fn for_repoint(band_id: i64, folder_id: i64, folder_path: String) -> Self {
+        Self {
+            band_id: Some(band_id),
+            artist_input: String::new(),
+            folder_path,
+            auto_apply_confident: true,
+            picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            error: None,
+            repoint_folder_id: Some(folder_id),
+        }
+    }
+}
+
+pub fn worst_folder_state(folders: &[ArtistFolder]) -> Option<bcvault_core::types::FolderState> {
+    if folders.is_empty() {
+        return None;
+    }
+    if folders
+        .iter()
+        .any(|f| f.state == bcvault_core::types::FolderState::Missing)
+    {
+        Some(bcvault_core::types::FolderState::Missing)
+    } else if folders
+        .iter()
+        .any(|f| f.state == bcvault_core::types::FolderState::Unreadable)
+    {
+        Some(bcvault_core::types::FolderState::Unreadable)
+    } else {
+        Some(bcvault_core::types::FolderState::Ok)
+    }
+}
+
+pub fn folder_display_label(folder: &ArtistFolder, all_folders: &[ArtistFolder]) -> String {
+    let base_name = folder
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| folder.path.display().to_string());
+    let duplicate_count = all_folders
+        .iter()
+        .filter(|f| f.path.file_name().map(|n| n.to_string_lossy()).as_deref() == Some(&base_name))
+        .count();
+    if duplicate_count > 1 {
+        if let Some(parent) = folder.path.parent()
+            && let Some(p_name) = parent.file_name()
+        {
+            format!("{}/{}", p_name.to_string_lossy(), base_name)
+        } else {
+            base_name
+        }
+    } else {
+        base_name
     }
 }
 
@@ -1442,6 +1498,65 @@ mod tests {
         }
         let picked = modal.picked_folder.lock().ok().and_then(|mut l| l.take());
         assert_eq!(picked, Some(std::path::PathBuf::from("/music/artist42")));
+
+        let repoint = FxLinkFolderModalState::for_repoint(42, 7, "/music/artist42_old".to_string());
+        assert_eq!(repoint.band_id, Some(42));
+        assert_eq!(repoint.repoint_folder_id, Some(7));
+        assert_eq!(repoint.folder_path, "/music/artist42_old");
+    }
+
+    #[test]
+    fn test_worst_folder_state_and_display_label() {
+        use bcvault_core::types::FolderState;
+        use std::path::PathBuf;
+
+        assert_eq!(worst_folder_state(&[]), None);
+
+        let f_ok = ArtistFolder {
+            id: 1,
+            band_id: 10,
+            path: PathBuf::from("/ambient/Music"),
+            state: FolderState::Ok,
+        };
+        let f_unreadable = ArtistFolder {
+            id: 2,
+            band_id: 10,
+            path: PathBuf::from("/techno/Music"),
+            state: FolderState::Unreadable,
+        };
+        let f_missing = ArtistFolder {
+            id: 3,
+            band_id: 10,
+            path: PathBuf::from("/other/Archive"),
+            state: FolderState::Missing,
+        };
+
+        assert_eq!(
+            worst_folder_state(std::slice::from_ref(&f_ok)),
+            Some(FolderState::Ok)
+        );
+        assert_eq!(
+            worst_folder_state(&[f_ok.clone(), f_unreadable.clone()]),
+            Some(FolderState::Unreadable)
+        );
+        assert_eq!(
+            worst_folder_state(&[f_ok.clone(), f_missing.clone()]),
+            Some(FolderState::Missing)
+        );
+        assert_eq!(
+            worst_folder_state(&[f_missing.clone(), f_unreadable.clone()]),
+            Some(FolderState::Missing)
+        );
+
+        // folder_display_label
+        assert_eq!(
+            folder_display_label(&f_missing, &[f_ok.clone(), f_missing.clone()]),
+            "Archive"
+        );
+
+        let all = vec![f_ok.clone(), f_unreadable.clone()];
+        assert_eq!(folder_display_label(&f_ok, &all), "ambient/Music");
+        assert_eq!(folder_display_label(&f_unreadable, &all), "techno/Music");
     }
 
     #[test]
