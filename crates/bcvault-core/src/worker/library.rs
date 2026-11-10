@@ -17,7 +17,7 @@ use crate::library::verify::{
 use crate::types::{
     ArtistFolder, BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus,
     LogLevel, MatchDecision, MissingAction, MissingCandidate, MissingDecision, MissingItem,
-    OnMissing, ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, SyncScope,
+    OnMissing, ReleaseQuery, ReleaseRow, RememberChoice, RescanOutcome, Settings, SyncScope,
     UnavailableAction, UnavailableDecision, UnavailableFolder, UnavailableRoot, VerifyOutcome,
     VerifyTrigger,
 };
@@ -34,6 +34,9 @@ pub struct LibraryService {
     current_cancel: Arc<Mutex<Option<CancellationToken>>>,
     pending_first_matches: Arc<Mutex<std::collections::HashMap<i64, bool>>>,
     pub acked_unavailable: Arc<Mutex<std::collections::HashSet<UnavailableRoot>>>,
+    /// Download directory used while no settings row has been saved yet. It must be the
+    /// same default the download side uses, or the `out_dir` overlap checks guard the wrong path.
+    default_out_dir: PathBuf,
 }
 
 impl LibraryService {
@@ -46,7 +49,23 @@ impl LibraryService {
             current_cancel: Arc::new(Mutex::new(None)),
             pending_first_matches: Arc::new(Mutex::new(std::collections::HashMap::new())),
             acked_unavailable: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            default_out_dir: PathBuf::from("downloads"),
         }
+    }
+
+    /// Sets the download directory assumed before the user has saved any settings.
+    #[must_use]
+    pub fn with_default_out_dir(mut self, dir: PathBuf) -> Self {
+        self.default_out_dir = dir;
+        self
+    }
+
+    /// Reader closure that loads the settings with the service's default download directory.
+    fn settings_reader(
+        &self,
+    ) -> impl FnOnce(&mut rusqlite::Connection) -> Result<Settings, DbError> + Send + 'static {
+        let default_out = self.default_out_dir.clone();
+        move |c| settings::get_settings(c, default_out)
     }
 
     /// Cancels any currently executing library job.
@@ -78,10 +97,7 @@ impl LibraryService {
         let pool = self.pool.clone();
         let bridge = self.bridge.clone();
 
-        let st_res = pool
-            .reader
-            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
-            .await;
+        let st_res = pool.reader.call(self.settings_reader()).await;
         let st = match st_res {
             Ok(s) => s,
             Err(e) => {
@@ -289,10 +305,11 @@ impl LibraryService {
         let bridge = self.bridge.clone();
 
         if let Some(rem) = remember {
+            let default_out = self.default_out_dir.clone();
             let rem_res = pool
                 .writer
                 .call(move |c| {
-                    let mut st = settings::get_settings(c, PathBuf::from("downloads"))?;
+                    let mut st = settings::get_settings(c, default_out)?;
                     if let Some(dp) = rem.set_default_deleted_policy {
                         st.deleted_policy = dp;
                     }
@@ -510,11 +527,7 @@ impl LibraryService {
         let pool = self.pool.clone();
         let bridge = self.bridge.clone();
 
-        let st = match pool
-            .reader
-            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
-            .await
-        {
+        let st = match pool.reader.call(self.settings_reader()).await {
             Ok(s) => s,
             Err(e) => {
                 bridge.log(
@@ -753,11 +766,7 @@ impl LibraryService {
         let bridge = self.bridge.clone();
 
         // 1. Read settings for out_dir
-        let st = match pool
-            .reader
-            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
-            .await
-        {
+        let st = match pool.reader.call(self.settings_reader()).await {
             Ok(s) => s,
             Err(e) => {
                 bridge.log(
@@ -1434,11 +1443,7 @@ impl LibraryService {
         let pool = self.pool.clone();
         let bridge = self.bridge.clone();
 
-        let st = match pool
-            .reader
-            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
-            .await
-        {
+        let st = match pool.reader.call(self.settings_reader()).await {
             Ok(s) => s,
             Err(e) => {
                 bridge.log(
@@ -1764,11 +1769,7 @@ impl LibraryService {
             return 0;
         }
 
-        let st = match pool
-            .reader
-            .call(|c| settings::get_settings(c, PathBuf::from("downloads")))
-            .await
-        {
+        let st = match pool.reader.call(self.settings_reader()).await {
             Ok(s) => s,
             Err(e) => {
                 bridge.log(
@@ -6922,5 +6923,61 @@ mod tests {
             .call(|c| lib_repo::assert_library_invariants(c))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_link_rejects_download_dir_before_settings_are_saved() {
+        let dir = tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("default_out_dir.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        // No settings row is saved: the service must guard the real default download
+        // directory, not a made-up relative one.
+        let out_dir = root.join("bcvault");
+        let downloaded_artist = out_dir.join("Some Artist");
+        fs::create_dir_all(&downloaded_artist).unwrap();
+        let svc = LibraryService::new(pool.clone(), bridge).with_default_out_dir(out_dir.clone());
+
+        let band_id = 77;
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "some-artist",
+                        name: "Some Artist",
+                        url: "https://some-artist.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.link_artist_folder(band_id, out_dir.clone(), true, cancel.clone())
+            .await;
+        svc.link_artist_folder(band_id, downloaded_artist, true, cancel)
+            .await;
+
+        let folders = pool
+            .reader
+            .call(move |c| lib_repo::get_folders(c, band_id))
+            .await
+            .unwrap();
+        assert!(
+            folders.is_empty(),
+            "the download directory must never be linked, got {folders:?}"
+        );
     }
 }

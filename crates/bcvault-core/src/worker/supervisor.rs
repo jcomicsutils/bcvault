@@ -74,7 +74,8 @@ impl Supervisor {
         let sync_cancel = root_cancel.child_token();
         let library_cancel = root_cancel.child_token();
 
-        let library_service = LibraryService::new(pool.clone(), bridge.clone());
+        let library_service = LibraryService::new(pool.clone(), bridge.clone())
+            .with_default_out_dir(paths.default_download_dir.clone());
         let sync_service = SyncService::new(pool.clone(), client.clone(), bridge.clone())
             .with_library(library_service.clone());
         let dl_manager = DownloadManager::new(

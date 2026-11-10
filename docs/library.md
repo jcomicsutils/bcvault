@@ -27,7 +27,7 @@ You can link local music folders to an artist page from either front-end:
 When linking or changing a folder, `bcvault` verifies:
 - The path exists, is a directory, and is readable.
 - The path is canonicalized (stripping Windows extended-length `\\?\` prefixes via `dunce`).
-- The path does not overlap with `out_dir` (it cannot be equal to, inside, or a parent of `out_dir`).
+- The path does not overlap with `out_dir` (it cannot be equal to, inside, or a parent of `out_dir`). The check uses the configured download directory, or the application's default download directory until settings are first saved, so the download directory can never be linked to an artist.
 - The path does not overlap with any folder belonging to another artist.
 - The path does not overlap with any other folder already linked to the same artist (`AlreadyCovered` or `ContainsOwnFolder`).
 - **Soft Warning**: If the folder contains subdirectories that look like separate artists rather than albums, the dialog displays a non-blocking warning: *"Link one artist's folder, not a library"*.
