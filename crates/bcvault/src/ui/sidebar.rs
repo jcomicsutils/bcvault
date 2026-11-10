@@ -78,7 +78,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                         is_selected,
                         None,
                         state.settings.quota_hard,
-                        None,
+                        &[],
                     );
                     if resp.clicked() {
                         state.selected_artists.clear();
@@ -90,11 +90,11 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                     let artist = state.artists[artist_idx].clone();
                     let is_selected = state.selected_artists.contains(&artist.band_id);
                     let sync_prog = state.active_syncs.get(&artist.band_id).cloned();
-                    let linked_folder = state
+                    let artist_folders = state
                         .folders
                         .get(&artist.band_id)
-                        .and_then(|v| v.first())
-                        .cloned();
+                        .cloned()
+                        .unwrap_or_default();
 
                     let resp = draw_artist_row(
                         ui,
@@ -109,7 +109,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             }
                         }),
                         state.settings.quota_hard,
-                        linked_folder.as_ref(),
+                        &artist_folders,
                     );
 
                     let modifiers = ui.input(|i| i.modifiers);
@@ -151,9 +151,17 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             });
                             ui.close();
                         }
-                        if let Some(folder) =
-                            state.folders.get(&artist.band_id).and_then(|v| v.first())
-                        {
+                        if artist_folders.is_empty() {
+                            if sharp_button(ui, "Link Folder...").clicked() {
+                                state.link_folder_modal = Some(LinkFolderModalState::for_artist(
+                                    artist.band_id,
+                                    artist.display_name(),
+                                    None,
+                                ));
+                                ui.close();
+                            }
+                        } else if artist_folders.len() == 1 {
+                            let folder = &artist_folders[0];
                             if folder.state != FolderState::Ok
                                 && sharp_button(ui, "Resolve unavailable folder...").clicked()
                             {
@@ -162,11 +170,20 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                                 });
                                 ui.close();
                             }
-                            if sharp_button(ui, "Change Folder...").clicked() {
+                            if sharp_button(ui, "Add Folder...").clicked() {
                                 state.link_folder_modal = Some(LinkFolderModalState::for_artist(
                                     artist.band_id,
                                     artist.display_name(),
-                                    Some(folder.path.clone()),
+                                    None,
+                                ));
+                                ui.close();
+                            }
+                            if sharp_button(ui, "Change Folder...").clicked() {
+                                state.link_folder_modal = Some(LinkFolderModalState::for_repoint(
+                                    artist.band_id,
+                                    artist.display_name(),
+                                    folder.id,
+                                    &folder.path,
                                 ));
                                 ui.close();
                             }
@@ -184,7 +201,15 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                                 ui.close();
                             }
                         } else {
-                            if sharp_button(ui, "Link Folder...").clicked() {
+                            if artist_folders.iter().any(|f| f.state != FolderState::Ok)
+                                && sharp_button(ui, "Resolve unavailable folder...").clicked()
+                            {
+                                let _ = cmd_tx.send(UiToWorkerCommand::VerifyFiles {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                });
+                                ui.close();
+                            }
+                            if sharp_button(ui, "Add Folder...").clicked() {
                                 state.link_folder_modal = Some(LinkFolderModalState::for_artist(
                                     artist.band_id,
                                     artist.display_name(),
@@ -192,6 +217,48 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                                 ));
                                 ui.close();
                             }
+                            if sharp_button(ui, "Match Folder").clicked() {
+                                let _ = cmd_tx.send(UiToWorkerCommand::MatchArtistFolder {
+                                    band_id: artist.band_id,
+                                    auto_apply_confident: true,
+                                });
+                                ui.close();
+                            }
+                            ui.menu_button("Change folder...", |ui| {
+                                for folder in &artist_folders {
+                                    let label = crate::ui::state::folder_display_label(
+                                        folder,
+                                        &artist_folders,
+                                    );
+                                    if sharp_button(ui, &format!("Folder moved: change {label}..."))
+                                        .clicked()
+                                    {
+                                        state.link_folder_modal =
+                                            Some(LinkFolderModalState::for_repoint(
+                                                artist.band_id,
+                                                artist.display_name(),
+                                                folder.id,
+                                                &folder.path,
+                                            ));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            ui.menu_button("Unlink folder...", |ui| {
+                                for folder in &artist_folders {
+                                    let label = crate::ui::state::folder_display_label(
+                                        folder,
+                                        &artist_folders,
+                                    );
+                                    if sharp_button(ui, &format!("Unlink {label}...")).clicked() {
+                                        let _ =
+                                            cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                                folder_id: folder.id,
+                                            });
+                                        ui.close();
+                                    }
+                                }
+                            });
                         }
                         if sharp_button(ui, "Verify Files").clicked() {
                             let _ = cmd_tx.send(UiToWorkerCommand::VerifyFiles {
@@ -296,7 +363,7 @@ fn draw_artist_row(
     selected: bool,
     sync_frac: Option<f32>,
     quota_hard: u32,
-    linked_folder: Option<&ArtistFolder>,
+    folders: &[ArtistFolder],
 ) -> egui::Response {
     let desired = Vec2::new(ui.available_width(), 24.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
@@ -348,30 +415,47 @@ fn draw_artist_row(
                 .max_rect(inner)
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        if let Some(folder) = linked_folder {
-            let tip = match folder.state {
-                FolderState::Ok => {
-                    if stats.archived > 0 && stats.downloaded == stats.archived {
+        if let Some(worst) = crate::ui::state::worst_folder_state(folders) {
+            let tip = if folders.len() == 1 {
+                let folder = &folders[0];
+                match folder.state {
+                    FolderState::Ok => {
+                        if stats.archived > 0 && stats.downloaded == stats.archived {
+                            format!(
+                                "Linked (all archived): {}\nStatus: Reachable\n{} release(s) archived",
+                                folder.path.display(),
+                                stats.archived
+                            )
+                        } else {
+                            format!("Linked: {}\nStatus: Reachable", folder.path.display())
+                        }
+                    }
+                    FolderState::Missing => {
                         format!(
-                            "Linked (all archived): {}\nStatus: Reachable\n{} release(s) archived",
-                            folder.path.display(),
-                            stats.archived
+                            "Linked: {}\nStatus: Missing\nRight-click to resolve",
+                            folder.path.display()
                         )
-                    } else {
-                        format!("Linked: {}\nStatus: Reachable", folder.path.display())
+                    }
+                    FolderState::Unreadable => {
+                        format!("Linked: {}\nStatus: Unreadable", folder.path.display())
                     }
                 }
-                FolderState::Missing => {
-                    format!(
-                        "Linked: {}\nStatus: Missing\nRight-click to resolve",
-                        folder.path.display()
-                    )
+            } else {
+                let mut lines = vec![format!("Linked folders ({}):", folders.len())];
+                for f in folders {
+                    let st_str = match f.state {
+                        FolderState::Ok => "Reachable",
+                        FolderState::Missing => "Missing",
+                        FolderState::Unreadable => "Unreadable",
+                    };
+                    lines.push(format!("- {}: {}", f.path.display(), st_str));
                 }
-                FolderState::Unreadable => {
-                    format!("Linked: {}\nStatus: Unreadable", folder.path.display())
+                if worst != FolderState::Ok {
+                    lines.push("Right-click to resolve".to_string());
                 }
+                lines.join("\n")
             };
-            paint_folder_glyph(&mut child, folder.state).on_hover_text(tip);
+            paint_folder_glyph(&mut child, worst).on_hover_text(tip);
             child.add_space(2.0);
         } else if stats.archived > 0 {
             let tip = format!(
@@ -393,13 +477,20 @@ fn draw_artist_row(
         });
     }
 
-    let folder_tooltip = match linked_folder {
-        Some(f) => format!(
+    let folder_tooltip = if folders.is_empty() {
+        String::new()
+    } else if folders.len() == 1 {
+        format!(
             "\nLinked folder: {}\nFolder status: {:?}",
-            f.path.display(),
-            f.state
-        ),
-        None => String::new(),
+            folders[0].path.display(),
+            folders[0].state
+        )
+    } else {
+        let mut s = format!("\nLinked folders ({}):", folders.len());
+        for f in folders {
+            s.push_str(&format!("\n- {}: {:?}", f.path.display(), f.state));
+        }
+        s
     };
 
     let dl_desc = if stats.non_eligible_downloaded > 0 {

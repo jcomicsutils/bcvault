@@ -524,7 +524,10 @@ fn show_settings_modal(
                                 .find(|x| x.band_id == b.band_id)
                                 .map(|x| x.display_name())
                                 .unwrap_or("");
-                            name_a.to_lowercase().cmp(&name_b.to_lowercase())
+                            name_a
+                                .to_lowercase()
+                                .cmp(&name_b.to_lowercase())
+                                .then_with(|| a.path.cmp(&b.path))
                         });
 
                         egui::Grid::new("linked_folders_grid")
@@ -719,7 +722,49 @@ fn show_link_folder_modal(
     let screen = ctx.content_rect();
     let max_w = (screen.width() - 48.0).clamp(420.0, 620.0);
 
-    egui::Window::new("Link Artist Folder")
+    let target_band_id = modal.band_id.or_else(|| {
+        state
+            .artists
+            .iter()
+            .find(|a| a.matches_input(&modal.artist_input))
+            .map(|a| a.band_id)
+    });
+    let artist_name = target_band_id
+        .and_then(|bid| state.artists.iter().find(|a| a.band_id == bid))
+        .map(|a| a.display_name().to_string())
+        .unwrap_or_else(|| {
+            if !modal.artist_input.is_empty() {
+                modal.artist_input.clone()
+            } else {
+                "Artist".to_string()
+            }
+        });
+
+    let existing_folders = target_band_id
+        .and_then(|bid| state.folders.get(&bid))
+        .cloned()
+        .unwrap_or_default();
+
+    let is_repoint = modal.repoint_folder_id.is_some();
+    let has_links = !existing_folders.is_empty();
+
+    let window_title = if is_repoint {
+        format!("Change Folder Location - {artist_name}")
+    } else if has_links {
+        format!("Add another folder for {artist_name}")
+    } else {
+        "Link Artist Folder".to_string()
+    };
+
+    let desc = if is_repoint {
+        "Choose the new location for this artist folder:"
+    } else if has_links {
+        "Add another local music folder for this artist:"
+    } else {
+        "Link a local music folder to a Bandcamp artist:"
+    };
+
+    egui::Window::new(window_title)
         .order(Order::Foreground)
         .collapsible(false)
         .resizable(false)
@@ -729,10 +774,7 @@ fn show_link_folder_modal(
             ui.set_max_width(ui.available_width());
             ui.set_min_width(ui.available_width().min(460.0));
 
-            ui.label(
-                RichText::new("Link a local music folder to a Bandcamp artist:")
-                    .color(pal::TEXT_DIM),
-            );
+            ui.label(RichText::new(desc).color(pal::TEXT_DIM));
             ui.add_space(4.0);
 
             egui::Grid::new("link_folder_grid")
@@ -741,13 +783,13 @@ fn show_link_folder_modal(
                 .show(ui, |ui| {
                     ui.label("Artist Page:");
                     if let Some(band_id) = modal.band_id {
-                        let artist_name = state
+                        let a_name = state
                             .artists
                             .iter()
                             .find(|a| a.band_id == band_id)
                             .map(|a| a.display_name().to_string())
                             .unwrap_or_else(|| format!("Artist {band_id}"));
-                        ui.label(RichText::new(artist_name).strong());
+                        ui.label(RichText::new(a_name).strong());
                     } else {
                         ui.vertical(|ui| {
                             let mut selected_text = "Select tracked artist...".to_string();
@@ -790,6 +832,20 @@ fn show_link_folder_modal(
                     }
                     ui.end_row();
 
+                    if !is_repoint && has_links {
+                        ui.label("Existing links:");
+                        ui.vertical(|ui| {
+                            for f in &existing_folders {
+                                ui.label(
+                                    RichText::new(f.path.display().to_string())
+                                        .color(pal::TEXT_DIM)
+                                        .monospace(),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
+
                     ui.label("Folder:");
                     ui.horizontal(|ui| {
                         ui.add(
@@ -821,10 +877,12 @@ fn show_link_folder_modal(
                 });
 
             ui.add_space(4.0);
-            ui.checkbox(
-                &mut modal.auto_apply_confident,
-                "Adopt confident matches automatically",
-            );
+            if !is_repoint {
+                ui.checkbox(
+                    &mut modal.auto_apply_confident,
+                    "Adopt confident matches automatically",
+                );
+            }
 
             if let Some(ref err) = modal.error {
                 ui.add_space(4.0);
@@ -833,7 +891,15 @@ fn show_link_folder_modal(
 
             ui.separator();
             ui.horizontal(|ui| {
-                if sharp_button(ui, "Link Folder").clicked() {
+                let action_label = if is_repoint {
+                    "Change Folder"
+                } else if has_links {
+                    "Add Folder"
+                } else {
+                    "Link Folder"
+                };
+
+                if sharp_button(ui, action_label).clicked() {
                     let path_str = modal.folder_path.trim();
                     if path_str.is_empty() {
                         modal.error = Some("Folder path cannot be empty.".to_string());
@@ -845,16 +911,35 @@ fn show_link_folder_modal(
                         } else if !path.is_dir() {
                             modal.error =
                                 Some("Selected path is a file, not a directory.".to_string());
-                        } else {
-                            let target_band_id = modal.band_id.or_else(|| {
-                                state
-                                    .artists
-                                    .iter()
-                                    .find(|a| a.matches_input(&modal.artist_input))
-                                    .map(|a| a.band_id)
+                        } else if let Some(folder_id) = modal.repoint_folder_id {
+                            let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder {
+                                folder_id,
+                                new_path: path,
                             });
+                            keep_open = false;
+                        } else {
+                            let path_key =
+                                bcvault_core::library::link::normalize_path_key(&path);
+                            let mut overlap_err = None;
+                            for f in &existing_folders {
+                                let f_key =
+                                    bcvault_core::library::link::normalize_path_key(&f.path);
+                                if path_key == f_key || path_key.starts_with(&format!("{f_key}/")) {
+                                    overlap_err =
+                                        Some(format!("already covered by {}", f.path.display()));
+                                    break;
+                                } else if f_key.starts_with(&format!("{path_key}/")) {
+                                    overlap_err = Some(format!(
+                                        "contains {}; unlink that first",
+                                        f.path.display()
+                                    ));
+                                    break;
+                                }
+                            }
 
-                            if let Some(band_id) = target_band_id {
+                            if let Some(err_msg) = overlap_err {
+                                modal.error = Some(err_msg);
+                            } else if let Some(band_id) = target_band_id {
                                 let _ = cmd_tx.send(UiToWorkerCommand::LinkArtistFolder {
                                     band_id,
                                     path,
@@ -1022,20 +1107,44 @@ fn show_reconcile_report_modal(
             ui.set_min_width(ui.available_width().min(580.0));
 
             // Subtitle
-            let folder_path = state
+            let folder_paths: Vec<String> = state
                 .folders
                 .get(&modal.report.band_id)
-                .and_then(|v| v.first())
-                .map(|f| f.path.display().to_string())
-                .unwrap_or_else(|| "Unknown folder".to_string());
+                .map(|v| v.iter().map(|f| f.path.display().to_string()).collect())
+                .unwrap_or_default();
+            let folder_summary = if folder_paths.is_empty() {
+                "Unknown folder".to_string()
+            } else if folder_paths.len() == 1 {
+                folder_paths[0].clone()
+            } else {
+                format!("{} folders linked", folder_paths.len())
+            };
             ui.label(
                 RichText::new(format!(
                     "Batch #{}  ·  Linked: {}",
-                    modal.report.batch_id, folder_path
+                    modal.report.batch_id, folder_summary
                 ))
                 .size(11.5)
                 .color(pal::TEXT_DIM),
             );
+
+            if !modal.report.unavailable_folders.is_empty() {
+                ui.add_space(2.0);
+                let total = state
+                    .folders
+                    .get(&modal.report.band_id)
+                    .map(|v| v.len())
+                    .unwrap_or(modal.report.unavailable_folders.len());
+                let banner = format!(
+                    "{} of {} folders unavailable; results may be incomplete",
+                    modal.report.unavailable_folders.len(),
+                    total
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").color(pal::WARN));
+                    ui.label(RichText::new(banner).color(pal::WARN));
+                });
+            }
             ui.add_space(4.0);
 
             // Tab bar
@@ -1380,9 +1489,36 @@ fn show_reconcile_report_modal(
                                         )
                                         .truncate(),
                                     );
+                                    let display_path = if let Some(folders) =
+                                        state.folders.get(&modal.report.band_id)
+                                        && folders.len() > 1
+                                    {
+                                        let best = folders
+                                            .iter()
+                                            .filter(|f| orphan.path.starts_with(&f.path))
+                                            .max_by_key(|f| f.path.as_os_str().len());
+                                        if let Some(owning) = best {
+                                            let folder_name = owning
+                                                .path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy())
+                                                .unwrap_or_default();
+                                            if let Ok(rel) = orphan.path.strip_prefix(&owning.path)
+                                            {
+                                                format!("{} / {}", folder_name, rel.display())
+                                            } else {
+                                                orphan.path.display().to_string()
+                                            }
+                                        } else {
+                                            orphan.path.display().to_string()
+                                        }
+                                    } else {
+                                        orphan.path.display().to_string()
+                                    };
+
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(orphan.path.display().to_string())
+                                            RichText::new(&display_path)
                                                 .color(pal::TEXT_DIM)
                                                 .size(11.0),
                                         )
@@ -1791,16 +1927,33 @@ fn show_resolve_missing_modal(
         .ok()
         .and_then(|mut lock| lock.take())
     {
-        if let Some(folder_id) = state
-            .folders
-            .get(&band_id)
-            .and_then(|v| v.first())
-            .map(|f| f.id)
-        {
-            let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder {
-                folder_id,
-                new_path,
-            });
+        if let Some(folders) = state.folders.get(&band_id) {
+            let target_folder_id = modal
+                .items
+                .iter()
+                .filter(|it| it.band_id == band_id)
+                .find_map(|it| {
+                    it.last_known_path.as_ref().and_then(|p| {
+                        let rel_key = bcvault_core::library::link::normalize_path_key(p);
+                        folders
+                            .iter()
+                            .filter(|f| {
+                                let f_key =
+                                    bcvault_core::library::link::normalize_path_key(&f.path);
+                                rel_key == f_key || rel_key.starts_with(&format!("{f_key}/"))
+                            })
+                            .max_by_key(|f| f.path.as_os_str().len())
+                            .map(|f| f.id)
+                    })
+                })
+                .or_else(|| folders.first().map(|f| f.id));
+
+            if let Some(folder_id) = target_folder_id {
+                let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder {
+                    folder_id,
+                    new_path,
+                });
+            }
         }
         state.show_resolve_missing_window = false;
         state.resolve_missing_modal = None;

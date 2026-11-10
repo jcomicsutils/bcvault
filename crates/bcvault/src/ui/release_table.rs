@@ -187,24 +187,27 @@ pub fn show(
                             badge(ui, "ARCHIVED", pal::TEXT_DIM, pal::BORDER_HI);
                         } else if r.local_status == Some(LocalStatus::Missing) {
                             badge(ui, "MISSING", pal::WARN, pal::WARN);
-                        } else if let Some(folder) =
-                            state.folders.get(&r.band_id).and_then(|v| v.first())
-                            && folder.state != FolderState::Ok
-                        {
-                            let is_under_folder = match &r.local_path {
+                        } else if let Some(folders) = state.folders.get(&r.band_id) {
+                            let folder_missing = match &r.local_path {
                                 Some(p) => {
                                     let rel_key =
                                         bcvault_core::library::link::normalize_path_key(p);
-                                    let folder_key =
-                                        bcvault_core::library::link::normalize_path_key(
-                                            &folder.path,
-                                        );
-                                    rel_key == folder_key
-                                        || rel_key.starts_with(&format!("{folder_key}/"))
+                                    let owning = folders
+                                        .iter()
+                                        .filter(|f| {
+                                            let folder_key =
+                                                bcvault_core::library::link::normalize_path_key(
+                                                    &f.path,
+                                                );
+                                            rel_key == folder_key
+                                                || rel_key.starts_with(&format!("{folder_key}/"))
+                                        })
+                                        .max_by_key(|f| f.path.as_os_str().len());
+                                    owning.map(|f| f.state != FolderState::Ok).unwrap_or(false)
                                 }
-                                None => true,
+                                None => folders.iter().any(|f| f.state != FolderState::Ok),
                             };
-                            if is_under_folder {
+                            if folder_missing {
                                 badge(ui, "FOLDER MISSING", pal::WARN, pal::WARN);
                             }
                         }
