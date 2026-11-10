@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (MULTI_FOLDER step 6; next: docs and plan tracking updates)  ·  Branch: main  ·  Updated: 2026-11-10
+Task: none (MULTI_FOLDER plan completed; ready for next plan)  ·  Branch: main  ·  Updated: 2026-11-10
 
 ## Done
+- MULTI-FOLDER 6: document several folders per artist
 - MULTI-FOLDER 5: add, unlink and change several folders per artist in fx UI
 - MULTI-FOLDER 4: add, unlink and change several folders per artist in classic UI
 - MULTI-FOLDER 3: address linked folders by id (tests 18-23)
@@ -82,6 +83,7 @@ Task: none (MULTI_FOLDER step 6; next: docs and plan tracking updates)  ·  Bran
 - [x] L4: Classic UI
 - [x] L5: FX integration and polish
 - [x] L6: Hardening
+- [x] MULTI-FOLDER: Many folders per artist, one artist per folder (Steps 1 to 6, migration 0006)
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
 - Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; current HEAD is tagged `v0.1.2`).
 
@@ -101,3 +103,4 @@ Task: none (MULTI_FOLDER step 6; next: docs and plan tracking updates)  ·  Bran
 - 2026-11-09: Fixed unavailable folder resolution stalling when releases under a missing folder are already archived or empty: `verify_files` now includes all unavailable linked folders in scope so `FolderUnavailable` is reliably emitted, allowing unlinking and repointing via the modal. Added monospace rectangular `ARCHIVED` badges on Wall view cards (matching `UPDATE`/`MISSING`), `ARCHIVED (FILES REMOVED)` status in detail drawer with suppressed "Open Folder" action, dimmed format labels in table view, and geometric `Archive` box icons in the artist sidebar for artists with archived releases.
 - 2026-11-09: Fixed sidebar badge retaining (+1) count after manually matching an orphan local folder to a release: implemented lib_repo::attach to decrement artist_folders.local_only_count and record event kind 'attached', and updated lib_repo::undo_batch to restore local_only_count on batch reversal.
 - 2026-11-09: Fixed un-downloaded albums in wall view incorrectly rendering the download checkmark badge when clicked/selected: restricted top-right badge branch strictly to downloaded releases, removed !is_selected check from missing folder status so selecting a missing card retains its MISSING badge with accent border, and added Motion::has helper to verify spring animations.
+- 2026-11-10: Applied MULTI_FOLDER plan: generalized artist folder links from 1:1 to N:1 (many linked folders per artist, one artist per folder). Migration 0006_artist_folders_multi drops the unique constraint on artist_folders.band_id, adds non-zero folder IDs, cascades deletions and ignores, and preserves existing link data and local_only_counts. Scans, match reports, and disk verification operate across all folders of an artist; duplicate candidate names across folders produce explicit conflicts. Single-folder artists experience no UX change. When an artist has multiple folders, sidebar tooltips list all folders with their individual states, and the sidebar glyph reflects the worst state. Add/Change/Unlink folder workflows support individual folder targeting with path disambiguation when basenames collide. Partial-availability safeguard routes missing releases to Ask mode (never auto-archiving) whenever any of an artist's linked folders is offline, and Reconcile reports display folder-relative paths for orphan local folders.

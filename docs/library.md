@@ -8,27 +8,28 @@
 
 1. **Local-Only I/O**: Scanning, tag reading, matching, and disk verification perform filesystem operations only. No network requests are made to Bandcamp for library synchronization.
 2. **Never Modify or Delete User Files**: `bcvault` strictly reads filesystem metadata (file existence, directory listings, audio tags). It never creates, alters, renames, moves, or deletes user music files.
-3. **One Folder per Artist (1:1 Binding)**: Each tracked artist page links to at most one local directory. A linked folder may not equal, contain, or sit inside another linked artist folder or the global download directory (`out_dir`).
+3. **Many Folders per Artist, One Artist per Folder (N:1 Binding)**: A tracked artist page can link to multiple local folders (e.g., across multiple drives, separate album roots, or project directories). However, each folder belongs strictly to one artist: linked folders may not equal, contain, or sit inside any other linked folder (belonging to another artist or the same artist) or the global download directory (`out_dir`).
 4. **Absence of Evidence is Not Deletion**: If an external hard drive, USB volume, or network share is unmounted or unreachable, releases under it are reported as `Unknown`, never `Missing`.
 5. **Non-Destructive Batch Changes with Undo**: Every automatic or manual status modification creates a batch entry in `library_batches` with before/after audit entries in `library_events`. Any batch can be undone with a single click.
 
 ---
 
-## 2. Linking an Artist Folder
+## 2. Linking Artist Folders
 
-You can link a local folder to an artist page from either front-end:
+You can link local music folders to an artist page from either front-end:
 
-- **Sidebar Context Menu**: Right-click an artist in the left sidebar and select **Link Folder...** (or **Change Folder...** if already linked).
+- **Sidebar Context Menu**: Right-click an artist in the left sidebar and select **Link Folder...** (or **Add Folder...** if already linked to one or more folders). Per linked folder, submenus allow **Folder moved: change <folder>...** and **Unlink <folder>...** (disambiguated by parent path if folder basenames collide).
 - **Toolbar**: Click the **Link Folder...** button in the top toolbar.
-- **Settings**: Open Settings to view all currently linked artist folders with live health status dots and unlink controls.
+- **Settings**: Open Settings to view all currently linked artist folders with live health status dots and individual unlink controls.
 - **Command Palette (`bcvault-fx`)**: Press `Ctrl+K` and type `Link Folder to Artist...`.
 
 ### Validation Rules
-When linking a folder, `bcvault` verifies:
+When linking or changing a folder, `bcvault` verifies:
 - The path exists, is a directory, and is readable.
 - The path is canonicalized (stripping Windows extended-length `\\?\` prefixes via `dunce`).
 - The path does not overlap with `out_dir` (it cannot be equal to, inside, or a parent of `out_dir`).
-- The path does not overlap with any other artist's linked folder.
+- The path does not overlap with any folder belonging to another artist.
+- The path does not overlap with any other folder already linked to the same artist (`AlreadyCovered` or `ContainsOwnFolder`).
 - **Soft Warning**: If the folder contains subdirectories that look like separate artists rather than albums, the dialog displays a non-blocking warning: *"Link one artist's folder, not a library"*.
 
 ---
@@ -111,7 +112,7 @@ During background synchronization (or on demand via **Verify Local Library Files
 
 ### Drive & Volume Probing
 Before checking individual files, `bcvault` probes each storage root once per run:
-- Each release is accurately attributed to its true root (`Linked { band_id }` if its path is under the artist's linked folder, or `OutDir` if stored under the global download directory). Releases outside an unavailable folder are still verified normally.
+- Each release is accurately attributed to its true root (`Linked { folder_id }` for whichever linked folder contains its path, or `OutDir` if stored under the global download directory). Releases outside an unavailable folder are still verified normally.
 - Folders evaluate to one of three states:
   - **`FolderState::Ok`**: Path exists and is readable. File checks proceed normally.
   - **`FolderState::Missing`**: Folder no longer exists.
@@ -125,6 +126,14 @@ Before checking individual files, `bcvault` probes each storage root once per ru
 > 3. **Deleted on purpose (`Apply`)**: applies the chosen deletion policy (`KeepMarked` or `MarkNotDownloaded`) as an undoable batch, with optional folder unlinking.
 >
 > Background syncs of all artists leave a `FOLDER n` warning chip in the status dock without interrupting work; clicking the chip or manual verification opens the dialog.
+
+### Multiple Folders & Partial Availability Safeguard
+When an artist links several folders (e.g., across internal and external storage) and one becomes offline while others remain online:
+- Releases stored under the reachable folder are verified as usual.
+- Releases under the unavailable folder evaluate to `FolderUnavailable`.
+- **Partial-Availability Rule**: If an artist has at least one unavailable folder, missing albums under their available folders are **never auto-archived**, even when `on_missing = Auto`. Instead, they are routed to `MissingFound` (Ask) to safeguard against cross-volume confusion or unmounted partitions.
+- Reconcile reports display a warning banner: `N of M folders unavailable; results may be incomplete`.
+- In Reconcile reports, unassigned local folders (orphans) display their path relative to their owning folder (e.g. `ProjectB / Album`) whenever an artist has multiple linked folders.
 
 ### Mass-Missing Guard
 If more than 30% of verified releases (minimum 20 albums) disappear in a single pass:
@@ -140,7 +149,7 @@ If more than 30% of verified releases (minimum 20 albums) disappear in a single 
 When an album folder disappears, `bcvault` attempts resolution in the following order:
 
 1. **Automatic Relinking**:
-   If `auto_relink` is enabled (default), the linked artist folder is rescanned. If the album was moved to another subfolder or renamed with score >= 92%, `bcvault` relinks it silently with no user prompt.
+   If `auto_relink` is enabled (default), the artist's linked folders are rescanned. If the album was moved to another subfolder, renamed with score >= 92%, or moved from one linked folder of the artist to another linked folder of the same artist, `bcvault` relinks it silently with no user prompt.
 2. **Missing Album Policy (`on_missing`)**:
    - **`Ask`** (default): Collects missing albums into the non-modal **Resolve Missing** queue and shows a warning chip in the status dock (`MISSING n`). Note that an unavailable folder always asks regardless of this setting.
    - **`Auto`**: Automatically applies the configured `deleted_policy`.

@@ -1,10 +1,10 @@
 # ROADMAP: order of work across plans
 
-*Companion to `AGENTS.md`. Prepared 7 Nov 2026, revised 9 Nov 2026 (synced with the codebase: library L0 to L6, MATCH-FIX, badge rework, and MISSING-FOLDER-FIX landed; MULTI_FOLDER, auto-sync, archive, mail-redeem, and file-themes plans tracked).*
+*Companion to `AGENTS.md`. Prepared 7 Nov 2026, revised 10 Nov 2026 (synced with the codebase: library L0 to L6, MATCH-FIX, badge rework, MISSING-FOLDER-FIX, and MULTI_FOLDER landed; auto-sync, archive, mail-redeem, and file-themes plans tracked).*
 
 ## 1. Status snapshot (live status is in `PROGRESS.md`)
 
-| Plan | State on 9 Nov 2026 |
+| Plan | State on 10 Nov 2026 |
 | --- | --- |
 | Base engine (`Initial Plan.md`) | Implemented (Phases 0 to 5) in `v0.1.0` |
 | FX (`PLANS/FX/FX_PLAN.md`) | Implemented (Phases F0 to F8) in `v0.1.0` |
@@ -12,7 +12,7 @@
 | Exact matching (`PLANS/LIBRARY_SYNC/MATCH-FIX.md`) | Implemented (Steps 1 to 8) in `v0.1.0` |
 | Badge reform (`PROGRESS.md`, migration `0005`) | Implemented (Steps 1 to 6) in `v0.1.0` |
 | Missing folder handling (`PLANS/LIBRARY_SYNC/MISSING-FOLDER-FIX.md`) | Implemented (Steps 1 to 5) in `v0.1.1` and `v0.1.2` |
-| Multiple linked folders (`PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`) | Planned, not started. Amends `LIBRARY_SYNC_PLAN.md` §5 (many folders per artist). Unblocked by `MISSING-FOLDER-FIX`. |
+| Multiple linked folders (`PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`) | Implemented (Steps 1 to 6) in `main` (migration `0006_artist_folders_multi.sql`) |
 | Tooling (T0) | In progress: architectural guards, `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed. |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync. |
@@ -22,7 +22,7 @@
 ## 2. Dependency graph
 
 ```text
-T0 tooling ──┬──► MULTI_FOLDER (many folders per artist; unblocked by MISSING-FOLDER-FIX)
+T0 tooling ──┬──► MULTI_FOLDER (done)
              │
              ├──► AUTO_SYNC ──► ARCHIVE
              │
@@ -32,8 +32,8 @@ T0 tooling ──┬──► MULTI_FOLDER (many folders per artist; unblocked b
              └──► USER_THEMES (FX only, independent)
 ```
 
-F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, and MISSING-FOLDER-FIX are done and not part of the active graph.
-- `MULTI_FOLDER.md` generalises `MISSING-FOLDER-FIX`'s root attribution to "longest matching link among N" and is fully unblocked.
+F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, MISSING-FOLDER-FIX, and MULTI_FOLDER are done and not part of the active graph.
+- `MULTI_FOLDER.md` generalised `MISSING-FOLDER-FIX`'s root attribution to "longest matching link among N" and is completed.
 - M0.1 reuses `bcvault_core::library::textmatch` and the matcher's scoring (both exist). M0.4's follow-up updates FX's schema contract check.
 - `ARCHIVE.md` rebases onto `AUTO_SYNC.md` (both edit `worker/sync.rs`).
 - `USER_THEMES.md` touches only `bcvault-fx` (with a minor `AppPaths` addition in core) and has no migration dependencies.
@@ -42,7 +42,7 @@ F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, and MISSING-FOLDER-FIX are done and
 
 | Step | Work | Why now |
 | --- | --- | --- |
-| 1 | **MULTI_FOLDER** or **AUTO_SYNC** | Both are unblocked. If multi-folder library support is preferred first, it takes migration `0006`, letting `AUTO_SYNC` verify and rescan multiple folders cleanly. If auto-sync lands first, it takes `0006` and `MULTI_FOLDER` takes `0007` (or `0008` after archive). |
+| 1 | **AUTO_SYNC** | Unblocked. Takes migration `0007_auto_sync.sql`, verifying and rescanning multiple folders cleanly. |
 | 2 | **ARCHIVE** | Merges after `AUTO_SYNC` and rebases onto it (both touch `worker/sync.rs`). |
 | 3 | **M0 to M4** mail core | Needs the real-mailbox fixture and cock.li check. Takes the next free migration number when it lands. |
 | 4 | **M5 and M6** mail UI in both front-ends | Both apps exist; wires mail redeem into classic and FX. |
@@ -53,7 +53,7 @@ Core phases never touch UI crates, so they interleave safely with UI work of ano
 
 ## 4. Parallel work
 
-A single agent works one phase or plan at a time. If you run two agents, split by crate: one on `bcvault-core` (M0 to M4, multi-folder, auto-sync and archive core), one on the UI crates. Never two agents on the same phase or the same migration number. Every in-flight plan edits the Settings modals; keep modal changes in new functions or files. Shared files: `PROGRESS.md`, `Cargo.lock`, `crates/bcvault-core/src/types.rs`; rebase often.
+A single agent works one phase or plan at a time. If you run two agents, split by crate: one on `bcvault-core` (M0 to M4, auto-sync and archive core), one on the UI crates. Never two agents on the same phase or the same migration number. Every in-flight plan edits the Settings modals; keep modal changes in new functions or files. Shared files: `PROGRESS.md`, `Cargo.lock`, `crates/bcvault-core/src/types.rs`; rebase often.
 
 ## 5. Migration numbering (main DB, `crates/bcvault-core/migrations/`)
 
@@ -63,8 +63,9 @@ A single agent works one phase or plan at a time. If you run two agents, split b
 | `0003_custom_artist_name` | `artists.custom_name` (page artist renaming) | Base follow-up, before the workspace split | Breaking for older binaries |
 | `0004_library` | Library columns on `releases`, `artist_folders`, `artist_folder_ignored`, `library_batches`/`library_events` | L0.1 | Breaking (`feat(db)!`) |
 | `0005_artist_folder_local_only` | `artist_folders.local_only_count` | Badge rework (`Task: none`) | Breaking (`feat(library)!`) |
-| `0006` (lowest free) | `0006_artist_folders_multi.sql` (if multi-folder lands first) OR `0006_auto_sync.sql` | `MULTI_FOLDER.md` or `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
-| `0007` (or next free) | `0007_archive.sql` | `ARCHIVE.md` | Breaking (`feat(db)!`) |
+| `0006_artist_folders_multi` | Multi-folder links per artist (`artist_folders` multi-link schema) | `MULTI_FOLDER.md` (`Task: none`) | Breaking (`feat(db)!`) |
+| `0007` (lowest free) | `0007_auto_sync.sql` | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
+| `0008` (or next free) | `0008_archive.sql` | `ARCHIVE.md` | Breaking (`feat(db)!`) |
 | next free | Mail accounts, messages, links, wait list | `MAIL_REDEEM_PLAN.md` (M0.4) | Breaking (`feat(db)!`) |
 
 Number by landing order: whichever plan lands first takes the lowest free number; rename the unmerged file (and the plan text) before merging. The runner list is in `crates/bcvault-core/src/db/migrations.rs`. FX's sidecar database has its own numbering (`fx.sqlite`, `0001_fx_init.sql`) and is unaffected.
@@ -75,8 +76,14 @@ Number by landing order: whichever plan lands first takes the lowest free number
 | --- | --- | --- |
 | `library::textmatch` (`tokens`, `key`) and `library::matcher` scoring (`score_candidate`, `normalize_bandcamp_url`) | L1.1 / L2.1, reworked by MATCH-FIX (exact-first; no noise-token or diacritic stripping) | Mail M0.1, M3.3 |
 | `library::folder_style` (`FolderStyle` templates, noise list) | MATCH-FIX | Library matcher; mail may reuse for local lookups |
-| `Artist folder links (multiple folders per artist)` | `MULTI_FOLDER.md` | `library::service`, `library::verify`, `worker/library`, `AUTO_SYNC`, both UIs, sidebar stats |
+| `Artist folder links (multiple folders per artist)` | `MULTI_FOLDER.md` (done) | `library::service`, `library::verify`, `worker/library`, `AUTO_SYNC`, both UIs, sidebar stats |
 | Unavailable folder handling (`FolderUnavailable`, `ResolveUnavailable`) | MISSING-FOLDER-FIX | Verify, relink, `MULTI_FOLDER`, both UIs |
+| `validate_redeem_url` | Base 3.8, refactored in M1.4 | Manual redeem modal, mail links |
+| `fetch_release_raw`, gate `fetch_bytes`, `WorkerHandle` | F0.3 (done) | FX services, archive |
+| Instance lock | F0.3 (done) | Classic and FX `main` |
+| FX schema contract check | F1.2 (done), updated by L0.7 | Follow-up to M0.4, auto-sync, archive and multi-folder migrations whenever they add/alter columns or tables FX queries |
+| `Settings` new fields | L0.2, MATCH-FIX (folder style) | Must use `#[serde(default)]`; M phases keep secrets out of `Settings` |
+| `ArtistStats` (eligible and non-eligible downloaded counts) | Badge rework | Both sidebars; auto-sync removed-release tracking and multi-folder aggregation must keep counts consistent |
 | `validate_redeem_url` | Base 3.8, refactored in M1.4 | Manual redeem modal, mail links |
 | `fetch_release_raw`, gate `fetch_bytes`, `WorkerHandle` | F0.3 (done) | FX services, archive |
 | Instance lock | F0.3 (done) | Classic and FX `main` |
