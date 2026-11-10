@@ -187,7 +187,8 @@ pub fn show(
                             badge(ui, "ARCHIVED", pal::TEXT_DIM, pal::BORDER_HI);
                         } else if r.local_status == Some(LocalStatus::Missing) {
                             badge(ui, "MISSING", pal::WARN, pal::WARN);
-                        } else if let Some(folder) = state.folders.get(&r.band_id)
+                        } else if let Some(folder) =
+                            state.folders.get(&r.band_id).and_then(|v| v.first())
                             && folder.state != FolderState::Ok
                         {
                             let is_under_folder = match &r.local_path {

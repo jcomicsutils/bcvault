@@ -415,10 +415,10 @@ impl Supervisor {
                     }
                 });
             }
-            UiToWorkerCommand::UnlinkArtistFolder { band_id } => {
+            UiToWorkerCommand::UnlinkArtistFolder { folder_id } => {
                 let svc = self.library_service.clone();
                 tokio::spawn(async move {
-                    svc.unlink_artist_folder(band_id).await;
+                    svc.unlink_artist_folder(folder_id).await;
                 });
             }
             UiToWorkerCommand::MatchArtistFolder {
@@ -497,11 +497,14 @@ impl Supervisor {
                     svc.ignore_local(band_id, paths).await;
                 });
             }
-            UiToWorkerCommand::RepointArtistFolder { band_id, new_path } => {
+            UiToWorkerCommand::RepointArtistFolder {
+                folder_id,
+                new_path,
+            } => {
                 let svc = self.library_service.clone();
                 let tok = self.library_cancel.child_token();
                 tokio::spawn(async move {
-                    svc.repoint_artist_folder(band_id, new_path, tok).await;
+                    svc.repoint_artist_folder(folder_id, new_path, tok).await;
                 });
             }
             UiToWorkerCommand::CancelLibrary => {

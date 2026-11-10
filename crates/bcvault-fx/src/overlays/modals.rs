@@ -438,34 +438,36 @@ pub fn show_modals(
                         ui.add_space(4.0);
                         ui.label(RichText::new("Linked Folders:").monospace().color(th.text_dim));
                         let mut to_unlink = None;
-                        for (band_id, folder) in &state.folders {
-                            let artist_name = state
-                                .artists
-                                .iter()
-                                .find(|a| a.band_id == *band_id)
-                                .map(|a| a.display_name().to_string())
-                                .unwrap_or_else(|| format!("Artist {band_id}"));
-                            ui.horizontal(|ui| {
-                                let dot_color = match folder.state {
-                                    FolderState::Ok => th.accent,
-                                    FolderState::Missing => th.err,
-                                    FolderState::Unreadable => th.warn,
-                                };
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
-                                paint::rect_filled(ui.painter(), r, dot_color);
-                                ui.label(RichText::new(&artist_name).strong());
-                                ui.label(
-                                    RichText::new(folder.path.display().to_string())
-                                        .color(th.text_dim)
-                                        .monospace(),
-                                );
-                                if paint::sharp_button(ui, "Unlink").clicked() {
-                                    to_unlink = Some(*band_id);
-                                }
-                            });
+                        for (band_id, folders) in &state.folders {
+                            for folder in folders {
+                                let artist_name = state
+                                    .artists
+                                    .iter()
+                                    .find(|a| a.band_id == *band_id)
+                                    .map(|a| a.display_name().to_string())
+                                    .unwrap_or_else(|| format!("Artist {band_id}"));
+                                ui.horizontal(|ui| {
+                                    let dot_color = match folder.state {
+                                        FolderState::Ok => th.accent,
+                                        FolderState::Missing => th.err,
+                                        FolderState::Unreadable => th.warn,
+                                    };
+                                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                                    paint::rect_filled(ui.painter(), r, dot_color);
+                                    ui.label(RichText::new(&artist_name).strong());
+                                    ui.label(
+                                        RichText::new(folder.path.display().to_string())
+                                            .color(th.text_dim)
+                                            .monospace(),
+                                    );
+                                    if paint::sharp_button(ui, "Unlink").clicked() {
+                                        to_unlink = Some(folder.id);
+                                    }
+                                });
+                            }
                         }
-                        if let Some(bid) = to_unlink {
-                            let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder { band_id: bid });
+                        if let Some(fid) = to_unlink {
+                            let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder { folder_id: fid });
                         }
                     }
                 }
@@ -1002,6 +1004,7 @@ fn show_reconcile_report_modal(
             let folder_path = state
                 .folders
                 .get(&modal.report.band_id)
+                .and_then(|v| v.first())
                 .map(|f| f.path.display().to_string())
                 .unwrap_or_else(|| "Unknown folder".to_string());
             ui.label(
@@ -1824,7 +1827,17 @@ fn show_resolve_missing_modal(
         .ok()
         .and_then(|mut lock| lock.take())
     {
-        let _ = core_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        if let Some(folder_id) = state
+            .folders
+            .get(&band_id)
+            .and_then(|v| v.first())
+            .map(|f| f.id)
+        {
+            let _ = core_tx.send(UiToWorkerCommand::RepointArtistFolder {
+                folder_id,
+                new_path,
+            });
+        }
         state.show_resolve_missing_window = false;
         state.resolve_missing_modal = None;
         return;
@@ -2235,13 +2248,10 @@ fn show_unavailable_modal(
         .ok()
         .and_then(|mut lock| lock.take())
     {
-        let band_id = state
-            .folders
-            .values()
-            .find(|f| f.id == folder_id)
-            .map(|f| f.band_id)
-            .unwrap_or(folder_id);
-        let _ = core_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        let _ = core_tx.send(UiToWorkerCommand::RepointArtistFolder {
+            folder_id,
+            new_path,
+        });
         modal.cards.retain(|c| match c.folder.root {
             UnavailableRoot::Linked { folder_id: fid } => fid != folder_id,
             UnavailableRoot::OutDir => true,
@@ -2303,7 +2313,7 @@ fn show_unavailable_modal(
                     for (idx, card) in modal.cards.iter_mut().enumerate() {
                         let title = match card.folder.root {
                             UnavailableRoot::Linked { folder_id } => {
-                                let folder = state.folders.values().find(|f| f.id == folder_id);
+                                let folder = state.folders.values().flatten().find(|f| f.id == folder_id);
                                 let artist_name = folder
                                     .and_then(|f| state.artists.iter().find(|a| a.band_id == f.band_id))
                                     .map(|a| a.display_name())

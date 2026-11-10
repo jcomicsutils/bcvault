@@ -243,7 +243,9 @@ pub fn show(
                             });
                             ui.close();
                         }
-                        if let Some(folder) = state.folders.get(&artist.band_id) {
+                        if let Some(folder) =
+                            state.folders.get(&artist.band_id).and_then(|v| v.first())
+                        {
                             if folder.state != FolderState::Ok
                                 && paint::sharp_button(ui, "Resolve unavailable folder...")
                                     .clicked()
@@ -275,7 +277,7 @@ pub fn show(
                             }
                             if paint::sharp_button(ui, "Unlink Folder").clicked() {
                                 let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
-                                    band_id: artist.band_id,
+                                    folder_id: folder.id,
                                 });
                                 ui.close();
                             }
@@ -362,7 +364,7 @@ fn draw_artist_row(
     let desired = Vec2::new(ui.available_width(), 26.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
     let linked_folder = if band_id > 0 {
-        state.folders.get(&band_id).cloned()
+        state.folders.get(&band_id).and_then(|v| v.first()).cloned()
     } else {
         None
     };

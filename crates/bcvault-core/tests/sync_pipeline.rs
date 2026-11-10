@@ -584,7 +584,7 @@ async fn wiremock_sync_rescan_auto_adopts_certain_match_and_updates_stats() {
                     cover_url: None,
                 },
             )?;
-            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            lib_repo::add_folder(c, 777, &a_dir, &o_dir)?;
             Ok::<_, bcvault_core::error::DbError>(())
         })
         .await
@@ -692,7 +692,7 @@ async fn wiremock_sync_verify_deleting_album_triggers_missing_found_in_ask_mode(
                     cover_url: None,
                 },
             )?;
-            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            lib_repo::add_folder(c, 777, &a_dir, &o_dir)?;
             Ok::<_, bcvault_core::error::DbError>(())
         })
         .await
@@ -791,7 +791,7 @@ async fn wiremock_sync_verify_deleting_album_auto_resolves_in_auto_mode() {
                     cover_url: None,
                 },
             )?;
-            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            lib_repo::add_folder(c, 777, &a_dir, &o_dir)?;
             Ok::<_, bcvault_core::error::DbError>(())
         })
         .await
@@ -908,7 +908,7 @@ async fn wiremock_sync_verify_moving_album_auto_relinks_silently() {
                     cover_url: None,
                 },
             )?;
-            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            lib_repo::add_folder(c, 777, &a_dir, &o_dir)?;
             Ok::<_, bcvault_core::error::DbError>(())
         })
         .await
@@ -1003,7 +1003,7 @@ async fn wiremock_sync_verify_disabled_by_setting_skips_verification() {
                     cover_url: None,
                 },
             )?;
-            lib_repo::link_folder(c, 777, &a_dir, &o_dir)?;
+            lib_repo::add_folder(c, 777, &a_dir, &o_dir)?;
             Ok::<_, bcvault_core::error::DbError>(())
         })
         .await

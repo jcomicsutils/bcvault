@@ -322,7 +322,7 @@ pub struct FxState {
     pub show_resolve_missing_window: bool,
     pub unavailable_modal: Option<FxUnavailableModalState>,
     pub show_unavailable_window: bool,
-    pub folders: HashMap<i64, ArtistFolder>,
+    pub folders: HashMap<i64, Vec<ArtistFolder>>,
     pub relink_picked_folder:
         std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
 
@@ -457,8 +457,8 @@ impl FxState {
     pub fn unavailable_folder_artists(&self) -> Vec<i64> {
         self.folders
             .iter()
-            .filter_map(|(&band_id, f)| {
-                if f.state != FolderState::Ok {
+            .filter_map(|(&band_id, folders)| {
+                if folders.iter().any(|f| f.state != FolderState::Ok) {
                     Some(band_id)
                 } else {
                     None
@@ -655,7 +655,10 @@ impl FxState {
             } => {
                 self.artists = artists;
                 self.settings = settings;
-                self.folders = folders.into_iter().map(|f| (f.band_id, f)).collect();
+                self.folders.clear();
+                for f in folders {
+                    self.folders.entry(f.band_id).or_default().push(f);
+                }
                 self.booted = true;
                 self.issue_wall_and_facets_query(fx_tx);
             }
@@ -716,11 +719,11 @@ impl FxState {
             WorkerToUiEvent::ReconcileReport { report } => {
                 self.reconcile_report_modal = Some(FxReconcileReportModalState::new(report));
             }
-            WorkerToUiEvent::FolderStatus { band_id, folder } => {
-                if let Some(f) = folder {
-                    self.folders.insert(band_id, f);
-                } else {
+            WorkerToUiEvent::FolderStatus { band_id, folders } => {
+                if folders.is_empty() {
                     self.folders.remove(&band_id);
+                } else {
+                    self.folders.insert(band_id, folders);
                 }
             }
             WorkerToUiEvent::LibraryApplied { batch_id, summary } => {
@@ -1578,21 +1581,25 @@ mod tests {
         state.apply_core_event(
             WorkerToUiEvent::FolderStatus {
                 band_id: 10,
-                folder: Some(f1_missing),
+                folders: vec![f1_missing],
             },
             &fx_tx,
             0.0,
         );
         assert_eq!(
-            state.folders.get(&10).map(|f| f.state),
+            state
+                .folders
+                .get(&10)
+                .and_then(|v| v.first())
+                .map(|f| f.state),
             Some(bcvault_core::types::FolderState::Missing)
         );
 
-        // 3. FolderStatus with None removes folder
+        // 3. FolderStatus with empty folders removes folder
         state.apply_core_event(
             WorkerToUiEvent::FolderStatus {
                 band_id: 10,
-                folder: None,
+                folders: vec![],
             },
             &fx_tx,
             0.0,
@@ -1747,22 +1754,81 @@ mod tests {
         assert_eq!(st.unavailable_folder_artists().len(), 0);
         st.folders.insert(
             42,
-            bcvault_core::types::ArtistFolder {
+            vec![bcvault_core::types::ArtistFolder {
                 id: 1,
                 band_id: 42,
                 path: PathBuf::from("/music/aphex"),
                 state: FolderState::Missing,
-            },
+            }],
         );
         st.folders.insert(
             43,
-            bcvault_core::types::ArtistFolder {
+            vec![bcvault_core::types::ArtistFolder {
                 id: 2,
                 band_id: 43,
                 path: PathBuf::from("/music/boc"),
                 state: FolderState::Ok,
-            },
+            }],
         );
         assert_eq!(st.unavailable_folder_artists(), vec![42]);
+    }
+
+    #[test]
+    fn test_22_fx_state_multi_folder_lifecycle() {
+        let mut st = FxState::default();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+        let f1_a1 = ArtistFolder {
+            id: 1,
+            band_id: 10,
+            path: std::path::PathBuf::from("/music/artist10_a"),
+            state: FolderState::Ok,
+        };
+        let f2_a1 = ArtistFolder {
+            id: 2,
+            band_id: 10,
+            path: std::path::PathBuf::from("/music/artist10_b"),
+            state: FolderState::Missing,
+        };
+        let f3_a2 = ArtistFolder {
+            id: 3,
+            band_id: 20,
+            path: std::path::PathBuf::from("/music/artist20"),
+            state: FolderState::Ok,
+        };
+
+        st.apply_core_event(
+            WorkerToUiEvent::Ready {
+                artists: vec![],
+                settings: Settings::default(),
+                folders: vec![f1_a1.clone(), f2_a1.clone(), f3_a2.clone()],
+            },
+            &fx_tx,
+            0.0,
+        );
+
+        assert_eq!(st.folders.get(&10).map(|v| v.len()), Some(2));
+        assert_eq!(st.folders.get(&20).map(|v| v.len()), Some(1));
+
+        st.apply_core_event(
+            WorkerToUiEvent::FolderStatus {
+                band_id: 10,
+                folders: vec![f1_a1],
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert_eq!(st.folders.get(&10).map(|v| v.len()), Some(1));
+        assert_eq!(st.folders.get(&20).map(|v| v.len()), Some(1));
+
+        st.apply_core_event(
+            WorkerToUiEvent::FolderStatus {
+                band_id: 10,
+                folders: vec![],
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert!(!st.folders.contains_key(&10));
+        assert_eq!(st.folders.get(&20).map(|v| v.len()), Some(1));
     }
 }

@@ -486,7 +486,8 @@ pub fn show(
                     row.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
                 let is_folder_missing = !is_archived
                     && (row.rel.local_status == Some(bcvault_core::types::LocalStatus::Missing)
-                        || if let Some(folder) = state.folders.get(&row.rel.band_id)
+                        || if let Some(folder) =
+                            state.folders.get(&row.rel.band_id).and_then(|v| v.first())
                             && folder.state != bcvault_core::types::FolderState::Ok
                         {
                             match &row.rel.local_path {
@@ -915,12 +916,12 @@ mod tests {
 
         state.folders.insert(
             band_id,
-            ArtistFolder {
+            vec![ArtistFolder {
                 id: 1,
                 band_id,
                 path: PathBuf::from("/music/Artist"),
                 state: FolderState::Missing,
-            },
+            }],
         );
 
         let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();

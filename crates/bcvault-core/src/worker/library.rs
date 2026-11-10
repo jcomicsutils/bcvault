@@ -98,7 +98,7 @@ impl LibraryService {
         let link_path = path.clone();
         let link_res = pool
             .writer
-            .call(move |c| Ok(lib_repo::link_folder(c, band_id, &link_path, &st.out_dir)?))
+            .call(move |c| Ok(lib_repo::add_folder(c, band_id, &link_path, &st.out_dir)?))
             .await;
 
         let linked_af = match link_res {
@@ -106,7 +106,7 @@ impl LibraryService {
                 bridge.log(
                     LogLevel::Info,
                     "library",
-                    format!("Linked folder '{}' to artist {band_id}", path.display()),
+                    format!("Added folder '{}' to artist {band_id}", path.display()),
                     None,
                 );
                 af
@@ -122,16 +122,21 @@ impl LibraryService {
             }
         };
 
-        let state = probe_folder(&path);
-        let af = ArtistFolder {
-            id: linked_af.id,
-            band_id,
-            path: path.clone(),
-            state,
-        };
+        let all_folders = pool
+            .reader
+            .call(move |c| lib_repo::get_folders(c, band_id))
+            .await
+            .unwrap_or_else(|_| vec![linked_af]);
+        let mut probed = Vec::new();
+        for mut f in all_folders {
+            f.state = probe_folder(&f.path);
+            probed.push(f);
+        }
+        let any_ok = probed.iter().any(|f| f.state == FolderState::Ok);
+
         bridge.emit(WorkerToUiEvent::FolderStatus {
             band_id,
-            folder: Some(af),
+            folders: probed,
         });
 
         if let Ok(Some(av)) = pool
@@ -142,7 +147,7 @@ impl LibraryService {
             bridge.emit(WorkerToUiEvent::ArtistUpserted(av));
         }
 
-        if state != FolderState::Ok {
+        if !any_ok {
             return;
         }
 
@@ -178,27 +183,43 @@ impl LibraryService {
     }
 
     /// Removes an existing artist folder link.
-    pub async fn unlink_artist_folder(&self, band_id: i64) {
+    pub async fn unlink_artist_folder(&self, folder_id: i64) {
         let _guard = self.job_lock.lock().await;
-        self.pending_first_matches.lock().await.remove(&band_id);
         let pool = self.pool.clone();
         let bridge = self.bridge.clone();
 
         let unlink_res = pool
             .writer
-            .call(move |c| lib_repo::unlink_folder(c, band_id))
+            .call(move |c| {
+                let bid = lib_repo::get_folder_by_id(c, folder_id)?.map(|f| f.band_id);
+                let unlinked = lib_repo::unlink_folder(c, folder_id)?;
+                let remaining = if let Some(b) = bid {
+                    lib_repo::get_folders(c, b)?
+                } else {
+                    Vec::new()
+                };
+                Ok::<_, DbError>((bid, unlinked, remaining))
+            })
             .await;
         match unlink_res {
-            Ok(true) => {
+            Ok((Some(band_id), true, remaining)) => {
                 bridge.log(
                     LogLevel::Info,
                     "library",
-                    format!("Unlinked folder for artist {band_id}"),
+                    format!("Unlinked folder {folder_id} for artist {band_id}"),
                     None,
                 );
+                if remaining.is_empty() {
+                    self.pending_first_matches.lock().await.remove(&band_id);
+                }
+                let mut probed = Vec::new();
+                for mut f in remaining {
+                    f.state = probe_folder(&f.path);
+                    probed.push(f);
+                }
                 bridge.emit(WorkerToUiEvent::FolderStatus {
                     band_id,
-                    folder: None,
+                    folders: probed,
                 });
                 if let Ok(Some(av)) = pool
                     .reader
@@ -215,11 +236,11 @@ impl LibraryService {
                     bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
                 }
             }
-            Ok(false) => {
+            Ok((_, false, _)) | Ok((None, _, _)) => {
                 bridge.log(
                     LogLevel::Warn,
                     "library",
-                    format!("No linked folder found for artist {band_id}"),
+                    format!("No linked folder found with id {folder_id}"),
                     None,
                 );
             }
@@ -227,7 +248,7 @@ impl LibraryService {
                 bridge.log(
                     LogLevel::Error,
                     "library",
-                    format!("Failed to unlink folder for artist {band_id}: {e}"),
+                    format!("Failed to unlink folder {folder_id}: {e}"),
                     None,
                 );
             }
@@ -441,9 +462,14 @@ impl LibraryService {
                                 if remaining.is_empty() {
                                     self.pending_first_matches.lock().await.remove(&band_id);
                                 }
+                                let mut probed = Vec::new();
+                                for mut f in remaining {
+                                    f.state = probe_folder(&f.path);
+                                    probed.push(f);
+                                }
                                 bridge_clone.emit(WorkerToUiEvent::FolderStatus {
                                     band_id,
-                                    folder: remaining.into_iter().next(),
+                                    folders: probed,
                                 });
                                 if let Ok(Some(av)) = pool
                                     .reader
@@ -477,7 +503,7 @@ impl LibraryService {
     /// Re-points an artist's linked folder to a new path and rescans/relinks missing releases.
     pub async fn repoint_artist_folder(
         &self,
-        band_id: i64,
+        folder_id: i64,
         new_path: PathBuf,
         cancel: CancellationToken,
     ) {
@@ -502,41 +528,50 @@ impl LibraryService {
         };
 
         let link_path = new_path.clone();
-        let link_res = pool
+        let repoint_res = pool
             .writer
-            .call(move |c| Ok(lib_repo::link_folder(c, band_id, &link_path, &st.out_dir)?))
+            .call(move |c| {
+                let bid = lib_repo::get_folder_by_id(c, folder_id)?.map(|f| f.band_id);
+                let af = lib_repo::replace_folder(c, folder_id, &link_path, &st.out_dir)?;
+                let all_folders = if let Some(b) = bid {
+                    lib_repo::get_folders(c, b)?
+                } else {
+                    vec![af.clone()]
+                };
+                Ok::<_, DbError>((bid, af, all_folders))
+            })
             .await;
 
-        match link_res {
-            Ok(af) => {
+        let band_id = match repoint_res {
+            Ok((Some(band_id), af, all_folders)) => {
                 bridge.log(
                     LogLevel::Info,
                     "library",
-                    format!("Repointed artist {band_id} to '{}'", af.path.display()),
+                    format!("Repointed folder {folder_id} to '{}'", af.path.display()),
                     None,
                 );
-                let state = probe_folder(&af.path);
-                let updated_af = ArtistFolder {
-                    id: af.id,
-                    band_id,
-                    path: af.path.clone(),
-                    state,
-                };
+                let mut probed = Vec::new();
+                for mut f in all_folders {
+                    f.state = probe_folder(&f.path);
+                    probed.push(f);
+                }
                 bridge.emit(WorkerToUiEvent::FolderStatus {
                     band_id,
-                    folder: Some(updated_af),
+                    folders: probed,
                 });
+                band_id
             }
+            Ok((None, _, _)) => return,
             Err(e) => {
                 bridge.log(
                     LogLevel::Error,
                     "library",
-                    format!("Failed to repoint artist {band_id}: {e}"),
+                    format!("Failed to repoint folder {folder_id}: {e}"),
                     None,
                 );
                 return;
             }
-        }
+        };
 
         if let Ok(Some(av)) = pool
             .reader
@@ -810,12 +845,10 @@ impl LibraryService {
                 probed_folders.push(folder);
             }
 
-            if let Some(first) = probed_folders.first() {
-                bridge.emit(WorkerToUiEvent::FolderStatus {
-                    band_id,
-                    folder: Some(first.clone()),
-                });
-            }
+            bridge.emit(WorkerToUiEvent::FolderStatus {
+                band_id,
+                folders: probed_folders.clone(),
+            });
             linked_folders.insert(band_id, probed_folders);
         }
 
@@ -1433,10 +1466,13 @@ impl LibraryService {
 
         let mut ok_folders = Vec::new();
         let mut unavailable_folder_ids = Vec::new();
+        let mut probed_folders = Vec::new();
         for f in &folders {
             let state = probe_folder(&f.path);
+            let mut updated = f.clone();
+            updated.state = state;
             if state == FolderState::Ok {
-                ok_folders.push(f.clone());
+                ok_folders.push(updated.clone());
             } else {
                 unavailable_folder_ids.push(f.id);
                 bridge.log(
@@ -1446,20 +1482,13 @@ impl LibraryService {
                     None,
                 );
             }
+            probed_folders.push(updated);
         }
 
-        if let Some(first) = folders.first() {
-            let first_state = probe_folder(&first.path);
-            bridge.emit(WorkerToUiEvent::FolderStatus {
-                band_id,
-                folder: Some(ArtistFolder {
-                    id: first.id,
-                    band_id,
-                    path: first.path.clone(),
-                    state: first_state,
-                }),
-            });
-        }
+        bridge.emit(WorkerToUiEvent::FolderStatus {
+            band_id,
+            folders: probed_folders,
+        });
 
         if ok_folders.is_empty() {
             return RescanOutcome::default();
@@ -1707,10 +1736,13 @@ impl LibraryService {
 
         let mut ok_folders = Vec::new();
         let mut unavailable_folder_ids = Vec::new();
+        let mut probed_folders = Vec::new();
         for f in &folders {
             let state = probe_folder(&f.path);
+            let mut updated = f.clone();
+            updated.state = state;
             if state == FolderState::Ok {
-                ok_folders.push(f.clone());
+                ok_folders.push(updated.clone());
             } else {
                 unavailable_folder_ids.push(f.id);
                 bridge.log(
@@ -1720,20 +1752,13 @@ impl LibraryService {
                     None,
                 );
             }
+            probed_folders.push(updated);
         }
 
-        if let Some(first) = folders.first() {
-            let first_state = probe_folder(&first.path);
-            bridge.emit(WorkerToUiEvent::FolderStatus {
-                band_id,
-                folder: Some(ArtistFolder {
-                    id: first.id,
-                    band_id,
-                    path: first.path.clone(),
-                    state: first_state,
-                }),
-            });
-        }
+        bridge.emit(WorkerToUiEvent::FolderStatus {
+            band_id,
+            folders: probed_folders,
+        });
 
         if ok_folders.is_empty() {
             return 0;
@@ -2213,8 +2238,8 @@ mod tests {
                 e,
                 WorkerToUiEvent::FolderStatus {
                     band_id: b,
-                    folder: Some(f),
-                } if *b == band_id && f.state == FolderState::Ok
+                    folders,
+                } if *b == band_id && folders.iter().any(|f| f.state == FolderState::Ok)
             )
         });
         assert!(has_folder_ok);
@@ -2229,16 +2254,20 @@ mod tests {
         assert_eq!(report.matched[0].release_key.id, 1);
 
         // Verify folder is linked in DB
-        let folder_in_db = pool
+        let folders_in_db = pool
             .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
+            .call(move |c| lib_repo::get_folders(c, band_id))
             .await
-            .unwrap()
-            .expect("folder should be linked");
-        assert_eq!(folder_in_db.path, dunce::canonicalize(&artist_dir).unwrap());
+            .unwrap();
+        assert_eq!(folders_in_db.len(), 1);
+        let folder_id = folders_in_db[0].id;
+        assert_eq!(
+            folders_in_db[0].path,
+            dunce::canonicalize(&artist_dir).unwrap()
+        );
 
         // 2. Unlink artist folder
-        svc.unlink_artist_folder(band_id).await;
+        svc.unlink_artist_folder(folder_id).await;
 
         let mut unlink_events = Vec::new();
         while let Ok(ev) = rx.try_recv() {
@@ -2250,18 +2279,18 @@ mod tests {
                 e,
                 WorkerToUiEvent::FolderStatus {
                     band_id: b,
-                    folder: None,
-                } if *b == band_id
+                    folders,
+                } if *b == band_id && folders.is_empty()
             )
         });
         assert!(has_folder_unlinked);
 
         let folder_after_unlink = pool
             .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
+            .call(move |c| lib_repo::get_folders(c, band_id))
             .await
             .unwrap();
-        assert!(folder_after_unlink.is_none());
+        assert!(folder_after_unlink.is_empty());
     }
 
     #[tokio::test]
@@ -2382,7 +2411,13 @@ mod tests {
         assert_eq!(stats_after_ignore.format_sidebar_badge(), "1 (+1)/1/1");
 
         // 3. Unlink folder: local_only_count disappears and stats revert to 0 non-eligible
-        svc.unlink_artist_folder(band_id).await;
+        let folders = pool
+            .reader
+            .call(move |c| lib_repo::get_folders(c, band_id))
+            .await
+            .unwrap();
+        let folder_id = folders[0].id;
+        svc.unlink_artist_folder(folder_id).await;
 
         let stats_after_unlink = pool
             .reader
@@ -2582,7 +2617,7 @@ mod tests {
                     },
                 )?;
                 let out_dir = dir.path().join("Downloads");
-                lib_repo::link_folder(c, band_id, &artist_dir, &out_dir)?;
+                lib_repo::add_folder(c, band_id, &artist_dir, &out_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -2863,12 +2898,12 @@ mod tests {
             .await;
 
         // Verify folder is linked in DB
-        let folder_opt = pool
+        let folders = pool
             .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
+            .call(move |c| lib_repo::get_folders(c, band_id))
             .await
             .unwrap();
-        assert!(folder_opt.is_some());
+        assert!(!folders.is_empty());
 
         // Check emitted events: should have FolderStatus Ok, but NO ReconcileReport
         let mut events = Vec::new();
@@ -2880,8 +2915,8 @@ mod tests {
                 e,
                 WorkerToUiEvent::FolderStatus {
                     band_id: b,
-                    folder: Some(f),
-                } if *b == band_id && f.state == FolderState::Ok
+                    folders,
+                } if *b == band_id && folders.iter().any(|f| f.state == FolderState::Ok)
             )
         });
         assert!(has_folder_ok);
@@ -3017,7 +3052,7 @@ mod tests {
                     b_id,
                 )?;
 
-                lib_repo::link_folder(c, band_id, &artist_dir, &out_dir)?;
+                lib_repo::add_folder(c, band_id, &artist_dir, &out_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -3213,7 +3248,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &out_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &out_dir)?;
 
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
@@ -3338,7 +3373,7 @@ mod tests {
                     b_id,
                 )?;
 
-                lib_repo::link_folder(c, band_id, &a_dir, &out_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &out_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -3440,7 +3475,7 @@ mod tests {
                     b_id,
                 )?;
 
-                lib_repo::link_folder(c, band_id, &a_dir, &out_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &out_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -3964,13 +3999,17 @@ mod tests {
         fs::create_dir_all(&out_dir).unwrap();
 
         let dummy_old_path = old_artist_dir.join("Album");
+        let a_old = old_artist_dir.clone();
         let a_new = new_artist_dir.clone();
         let custom_out_dir = out_dir.clone();
 
-        pool.writer
+        fs::create_dir_all(&old_artist_dir).unwrap();
+
+        let folder = pool
+            .writer
             .call(move |c| {
                 let s = Settings {
-                    out_dir: custom_out_dir,
+                    out_dir: custom_out_dir.clone(),
                     ..Settings::default()
                 };
                 settings::set_settings(c, &s)?;
@@ -4006,22 +4045,26 @@ mod tests {
                     None,
                     b_id,
                 )?;
-                Ok::<_, DbError>(())
+                let f = lib_repo::add_folder(c, band_id, &a_old, &custom_out_dir)?;
+                Ok::<_, DbError>(f)
             })
             .await
             .unwrap();
 
         let cancel = CancellationToken::new();
-        svc.repoint_artist_folder(band_id, a_new, cancel).await;
+        svc.repoint_artist_folder(folder.id, a_new, cancel).await;
 
         // Folder link should be updated to new_artist_dir
-        let folder = pool
+        let folders = pool
             .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
+            .call(move |c| lib_repo::get_folders(c, band_id))
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(folder.path, dunce::canonicalize(&new_artist_dir).unwrap());
+        assert_eq!(folders.len(), 1);
+        assert_eq!(
+            folders[0].path,
+            dunce::canonicalize(&new_artist_dir).unwrap()
+        );
 
         // Album should be relinked to album_in_new
         let row = pool
@@ -4096,7 +4139,7 @@ mod tests {
                 };
                 releases::upsert_discovered(c, &disc)?;
 
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -4208,7 +4251,7 @@ mod tests {
                 };
                 releases::upsert_discovered(c, &disc)?;
 
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -4317,7 +4360,7 @@ mod tests {
                 };
                 releases::upsert_discovered(c, &disc)?;
 
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 Ok::<_, DbError>(())
             })
             .await
@@ -4417,7 +4460,7 @@ mod tests {
                         art_id: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
 
                 // Mark release downloaded at alb_dir
                 let batch_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
@@ -4502,7 +4545,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
 
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
                 for i in 1..=3 {
@@ -4632,7 +4675,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
 
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
                 let key = ItemKey::new(ItemType::Album, 5021);
@@ -4737,7 +4780,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
 
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
                 let disc = DiscoveredRelease {
@@ -4947,7 +4990,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
 
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
@@ -5074,7 +5117,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
                 let disc1 = DiscoveredRelease {
@@ -5183,7 +5226,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
                 let disc = DiscoveredRelease {
@@ -5264,16 +5307,17 @@ mod tests {
         while let Ok(ev) = rx.try_recv() {
             if let WorkerToUiEvent::FolderStatus {
                 band_id: b,
-                folder: None,
+                folders,
             } = ev
                 && b == band_id
+                && folders.is_empty()
             {
                 unlinked_ev = true;
             }
         }
         assert!(
             unlinked_ev,
-            "FolderStatus None must be emitted after unlinking"
+            "FolderStatus empty must be emitted after unlinking"
         );
     }
 
@@ -5401,7 +5445,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
                 // 25 releases under linked folder (will become Unknown when artist_dir is deleted)
@@ -5518,7 +5562,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
                 for &(k, name) in &[(key1, "Album 1"), (key2, "Album 2")] {
@@ -5595,12 +5639,12 @@ mod tests {
         assert_eq!(rel1.local_status, Some(LocalStatus::Archived));
 
         // Folder link should still exist
-        let folder = pool
+        let folders = pool
             .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
+            .call(move |c| lib_repo::get_folders(c, band_id))
             .await
             .unwrap();
-        assert!(folder.is_some());
+        assert!(!folders.is_empty());
 
         // 2. Resolve key2 with Deleted { MarkNotDownloaded, unlink: true }
         svc.resolve_unavailable(
@@ -5627,12 +5671,12 @@ mod tests {
         assert_eq!(rel2.local_path, None);
 
         // Folder link should now be unlinked
-        let folder_after = pool
+        let folders_after = pool
             .reader
-            .call(move |c| lib_repo::get_folder(c, band_id))
+            .call(move |c| lib_repo::get_folders(c, band_id))
             .await
             .unwrap();
-        assert!(folder_after.is_none());
+        assert!(folders_after.is_empty());
 
         // 3. Undo the batch restores the releases!
         svc.undo_batch(batch_id).await;
@@ -5800,7 +5844,7 @@ mod tests {
                         cover_url: None,
                     },
                 )?;
-                lib_repo::link_folder(c, band_id, &a_dir, &o_dir)?;
+                lib_repo::add_folder(c, band_id, &a_dir, &o_dir)?;
                 let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
 
                 let disc = DiscoveredRelease {
@@ -6120,6 +6164,11 @@ mod tests {
         assert!(rel.downloaded);
         assert_eq!(rel.local_status, Some(LocalStatus::Present));
         assert_eq!(rel.local_path, Some(alb_in_b));
+
+        pool.reader
+            .call(|c| lib_repo::assert_library_invariants(c))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -6287,5 +6336,591 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(rel2.local_status, Some(LocalStatus::Archived));
+    }
+
+    #[tokio::test]
+    async fn test_18_worker_link_artist_folder_twice_for_one_artist() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_18.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 1800;
+        let folder_a = dir.path().join("FolderA");
+        let folder_b = dir.path().join("FolderB");
+        let out_dir = dir.path().join("Downloads");
+        fs::create_dir_all(&folder_a).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let alb1_dir = folder_a.join("Album One");
+        fs::create_dir_all(&alb1_dir).unwrap();
+        fs::write(alb1_dir.join("01.mp3"), b"audio").unwrap();
+
+        let alb2_dir = folder_b.join("Album Two");
+        fs::create_dir_all(&alb2_dir).unwrap();
+        fs::write(alb2_dir.join("01.mp3"), b"audio").unwrap();
+
+        let key1 = ItemKey::new(ItemType::Album, 1801);
+        let key2 = ItemKey::new(ItemType::Album, 1802);
+        let o_dir = out_dir.clone();
+
+        pool.writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir,
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-1800",
+                        name: "Artist 1800",
+                        url: "https://artist1800.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key: key1,
+                        band_id,
+                        title: "Album One",
+                        artist_name: "Artist 1800",
+                        url: "https://artist1800.bandcamp.com/album/album-one",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key: key2,
+                        band_id,
+                        title: "Album Two",
+                        artist_name: "Artist 1800",
+                        url: "https://artist1800.bandcamp.com/album/album-two",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+
+        // 1. Link Folder A
+        svc.link_artist_folder(band_id, folder_a.clone(), false, cancel.clone())
+            .await;
+
+        let mut events1 = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events1.push(ev);
+        }
+        let fstatus1 = events1
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    folders,
+                } if *b == band_id => Some(folders.clone()),
+                _ => None,
+            })
+            .expect("FolderStatus for Folder A");
+        assert_eq!(fstatus1.len(), 1);
+        assert_eq!(fstatus1[0].path, dunce::canonicalize(&folder_a).unwrap());
+
+        let report1 = events1
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ReconcileReport { report } => Some(report.clone()),
+                _ => None,
+            })
+            .expect("ReconcileReport for Folder A");
+        assert_eq!(report1.matched.len(), 1);
+        assert_eq!(report1.matched[0].release_key, key1);
+
+        // 2. Link Folder B (second link for the same artist)
+        svc.link_artist_folder(band_id, folder_b.clone(), false, cancel.clone())
+            .await;
+
+        let mut events2 = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events2.push(ev);
+        }
+        let fstatus2 = events2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    folders,
+                } if *b == band_id => Some(folders.clone()),
+                _ => None,
+            })
+            .expect("FolderStatus for Folder B");
+        assert_eq!(fstatus2.len(), 2);
+
+        // First-match flow runs for Folder B, matching Album Two
+        let report2 = events2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ReconcileReport { report } => Some(report.clone()),
+                _ => None,
+            })
+            .expect("ReconcileReport for Folder B");
+        assert!(report2.matched.iter().any(|m| m.release_key == key2));
+
+        pool.reader
+            .call(|c| lib_repo::assert_library_invariants(c))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_19_worker_unlink_artist_folder_by_id() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_19.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 1900;
+        let folder_a = dir.path().join("FolderA");
+        let folder_b = dir.path().join("FolderB");
+        let out_dir = dir.path().join("Downloads");
+        fs::create_dir_all(&folder_a).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+
+        // Local-only orphans in each folder
+        fs::create_dir_all(folder_a.join("Orphan A")).unwrap();
+        fs::write(folder_a.join("Orphan A").join("01.mp3"), b"audio").unwrap();
+        fs::create_dir_all(folder_b.join("Orphan B")).unwrap();
+        fs::write(folder_b.join("Orphan B").join("01.mp3"), b"audio").unwrap();
+
+        let a_path = folder_a.clone();
+        let b_path = folder_b.clone();
+        let o_dir = out_dir.clone();
+
+        let (f_a, f_b) = pool
+            .writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir.clone(),
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-1900",
+                        name: "Artist 1900",
+                        url: "https://artist1900.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let fa = lib_repo::add_folder(c, band_id, &a_path, &o_dir)?;
+                let fb = lib_repo::add_folder(c, band_id, &b_path, &o_dir)?;
+                lib_repo::update_folder_local_only_count(c, fa.id, 1)?;
+                lib_repo::update_folder_local_only_count(c, fb.id, 1)?;
+                Ok::<_, DbError>((fa, fb))
+            })
+            .await
+            .unwrap();
+
+        // Unlink folder A
+        svc.unlink_artist_folder(f_a.id).await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // FolderStatus emitted with remaining folder B
+        let fstatus = events
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    folders,
+                } if *b == band_id => Some(folders.clone()),
+                _ => None,
+            })
+            .expect("FolderStatus emitted");
+        assert_eq!(fstatus.len(), 1);
+        assert_eq!(fstatus[0].id, f_b.id);
+
+        // Stats re-emitted: non_eligible_downloaded now 1 (only folder B's local-only count remains)
+        let stats_ev = events
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::ArtistStats { band_id: b, stats } if *b == band_id => Some(*stats),
+                _ => None,
+            })
+            .expect("ArtistStats emitted");
+        assert_eq!(stats_ev.non_eligible_downloaded, 1);
+
+        // In DB, only folder B remains
+        let folders_in_db = pool
+            .reader
+            .call(move |c| lib_repo::get_folders(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(folders_in_db.len(), 1);
+        assert_eq!(folders_in_db[0].id, f_b.id);
+
+        // Unlink folder B
+        svc.unlink_artist_folder(f_b.id).await;
+
+        let mut events2 = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events2.push(ev);
+        }
+        let fstatus2 = events2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    folders,
+                } if *b == band_id => Some(folders.clone()),
+                _ => None,
+            })
+            .expect("FolderStatus emitted");
+        assert!(fstatus2.is_empty());
+
+        let folders_empty = pool
+            .reader
+            .call(move |c| lib_repo::get_folders(c, band_id))
+            .await
+            .unwrap();
+        assert!(folders_empty.is_empty());
+
+        pool.reader
+            .call(|c| lib_repo::assert_library_invariants(c))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_20_worker_repoint_artist_folder_by_id() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_20.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 2000;
+        let key = ItemKey::new(ItemType::Album, 2001);
+
+        let folder_a_old = dir.path().join("FolderAOld");
+        let folder_a_new = dir.path().join("FolderANew");
+        let folder_b = dir.path().join("FolderB");
+        let out_dir = dir.path().join("Downloads");
+
+        fs::create_dir_all(&folder_a_old).unwrap();
+        fs::create_dir_all(&folder_a_new).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let album_in_new = folder_a_new.join("Album");
+        fs::create_dir_all(&album_in_new).unwrap();
+        fs::write(album_in_new.join("01.mp3"), b"audio").unwrap();
+
+        let dummy_old_path = folder_a_old.join("Album");
+        let a_old = folder_a_old.clone();
+        let a_new = folder_a_new.clone();
+        let b_path = folder_b.clone();
+        let o_dir = out_dir.clone();
+
+        let (fa, _fb) = pool
+            .writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir.clone(),
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-2000",
+                        name: "Artist 2000",
+                        url: "https://artist2000.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key,
+                        band_id,
+                        title: "Album",
+                        artist_name: "Artist 2000",
+                        url: "https://artist2000.bandcamp.com/album/album",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &dummy_old_path,
+                    Some(crate::types::AudioFormat::Mp3_320),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                let fa = lib_repo::add_folder(c, band_id, &a_old, &o_dir)?;
+                let fb = lib_repo::add_folder(c, band_id, &b_path, &o_dir)?;
+                Ok::<_, DbError>((fa, fb))
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.repoint_artist_folder(fa.id, a_new.clone(), cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        // FolderStatus carries both folders with updated folder A
+        let fstatus = events
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    folders,
+                } if *b == band_id => Some(folders.clone()),
+                _ => None,
+            })
+            .expect("FolderStatus emitted");
+        assert_eq!(fstatus.len(), 2);
+        let updated_fa = fstatus.iter().find(|f| f.id == fa.id).unwrap();
+        assert_eq!(updated_fa.path, dunce::canonicalize(&folder_a_new).unwrap());
+
+        // Verify ran: release is relinked to album_in_new
+        let row = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.local_status, Some(LocalStatus::Present));
+        assert_eq!(row.local_path, Some(album_in_new));
+
+        pool.reader
+            .call(|c| lib_repo::assert_library_invariants(c))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_21_worker_resolve_unavailable_unlinks_only_target_folder() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_21.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let svc = LibraryService::new(pool.clone(), bridge);
+
+        let band_id = 2100;
+        let key1 = ItemKey::new(ItemType::Album, 2101);
+        let key2 = ItemKey::new(ItemType::Album, 2102);
+
+        let folder_a = dir.path().join("FolderA");
+        let folder_b = dir.path().join("FolderB");
+        let out_dir = dir.path().join("Downloads");
+
+        fs::create_dir_all(&folder_a).unwrap();
+        fs::create_dir_all(&folder_b).unwrap();
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let alb1_dir = folder_a.join("Album 1");
+        fs::create_dir_all(&alb1_dir).unwrap();
+        fs::write(alb1_dir.join("01.flac"), b"audio").unwrap();
+
+        let alb2_dir = folder_b.join("Album 2");
+        fs::create_dir_all(&alb2_dir).unwrap();
+        fs::write(alb2_dir.join("01.flac"), b"audio").unwrap();
+
+        let a_path = folder_a.clone();
+        let b_path = folder_b.clone();
+        let o_dir = out_dir.clone();
+        let a1_path = alb1_dir.clone();
+        let a2_path = alb2_dir.clone();
+
+        let (fa, fb) = pool
+            .writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir.clone(),
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-2100",
+                        name: "Artist 2100",
+                        url: "https://artist2100.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key: key1,
+                        band_id,
+                        title: "Album 1",
+                        artist_name: "Artist 2100",
+                        url: "https://artist2100.bandcamp.com/album/album-1",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key: key2,
+                        band_id,
+                        title: "Album 2",
+                        artist_name: "Artist 2100",
+                        url: "https://artist2100.bandcamp.com/album/album-2",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key1,
+                    &a1_path,
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                lib_repo::adopt(
+                    c,
+                    key2,
+                    &a2_path,
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                let fa = lib_repo::add_folder(c, band_id, &a_path, &o_dir)?;
+                let fb = lib_repo::add_folder(c, band_id, &b_path, &o_dir)?;
+                Ok::<_, DbError>((fa, fb))
+            })
+            .await
+            .unwrap();
+
+        // Delete Folder A on disk
+        fs::remove_dir_all(&folder_a).unwrap();
+
+        let cancel = CancellationToken::new();
+        svc.verify_files(SyncScope::All, VerifyTrigger::Manual, cancel)
+            .await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        let unavail = events
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderUnavailable {
+                    batch_id, folders, ..
+                } => Some((*batch_id, folders.clone())),
+                _ => None,
+            })
+            .expect("FolderUnavailable emitted");
+
+        let batch_id = unavail.0;
+        assert_eq!(unavail.1.len(), 1);
+        assert_eq!(
+            unavail.1[0].root,
+            UnavailableRoot::Linked { folder_id: fa.id }
+        );
+
+        // Resolve by unlinking Folder A
+        svc.resolve_unavailable(
+            batch_id,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::Linked { folder_id: fa.id },
+                keys: vec![key1],
+                action: UnavailableAction::Deleted {
+                    policy: DeletedPolicy::KeepMarked,
+                    unlink: true,
+                },
+            }],
+        )
+        .await;
+
+        let mut events2 = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events2.push(ev);
+        }
+
+        // FolderStatus has folder B
+        let fstatus = events2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::FolderStatus {
+                    band_id: b,
+                    folders,
+                } if *b == band_id => Some(folders.clone()),
+                _ => None,
+            })
+            .expect("FolderStatus emitted");
+        assert_eq!(fstatus.len(), 1);
+        assert_eq!(fstatus[0].id, fb.id);
+
+        // In DB, only folder B remains
+        let remaining = pool
+            .reader
+            .call(move |c| lib_repo::get_folders(c, band_id))
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, fb.id);
+
+        pool.reader
+            .call(|c| lib_repo::assert_library_invariants(c))
+            .await
+            .unwrap();
     }
 }

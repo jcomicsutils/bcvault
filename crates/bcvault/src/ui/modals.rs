@@ -510,7 +510,7 @@ fn show_settings_modal(
                     if state.folders.is_empty() {
                         ui.label(RichText::new("No artist folders linked.").color(pal::TEXT_DIM));
                     } else {
-                        let mut linked: Vec<_> = state.folders.values().cloned().collect();
+                        let mut linked: Vec<_> = state.folders.values().flatten().cloned().collect();
                         linked.sort_by(|a, b| {
                             let name_a = state
                                 .artists
@@ -557,7 +557,7 @@ fn show_settings_modal(
 
                                     if sharp_small_button(ui, "Unlink").clicked() {
                                         let _ = cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
-                                            band_id: folder.band_id,
+                                            folder_id: folder.id,
                                         });
                                     }
                                     ui.end_row();
@@ -1025,6 +1025,7 @@ fn show_reconcile_report_modal(
             let folder_path = state
                 .folders
                 .get(&modal.report.band_id)
+                .and_then(|v| v.first())
                 .map(|f| f.path.display().to_string())
                 .unwrap_or_else(|| "Unknown folder".to_string());
             ui.label(
@@ -1790,7 +1791,17 @@ fn show_resolve_missing_modal(
         .ok()
         .and_then(|mut lock| lock.take())
     {
-        let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        if let Some(folder_id) = state
+            .folders
+            .get(&band_id)
+            .and_then(|v| v.first())
+            .map(|f| f.id)
+        {
+            let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder {
+                folder_id,
+                new_path,
+            });
+        }
         state.show_resolve_missing_window = false;
         state.resolve_missing_modal = None;
         return;
@@ -2196,14 +2207,10 @@ fn show_unavailable_modal(
         .ok()
         .and_then(|mut lock| lock.take())
     {
-        // In Step 2, find band_id from state.folders if possible, or folder_id
-        let band_id = state
-            .folders
-            .values()
-            .find(|f| f.id == folder_id)
-            .map(|f| f.band_id)
-            .unwrap_or(folder_id);
-        let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder { band_id, new_path });
+        let _ = cmd_tx.send(UiToWorkerCommand::RepointArtistFolder {
+            folder_id,
+            new_path,
+        });
         modal.cards.retain(|c| match c.folder.root {
             UnavailableRoot::Linked { folder_id: fid } => fid != folder_id,
             UnavailableRoot::OutDir => true,
@@ -2260,7 +2267,7 @@ fn show_unavailable_modal(
                     for (idx, card) in modal.cards.iter_mut().enumerate() {
                         let title = match card.folder.root {
                             UnavailableRoot::Linked { folder_id } => {
-                                let folder = state.folders.values().find(|f| f.id == folder_id);
+                                let folder = state.folders.values().flatten().find(|f| f.id == folder_id);
                                 let artist_name = folder
                                     .and_then(|f| state.artists.iter().find(|a| a.band_id == f.band_id))
                                     .map(|a| a.display_name())

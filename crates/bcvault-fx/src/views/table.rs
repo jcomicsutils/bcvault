@@ -160,7 +160,8 @@ pub fn show(
                             == Some(bcvault_core::types::LocalStatus::Missing)
                         {
                             paint_table_badge(ui, "MISSING", th.warn, th.warn);
-                        } else if let Some(folder) = state.folders.get(&w.rel.band_id)
+                        } else if let Some(folder) =
+                            state.folders.get(&w.rel.band_id).and_then(|v| v.first())
                             && folder.state != bcvault_core::types::FolderState::Ok
                         {
                             let is_under_folder = match &w.rel.local_path {

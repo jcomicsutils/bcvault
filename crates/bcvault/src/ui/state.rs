@@ -339,7 +339,7 @@ pub struct UiState {
 
     pub settings: Settings,
     pub settings_draft: Option<Settings>,
-    pub folders: HashMap<i64, ArtistFolder>,
+    pub folders: HashMap<i64, Vec<ArtistFolder>>,
     pub redeem_modal: Option<RedeemModalState>,
     pub quota_modal: Option<QuotaWarningModalState>,
     pub confirm_remove_artist: Option<(i64, String)>,
@@ -436,8 +436,8 @@ impl UiState {
     pub fn unavailable_folder_artists(&self) -> Vec<i64> {
         self.folders
             .iter()
-            .filter_map(|(&band_id, f)| {
-                if f.state != FolderState::Ok {
+            .filter_map(|(&band_id, folders)| {
+                if folders.iter().any(|f| f.state != FolderState::Ok) {
                     Some(band_id)
                 } else {
                     None
@@ -501,7 +501,10 @@ impl UiState {
             } => {
                 self.artists = artists;
                 self.settings = settings;
-                self.folders = folders.into_iter().map(|f| (f.band_id, f)).collect();
+                self.folders.clear();
+                for f in folders {
+                    self.folders.entry(f.band_id).or_default().push(f);
+                }
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::SettingsUpdated(settings) => {
@@ -651,11 +654,11 @@ impl UiState {
             WorkerToUiEvent::ThumbReady { key, path } => {
                 self.thumbs.on_thumb_ready(key, path);
             }
-            WorkerToUiEvent::FolderStatus { band_id, folder } => {
-                if let Some(f) = folder {
-                    self.folders.insert(band_id, f);
-                } else {
+            WorkerToUiEvent::FolderStatus { band_id, folders } => {
+                if folders.is_empty() {
                     self.folders.remove(&band_id);
+                } else {
+                    self.folders.insert(band_id, folders);
                 }
             }
             WorkerToUiEvent::ReconcileReport { report } => {
@@ -825,8 +828,8 @@ mod tests {
             folders: vec![f1.clone(), f2.clone()],
         });
         assert_eq!(st.folders.len(), 2);
-        assert_eq!(st.folders.get(&10).unwrap().state, FolderState::Ok);
-        assert_eq!(st.folders.get(&20).unwrap().state, FolderState::Missing);
+        assert_eq!(st.folders.get(&10).unwrap()[0].state, FolderState::Ok);
+        assert_eq!(st.folders.get(&20).unwrap()[0].state, FolderState::Missing);
 
         // 2. FolderStatus updates an existing folder state
         let f2_updated = ArtistFolder {
@@ -837,14 +840,14 @@ mod tests {
         };
         st.apply_event(WorkerToUiEvent::FolderStatus {
             band_id: 20,
-            folder: Some(f2_updated),
+            folders: vec![f2_updated],
         });
-        assert_eq!(st.folders.get(&20).unwrap().state, FolderState::Ok);
+        assert_eq!(st.folders.get(&20).unwrap()[0].state, FolderState::Ok);
 
-        // 3. FolderStatus with None removes the folder (unlink)
+        // 3. FolderStatus with empty folders removes the folder (unlink)
         st.apply_event(WorkerToUiEvent::FolderStatus {
             band_id: 10,
-            folder: None,
+            folders: vec![],
         });
         assert!(!st.folders.contains_key(&10));
         assert_eq!(st.folders.len(), 1);
@@ -1093,22 +1096,71 @@ mod tests {
         assert_eq!(st.unavailable_folder_artists().len(), 0);
         st.folders.insert(
             42,
-            crate::types::ArtistFolder {
+            vec![crate::types::ArtistFolder {
                 id: 1,
                 band_id: 42,
                 path: PathBuf::from("/music/aphex"),
                 state: FolderState::Missing,
-            },
+            }],
         );
         st.folders.insert(
             43,
-            crate::types::ArtistFolder {
+            vec![crate::types::ArtistFolder {
                 id: 2,
                 band_id: 43,
                 path: PathBuf::from("/music/boc"),
                 state: FolderState::Ok,
-            },
+            }],
         );
         assert_eq!(st.unavailable_folder_artists(), vec![42]);
+    }
+
+    #[test]
+    fn test_22_ui_state_multi_folder_lifecycle() {
+        let mut st = UiState::default();
+        let f1_a1 = ArtistFolder {
+            id: 1,
+            band_id: 10,
+            path: std::path::PathBuf::from("/music/artist10_a"),
+            state: FolderState::Ok,
+        };
+        let f2_a1 = ArtistFolder {
+            id: 2,
+            band_id: 10,
+            path: std::path::PathBuf::from("/music/artist10_b"),
+            state: FolderState::Missing,
+        };
+        let f3_a2 = ArtistFolder {
+            id: 3,
+            band_id: 20,
+            path: std::path::PathBuf::from("/music/artist20"),
+            state: FolderState::Ok,
+        };
+
+        // Ready with 3 folders over 2 artists
+        st.apply_event(WorkerToUiEvent::Ready {
+            artists: vec![],
+            settings: Settings::default(),
+            folders: vec![f1_a1.clone(), f2_a1.clone(), f3_a2.clone()],
+        });
+
+        assert_eq!(st.folders.get(&10).unwrap().len(), 2);
+        assert_eq!(st.folders.get(&20).unwrap().len(), 1);
+
+        // FolderStatus with shorter list for artist 10
+        st.apply_event(WorkerToUiEvent::FolderStatus {
+            band_id: 10,
+            folders: vec![f1_a1],
+        });
+        assert_eq!(st.folders.get(&10).unwrap().len(), 1);
+        assert_eq!(st.folders.get(&20).unwrap().len(), 1);
+
+        // FolderStatus with empty list removes artist 10
+        st.apply_event(WorkerToUiEvent::FolderStatus {
+            band_id: 10,
+            folders: vec![],
+        });
+        assert!(!st.folders.contains_key(&10));
+        assert_eq!(st.folders.get(&20).unwrap().len(), 1);
     }
 }

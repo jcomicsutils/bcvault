@@ -202,66 +202,29 @@ pub fn replace_folder(
     })
 }
 
-pub fn link_folder(
-    conn: &mut Connection,
-    band_id: i64,
-    path: &Path,
-    out_dir: &Path,
-) -> Result<ArtistFolder, LinkFolderError> {
-    let first = get_folders(conn, band_id)?.into_iter().next();
-    if let Some(f) = first {
-        replace_folder(conn, f.id, path, out_dir)
-    } else {
-        add_folder(conn, band_id, path, out_dir)
-    }
-}
-
-pub fn unlink_folder(conn: &Connection, folder_or_band_id: i64) -> Result<bool, DbError> {
-    let folder: Option<(i64, String, i64)> = conn
+pub fn unlink_folder(conn: &Connection, folder_id: i64) -> Result<bool, DbError> {
+    let folder: Option<(String, i64)> = conn
         .query_row(
-            "SELECT id, path_key, band_id FROM artist_folders WHERE id = ?1",
-            params![folder_or_band_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            "SELECT path_key, band_id FROM artist_folders WHERE id = ?1",
+            params![folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
 
-    if let Some((fid, path_key, band_id)) = folder {
+    if let Some((path_key, band_id)) = folder {
         conn.execute(
             "DELETE FROM artist_folder_ignored
              WHERE band_id = ?1 AND (path_key = ?2 OR substr(path_key, 1, length(?2) + 1) = ?2 || '/')",
             params![band_id, path_key],
         )?;
-        let affected = conn.execute("DELETE FROM artist_folders WHERE id = ?1", params![fid])?;
-        return Ok(affected > 0);
-    }
-
-    // Fallback if called by band_id (during transition)
-    let folders: Vec<(i64, String)> = {
-        let mut stmt =
-            conn.prepare("SELECT id, path_key FROM artist_folders WHERE band_id = ?1")?;
-        let rows = stmt.query_map(params![folder_or_band_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        let mut list = Vec::new();
-        for r in rows {
-            list.push(r?);
-        }
-        list
-    };
-    if folders.is_empty() {
-        return Ok(false);
-    }
-    for (fid, path_key) in folders {
-        conn.execute(
-            "DELETE FROM artist_folder_ignored
-             WHERE band_id = ?1 AND (path_key = ?2 OR substr(path_key, 1, length(?2) + 1) = ?2 || '/')",
-            params![folder_or_band_id, path_key],
+        let affected = conn.execute(
+            "DELETE FROM artist_folders WHERE id = ?1",
+            params![folder_id],
         )?;
-        conn.execute("DELETE FROM artist_folders WHERE id = ?1", params![fid])?;
+        Ok(affected > 0)
+    } else {
+        Ok(false)
     }
-    Ok(true)
-}
-
-pub fn get_folder(conn: &Connection, band_id: i64) -> Result<Option<ArtistFolder>, DbError> {
-    Ok(get_folders(conn, band_id)?.into_iter().next())
 }
 
 pub fn get_folders(conn: &Connection, band_id: i64) -> Result<Vec<ArtistFolder>, DbError> {
@@ -1075,46 +1038,46 @@ mod tests {
     }
 
     #[test]
-    fn link_folder_validates_existence_and_directory() {
+    fn add_folder_validates_existence_and_directory() {
         let mut conn = test_db();
         let tmp = tempfile::tempdir().unwrap();
         let out_dir = tmp.path().join("downloads");
         std::fs::create_dir(&out_dir).unwrap();
 
         let bogus = tmp.path().join("nonexistent");
-        let err = link_folder(&mut conn, 1, &bogus, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 1, &bogus, &out_dir).unwrap_err();
         assert!(matches!(err, LinkFolderError::NotFound(_)));
 
         let file = tmp.path().join("file.txt");
         std::fs::write(&file, "hello").unwrap();
-        let err = link_folder(&mut conn, 1, &file, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 1, &file, &out_dir).unwrap_err();
         assert!(matches!(err, LinkFolderError::NotADirectory(_)));
     }
 
     #[test]
-    fn link_folder_rejects_out_dir_overlap() {
+    fn add_folder_rejects_out_dir_overlap() {
         let mut conn = test_db();
         let tmp = tempfile::tempdir().unwrap();
         let out_dir = tmp.path().join("downloads");
         std::fs::create_dir(&out_dir).unwrap();
 
         // Exact equal
-        let err = link_folder(&mut conn, 1, &out_dir, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 1, &out_dir, &out_dir).unwrap_err();
         assert!(matches!(err, LinkFolderError::OverlapsOutDir(_)));
 
         // Folder inside out_dir
         let sub = out_dir.join("artist1");
         std::fs::create_dir(&sub).unwrap();
-        let err = link_folder(&mut conn, 1, &sub, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 1, &sub, &out_dir).unwrap_err();
         assert!(matches!(err, LinkFolderError::OverlapsOutDir(_)));
 
         // Folder containing out_dir
-        let err = link_folder(&mut conn, 1, tmp.path(), &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 1, tmp.path(), &out_dir).unwrap_err();
         assert!(matches!(err, LinkFolderError::OverlapsOutDir(_)));
     }
 
     #[test]
-    fn link_folder_rejects_overlap_with_other_artist_folder() {
+    fn add_folder_rejects_overlap_with_other_artist_folder() {
         let mut conn = test_db();
         let tmp = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(tmp.path()).unwrap();
@@ -1126,18 +1089,18 @@ mod tests {
         std::fs::create_dir_all(&art1_dir).unwrap();
 
         // Link art1
-        let f1 = link_folder(&mut conn, 1, &art1_dir, &out_dir).unwrap();
+        let f1 = add_folder(&mut conn, 1, &art1_dir, &out_dir).unwrap();
         assert_eq!(f1.band_id, 1);
 
         // Try link art2 with exact same folder
-        let err = link_folder(&mut conn, 2, &art1_dir, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 2, &art1_dir, &out_dir).unwrap_err();
         assert!(matches!(
             err,
             LinkFolderError::OverlapsExisting { band_id: 1, .. }
         ));
 
         // Try link art2 with parent folder containing art1_dir
-        let err = link_folder(&mut conn, 2, &music, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 2, &music, &out_dir).unwrap_err();
         assert!(matches!(
             err,
             LinkFolderError::OverlapsExisting { band_id: 1, .. }
@@ -1146,16 +1109,16 @@ mod tests {
         // Try link art2 with subfolder inside art1_dir
         let sub = art1_dir.join("sub");
         std::fs::create_dir(&sub).unwrap();
-        let err = link_folder(&mut conn, 2, &sub, &out_dir).unwrap_err();
+        let err = add_folder(&mut conn, 2, &sub, &out_dir).unwrap_err();
         assert!(matches!(
             err,
             LinkFolderError::OverlapsExisting { band_id: 1, .. }
         ));
 
-        // Re-linking art1 with a new folder is allowed (replaces link)
+        // Replacing art1's folder with a new folder is allowed
         let art1_new = music.join("art1_new");
         std::fs::create_dir(&art1_new).unwrap();
-        let f1_new = link_folder(&mut conn, 1, &art1_new, &out_dir).unwrap();
+        let f1_new = replace_folder(&mut conn, f1.id, &art1_new, &out_dir).unwrap();
         assert_eq!(f1_new.path, dunce::canonicalize(&art1_new).unwrap());
     }
 
@@ -1168,7 +1131,7 @@ mod tests {
 
         let art_dir = tmp.path().join("artist1");
         std::fs::create_dir(&art_dir).unwrap();
-        link_folder(&mut conn, 1, &art_dir, &out_dir).unwrap();
+        let f = add_folder(&mut conn, 1, &art_dir, &out_dir).unwrap();
 
         // Insert release with downloaded marks
         conn.execute(
@@ -1178,8 +1141,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(unlink_folder(&conn, 1).unwrap());
-        assert!(get_folder(&conn, 1).unwrap().is_none());
+        assert!(unlink_folder(&conn, f.id).unwrap());
+        assert!(get_folders(&conn, 1).unwrap().is_empty());
 
         // Marks must stay intact
         let (dl, lp, ls): (i64, String, String) = conn
@@ -1322,7 +1285,7 @@ mod tests {
         std::fs::create_dir(&out_dir).unwrap();
         let art_dir = tmp.path().join("artist1");
         std::fs::create_dir(&art_dir).unwrap();
-        link_folder(&mut conn, 1, &art_dir, &out_dir).unwrap();
+        add_folder(&mut conn, 1, &art_dir, &out_dir).unwrap();
 
         ignore_local(&conn, 1, "orphan_folder").unwrap();
         let ignored = get_ignored_local(&conn, 1).unwrap();

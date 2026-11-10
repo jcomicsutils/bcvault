@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (MULTI_FOLDER step 3; next: address linked folders by id)  ·  Branch: main  ·  Updated: 2026-11-09
+Task: none (MULTI_FOLDER step 4; next: add, unlink and change several folders per artist in classic UI)  ·  Branch: main  ·  Updated: 2026-11-10
 
 ## Done
+- MULTI-FOLDER 3: address linked folders by id (tests 18-23)
 - MULTI-FOLDER 2: scan, match and verify across an artist's folders (tests 10-17)
 - MULTI-FOLDER 1: allow several folders per artist (migration 0006, breaking)
 - B0.1 to B5.x: base engine (phase-sized commits, before the commit convention)

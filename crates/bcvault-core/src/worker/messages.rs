@@ -53,18 +53,20 @@ pub enum UiToWorkerCommand {
     ResumeQueue,
     ClearFinished,
     // library
+    /// Link an artist folder (adds a linked folder to the artist).
     LinkArtistFolder {
         band_id: i64,
         path: PathBuf,
         auto_apply_confident: bool,
     },
+    /// Add an artist and link a folder (adds a linked folder to the artist).
     AddAndLinkArtistFolder {
         input: String,
         path: PathBuf,
         auto_apply_confident: bool,
     },
     UnlinkArtistFolder {
-        band_id: i64,
+        folder_id: i64,
     },
     MatchArtistFolder {
         band_id: i64,
@@ -104,7 +106,7 @@ pub enum UiToWorkerCommand {
         paths: Vec<PathBuf>,
     },
     RepointArtistFolder {
-        band_id: i64,
+        folder_id: i64,
         new_path: PathBuf,
     },
     CancelLibrary,
@@ -186,7 +188,7 @@ pub enum WorkerToUiEvent {
     },
     FolderStatus {
         band_id: i64,
-        folder: Option<crate::types::ArtistFolder>,
+        folders: Vec<crate::types::ArtistFolder>,
     },
     LibraryApplied {
         batch_id: u64,

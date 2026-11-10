@@ -90,7 +90,11 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                     let artist = state.artists[artist_idx].clone();
                     let is_selected = state.selected_artists.contains(&artist.band_id);
                     let sync_prog = state.active_syncs.get(&artist.band_id).cloned();
-                    let linked_folder = state.folders.get(&artist.band_id).cloned();
+                    let linked_folder = state
+                        .folders
+                        .get(&artist.band_id)
+                        .and_then(|v| v.first())
+                        .cloned();
 
                     let resp = draw_artist_row(
                         ui,
@@ -147,7 +151,9 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             });
                             ui.close();
                         }
-                        if let Some(folder) = state.folders.get(&artist.band_id) {
+                        if let Some(folder) =
+                            state.folders.get(&artist.band_id).and_then(|v| v.first())
+                        {
                             if folder.state != FolderState::Ok
                                 && sharp_button(ui, "Resolve unavailable folder...").clicked()
                             {
@@ -173,7 +179,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             }
                             if sharp_button(ui, "Unlink Folder").clicked() {
                                 let _ = cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
-                                    band_id: artist.band_id,
+                                    folder_id: folder.id,
                                 });
                                 ui.close();
                             }

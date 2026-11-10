@@ -267,7 +267,7 @@ mod tests {
         let out_dir = dir.path().join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
-        lib_repo::link_folder(&mut conn, band_id, &artist_dir, &out_dir).unwrap();
+        lib_repo::add_folder(&mut conn, band_id, &artist_dir, &out_dir).unwrap();
 
         // 3. Run scan and match pipeline
         let progress_calls = std::sync::Mutex::new(Vec::new());
