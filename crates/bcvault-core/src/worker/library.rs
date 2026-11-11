@@ -7,13 +7,13 @@ use crate::db::DbPool;
 use crate::db::repo::{artists, library as lib_repo, releases, settings};
 use crate::error::DbError;
 use crate::library::link::probe_folder;
-use crate::library::matcher::assign_matches;
+use crate::library::matcher::assign_matches_with_rejected;
 use crate::library::scan::scan_linked_folder;
 use crate::library::service::{
     ReconcileReport, drop_downloaded_page_only, split_matchable_releases,
 };
 use crate::library::verify::{
-    VerifyResult, attribute_release_root, find_relink_candidates, group_unavailable_releases,
+    VerifyResult, attribute_release_root, find_relink_candidates_with_rejected, group_unavailable_releases,
     is_mass_missing, verify_single_release,
 };
 use crate::types::{
@@ -1060,16 +1060,18 @@ impl LibraryService {
                         }
                         let ign = lib_repo::get_ignored_local(c, band_id)?;
                         excluded.extend(ign);
-                        Ok::<_, DbError>(excluded)
+                        let rej = lib_repo::get_rejected_pairs(c, band_id)?;
+                        Ok::<_, DbError>((excluded, rej))
                     })
                     .await;
 
-                let excluded_keys = excluded_res.unwrap_or_default();
+                let (excluded_keys, rejected_pairs) = excluded_res.unwrap_or_default();
 
-                let outcome = find_relink_candidates(
+                let outcome = find_relink_candidates_with_rejected(
                     &band_rels,
                     &merged_candidates,
                     &excluded_keys,
+                    &rejected_pairs,
                     st.auto_match_min,
                     &st.folder_style,
                 );
@@ -1556,13 +1558,22 @@ impl LibraryService {
             .reader
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
+                let catalog = rels.clone();
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
+                let rej = lib_repo::get_rejected_pairs(c, band_id)?;
                 let split = split_matchable_releases(rels, &all_roots, &ok_roots);
-                Ok::<_, DbError>((split.adoptable, ign, split.active_linked_keys, split.linked))
+                Ok::<_, DbError>((
+                    split.adoptable,
+                    catalog,
+                    ign,
+                    rej,
+                    split.active_linked_keys,
+                    split.linked,
+                ))
             })
             .await;
 
-        let (releases, ignored, active_linked_keys, linked) = match rel_res {
+        let (releases, catalog, ignored, rejected, active_linked_keys, linked) = match rel_res {
             Ok(tuple) => tuple,
             Err(e) => {
                 bridge.log(
@@ -1587,12 +1598,13 @@ impl LibraryService {
             current: None,
         });
 
-        let mut assignment = assign_matches(
+        let mut assignment = assign_matches_with_rejected(
             &unlinked_candidates,
             &releases,
             st.auto_match_min,
             st.review_match_min,
             &ignored,
+            &rejected,
             &st.folder_style,
         );
         drop_downloaded_page_only(&mut assignment, &releases);
@@ -1678,6 +1690,7 @@ impl LibraryService {
                 restorable: assignment.restorable,
                 linked,
                 unavailable_folders: unavailable_folder_ids,
+                catalog,
             };
             bridge.emit(WorkerToUiEvent::ReconcileReport {
                 report: Box::new(report),
@@ -1823,13 +1836,22 @@ impl LibraryService {
             .reader
             .call(move |c| {
                 let rels = releases::query_releases(c, &query)?;
+                let catalog = rels.clone();
                 let ign = lib_repo::get_ignored_local(c, band_id)?;
+                let rej = lib_repo::get_rejected_pairs(c, band_id)?;
                 let split = split_matchable_releases(rels, &all_roots, &ok_roots);
-                Ok::<_, DbError>((split.adoptable, ign, split.active_linked_keys, split.linked))
+                Ok::<_, DbError>((
+                    split.adoptable,
+                    catalog,
+                    ign,
+                    rej,
+                    split.active_linked_keys,
+                    split.linked,
+                ))
             })
             .await;
 
-        let (releases, ignored, active_linked_keys, linked) = match rel_res {
+        let (releases, catalog, ignored, rejected, active_linked_keys, linked) = match rel_res {
             Ok(tuple) => tuple,
             Err(e) => {
                 bridge.log(
@@ -1854,12 +1876,13 @@ impl LibraryService {
             current: None,
         });
 
-        let mut assignment = assign_matches(
+        let mut assignment = assign_matches_with_rejected(
             &unlinked_candidates,
             &releases,
             st.auto_match_min,
             st.review_match_min,
             &ignored,
+            &rejected,
             &st.folder_style,
         );
         drop_downloaded_page_only(&mut assignment, &releases);
@@ -1951,6 +1974,7 @@ impl LibraryService {
             restorable: assignment.restorable,
             linked,
             unavailable_folders: unavailable_folder_ids,
+            catalog,
         };
 
         bridge.emit(WorkerToUiEvent::ReconcileReport {

@@ -14,7 +14,9 @@ pub use link::{
 };
 pub use matcher::{
     Conflict, LocalOrphan, MatchAssignment, MatchProposal, ReviewItem, Score, ScoredCandidate,
-    Signal, assign_matches, normalize_bandcamp_url, score_candidate, score_release,
+    Signal, assign_matches, assign_matches_with_rejected, extract_release_slug,
+    filter_releases_for_picker, format_release_picker_label, normalize_bandcamp_url,
+    release_url_slug, resolve_release_by_query, score_candidate, score_release,
 };
 pub use scan::{
     AUDIO_EXTENSIONS, AlbumCandidate, CandidateKind, ScanReport, is_audio_file,

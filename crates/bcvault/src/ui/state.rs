@@ -1080,6 +1080,7 @@ mod tests {
             restorable: vec![],
             linked: vec![],
             unavailable_folders: vec![],
+            catalog: vec![],
         });
 
         let mut st = UiState::new();

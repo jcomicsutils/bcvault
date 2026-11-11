@@ -390,6 +390,27 @@ pub fn assign_matches(
     ignored_path_keys: &HashSet<String>,
     style: &FolderStyle,
 ) -> MatchAssignment {
+    assign_matches_with_rejected(
+        candidates,
+        releases,
+        auto_match_min,
+        review_match_min,
+        ignored_path_keys,
+        &HashSet::new(),
+        style,
+    )
+}
+
+/// Matches candidates to releases while excluding user-rejected `(release_key, candidate_path_key)` pairs.
+pub fn assign_matches_with_rejected(
+    candidates: &[AlbumCandidate],
+    releases: &[ReleaseRow],
+    auto_match_min: f32,
+    review_match_min: f32,
+    ignored_path_keys: &HashSet<String>,
+    rejected_pairs: &HashSet<(crate::types::ItemKey, String)>,
+    style: &FolderStyle,
+) -> MatchAssignment {
     let mut assignment = MatchAssignment::default();
 
     // Filter out candidates ignored by user
@@ -417,8 +438,15 @@ pub fn assign_matches(
         return assignment;
     }
 
-    // 1. Exact Pass
-    let exact_edges = build_exact_edges_refs(&active_candidates, releases, style);
+    // 1. Exact Pass (excluding explicitly rejected pairs)
+    let exact_edges: Vec<ExactEdge> = build_exact_edges_refs(&active_candidates, releases, style)
+        .into_iter()
+        .filter(|e| {
+            let rel_key = releases[e.rel_idx].key;
+            let cand_pk = &active_candidates[e.cand_idx].path_key;
+            !rejected_pairs.contains(&(rel_key, cand_pk.clone()))
+        })
+        .collect();
     let resolution = resolve_exact_matches(&active_candidates, releases, &exact_edges);
 
     assignment.conflicts = resolution.conflicts;
@@ -491,7 +519,9 @@ pub fn assign_matches(
             );
         } else {
             for (rel_idx, rel) in releases.iter().enumerate() {
-                if !leftover_rels.contains(&rel_idx) {
+                if !leftover_rels.contains(&rel_idx)
+                    || rejected_pairs.contains(&(rel.key, cand.path_key.clone()))
+                {
                     row.push((
                         Score {
                             value: 0.0,
@@ -929,6 +959,182 @@ pub fn normalize_bandcamp_url(raw: &str) -> String {
         s = clean;
     }
     s.trim_end_matches('/').to_lowercase()
+}
+
+/// Extracts `(ItemType, slug)` from a Bandcamp release URL or typed slug input
+/// (such as `https://artist.bandcamp.com/album/split-3`, `album/split-3`, or `/track/foo`).
+pub fn extract_release_slug(raw: &str) -> Option<(ItemType, String)> {
+    let norm = normalize_bandcamp_url(raw);
+    let trimmed = norm.trim_matches('/');
+    if let Some(rest) = trimmed.strip_prefix("album/") {
+        let slug = rest.split('/').next().unwrap_or("").trim();
+        if !slug.is_empty() {
+            return Some((ItemType::Album, slug.to_string()));
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("track/") {
+        let slug = rest.split('/').next().unwrap_or("").trim();
+        if !slug.is_empty() {
+            return Some((ItemType::Track, slug.to_string()));
+        }
+    }
+    if let Some((_, after)) = trimmed.split_once("/album/") {
+        let slug = after.split('/').next().unwrap_or("").trim();
+        if !slug.is_empty() {
+            return Some((ItemType::Album, slug.to_string()));
+        }
+    }
+    if let Some((_, after)) = trimmed.split_once("/track/") {
+        let slug = after.split('/').next().unwrap_or("").trim();
+        if !slug.is_empty() {
+            return Some((ItemType::Track, slug.to_string()));
+        }
+    }
+    None
+}
+
+/// Formats the canonical `<kind>/<slug>` path segment of a release URL (e.g. `album/split-3`).
+pub fn release_url_slug(url: &str) -> Option<String> {
+    extract_release_slug(url).map(|(kind, slug)| format!("{}/{slug}", kind.as_str()))
+}
+
+/// Resolves a user query (full Bandcamp URL, `album/<slug>`, `track/<slug>`, or unambiguous bare `<slug>`)
+/// to a specific `ItemKey` in `releases`.
+pub fn resolve_release_by_query(
+    input: &str,
+    releases: &[ReleaseRow],
+) -> Option<crate::types::ItemKey> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || releases.is_empty() {
+        return None;
+    }
+
+    // 1. Full URL match
+    if trimmed.contains("://")
+        || trimmed.contains(".bandcamp.com")
+        || trimmed.starts_with("http")
+    {
+        let norm_input = normalize_bandcamp_url(trimmed);
+        if let Some(rel) = releases
+            .iter()
+            .find(|r| normalize_bandcamp_url(&r.url) == norm_input)
+        {
+            return Some(rel.key);
+        }
+        if let Some((kind, slug)) = extract_release_slug(trimmed)
+            && let Some(rel) = releases.iter().find(|r| {
+                r.key.kind == kind
+                    && extract_release_slug(&r.url)
+                        .is_some_and(|(rk, rs)| rk == kind && rs == slug)
+            })
+        {
+            return Some(rel.key);
+        }
+        return None;
+    }
+
+    // 2. Typed slug `album/<slug>` or `track/<slug>`
+    if let Some((kind, slug)) = extract_release_slug(trimmed) {
+        if let Some(rel) = releases.iter().find(|r| {
+            r.key.kind == kind
+                && extract_release_slug(&r.url).is_some_and(|(rk, rs)| rk == kind && rs == slug)
+        }) {
+            return Some(rel.key);
+        }
+        return None;
+    }
+
+    // 3. Unambiguous bare slug `<slug>` (no whitespace or '/')
+    let clean_bare = trimmed.trim_matches('/').to_lowercase();
+    if !clean_bare.is_empty() && !clean_bare.contains(char::is_whitespace) && !clean_bare.contains('/') {
+        let slug_matches: Vec<&ReleaseRow> = releases
+            .iter()
+            .filter(|r| {
+                extract_release_slug(&r.url).is_some_and(|(_, rs)| rs == clean_bare)
+            })
+            .collect();
+        if slug_matches.len() == 1 {
+            return Some(slug_matches[0].key);
+        }
+    }
+
+    None
+}
+
+/// Formats a `ReleaseRow` with disambiguating slug, year, track count, and classification
+/// so multiple releases sharing the same title (e.g. `"split"`) are clearly distinguishable.
+pub fn format_release_picker_label(rel: &ReleaseRow) -> String {
+    let slug_part = release_url_slug(&rel.url)
+        .unwrap_or_else(|| format!("{}/{}", rel.key.kind.as_str(), rel.key.id));
+    let year_str = rel
+        .published_at
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+        .map(|dt| dt.year().to_string())
+        .unwrap_or_else(|| "----".to_string());
+    let trk_str = rel
+        .track_count
+        .map(|c| format!("{c} trk"))
+        .unwrap_or_else(|| "- trk".to_string());
+    format!(
+        "{}  [{} · {} · {} · {}]",
+        rel.title,
+        slug_part,
+        year_str,
+        trk_str,
+        rel.classification.label()
+    )
+}
+
+/// Filters `releases` by a user search query (matching URL, slug, title, year, classification, or ID).
+pub fn filter_releases_for_picker<'a>(
+    query: &str,
+    releases: &'a [ReleaseRow],
+) -> Vec<&'a ReleaseRow> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return releases.iter().collect();
+    }
+
+    let exact_key = resolve_release_by_query(trimmed, releases);
+    let tokens: Vec<String> = trimmed
+        .to_lowercase()
+        .split_whitespace()
+        .map(|t| t.trim_matches('/').to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let mut out = Vec::new();
+    if let Some(ek) = exact_key
+        && let Some(r) = releases.iter().find(|r| r.key == ek)
+    {
+        out.push(r);
+    }
+
+    for rel in releases {
+        if Some(rel.key) == exact_key {
+            continue;
+        }
+        let slug_part = release_url_slug(&rel.url).unwrap_or_default();
+        let year_str = rel
+            .published_at
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| dt.year().to_string())
+            .unwrap_or_default();
+        let haystack = format!(
+            "{} {} {} {} {} {}",
+            rel.title.to_lowercase(),
+            slug_part.to_lowercase(),
+            rel.url.to_lowercase(),
+            year_str,
+            rel.classification.label().to_lowercase(),
+            rel.key.id
+        );
+        if tokens.iter().all(|tok| haystack.contains(tok)) {
+            out.push(rel);
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -1894,5 +2100,159 @@ mod tests {
         assert_eq!(res.matched.len(), 2);
         assert!(res.local_only.is_empty());
         assert!(res.page_only.is_empty());
+    }
+
+    #[test]
+    fn wall_split_action_001_rejected_pairs_fall_through_to_local_only() {
+        let mut cand = make_candidate("Wall Split Action 001", 4, None, None, None);
+        cand.path = PathBuf::from("/music/artist/Wall Split Action 001");
+        cand.path_key = "/music/artist/wall split action 001".to_string();
+
+        let releases: Vec<ReleaseRow> = (1..=9)
+            .map(|i| {
+                let mut r = make_release(100 + i, "split", 4, Some(2023));
+                r.url = format!("https://artist.bandcamp.com/album/split-{i}");
+                r
+            })
+            .collect();
+
+        // Without rejections, all 9 "split" releases match "Wall Split Action 001" via containment (0.85) in Review
+        let initial = assign_matches_with_rejected(
+            std::slice::from_ref(&cand),
+            &releases,
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &HashSet::new(),
+            &FolderStyle::default(),
+        );
+        assert_eq!(initial.review.len(), 9);
+        assert!(initial.local_only.is_empty());
+
+        // Reject all 9 (release_key, path_key) pairs
+        let rejected: HashSet<(ItemKey, String)> = releases
+            .iter()
+            .map(|r| (r.key, cand.path_key.clone()))
+            .collect();
+
+        let after_reject = assign_matches_with_rejected(
+            std::slice::from_ref(&cand),
+            &releases,
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &rejected,
+            &FolderStyle::default(),
+        );
+        assert!(after_reject.review.is_empty());
+        assert_eq!(after_reject.local_only.len(), 1);
+        assert_eq!(after_reject.local_only[0].name, "Wall Split Action 001");
+        assert_eq!(after_reject.page_only.len(), 9);
+    }
+
+    #[test]
+    fn rejecting_one_pair_does_not_block_other_releases_or_folders() {
+        let mut cand_x = make_candidate("Split", 4, None, None, None);
+        cand_x.path = PathBuf::from("/music/artist/Split_X");
+        cand_x.path_key = "/music/artist/split_x".to_string();
+
+        let mut rel_a = make_release(1, "Split", 4, Some(2022));
+        rel_a.url = "https://artist.bandcamp.com/album/split-a".to_string();
+        let mut rel_b = make_release(2, "Split", 4, Some(2023));
+        rel_b.url = "https://artist.bandcamp.com/album/split-b".to_string();
+
+        // Reject (rel_a, cand_x) -> cand_x now matches rel_b uniquely without conflict!
+        let mut rejected = HashSet::new();
+        rejected.insert((rel_a.key, cand_x.path_key.clone()));
+
+        let res = assign_matches_with_rejected(
+            &[cand_x],
+            &[rel_a.clone(), rel_b.clone()],
+            0.92,
+            0.75,
+            &HashSet::new(),
+            &rejected,
+            &FolderStyle::default(),
+        );
+        assert_eq!(res.matched.len(), 1);
+        assert_eq!(res.matched[0].release_key, rel_b.key);
+        assert!(res.conflicts.is_empty());
+        assert_eq!(res.page_only, vec![rel_a.key]);
+    }
+
+    #[test]
+    fn resolve_and_filter_releases_by_url_slug_and_query() {
+        let releases: Vec<ReleaseRow> = (1..=10)
+            .map(|i| {
+                let mut r = make_release(200 + i, "split", 4, Some(2015 + i as i32));
+                r.url = if i == 1 {
+                    "https://artist.bandcamp.com/album/split".to_string()
+                } else {
+                    format!("https://artist.bandcamp.com/album/split-{i}")
+                };
+                r
+            })
+            .collect();
+
+        // Full URL with query params
+        assert_eq!(
+            resolve_release_by_query(
+                "https://artist.bandcamp.com/album/split-7?from=fanitem",
+                &releases
+            ),
+            Some(ItemKey::new(ItemType::Album, 207))
+        );
+        // Custom domain URL
+        assert_eq!(
+            resolve_release_by_query("https://custom.domain.org/album/split-4/", &releases),
+            Some(ItemKey::new(ItemType::Album, 204))
+        );
+        // Typed slug
+        assert_eq!(
+            resolve_release_by_query("album/split-9", &releases),
+            Some(ItemKey::new(ItemType::Album, 209))
+        );
+        // Bare slug
+        assert_eq!(
+            resolve_release_by_query("split-3", &releases),
+            Some(ItemKey::new(ItemType::Album, 203))
+        );
+        assert_eq!(
+            resolve_release_by_query("split", &releases),
+            Some(ItemKey::new(ItemType::Album, 201))
+        );
+
+        // Ambiguous bare slug between album/split and track/split requires kind prefix
+        let mut track_split = make_release(999, "split", 1, Some(2020));
+        track_split.key = ItemKey::new(ItemType::Track, 999);
+        track_split.url = "https://artist.bandcamp.com/track/split".to_string();
+        let mut with_track = releases.clone();
+        with_track.push(track_split);
+
+        assert_eq!(resolve_release_by_query("split", &with_track), None);
+        assert_eq!(
+            resolve_release_by_query("album/split", &with_track),
+            Some(ItemKey::new(ItemType::Album, 201))
+        );
+        assert_eq!(
+            resolve_release_by_query("track/split", &with_track),
+            Some(ItemKey::new(ItemType::Track, 999))
+        );
+
+        // Picker labels are all distinct across the 10 identically titled "split" albums
+        let labels: HashSet<String> = releases
+            .iter()
+            .map(format_release_picker_label)
+            .collect();
+        assert_eq!(labels.len(), 10);
+
+        // Filtering by slug or year narrows the list
+        let filtered_slug = filter_releases_for_picker("split-8", &releases);
+        assert_eq!(filtered_slug.len(), 1);
+        assert_eq!(filtered_slug[0].key.id, 208);
+
+        let filtered_year = filter_releases_for_picker("2021", &releases);
+        assert_eq!(filtered_year.len(), 1);
+        assert_eq!(filtered_year[0].key.id, 206);
     }
 }

@@ -7,7 +7,7 @@ use crate::db::repo::{library as lib_repo, releases as rel_repo};
 use crate::library::folder_style::FolderStyle;
 use crate::library::link::probe_folder;
 use crate::library::matcher::{
-    Conflict, LocalOrphan, MatchAssignment, MatchProposal, ReviewItem, assign_matches,
+    Conflict, LocalOrphan, MatchAssignment, MatchProposal, ReviewItem, assign_matches_with_rejected,
 };
 use crate::library::scan::scan_linked_folder;
 use crate::types::{FolderState, ItemKey, LibraryPhase, LocalStatus, ReleaseQuery, ReleaseRow};
@@ -36,6 +36,8 @@ pub struct ReconcileReport {
     pub linked: Vec<LinkedRelease>,
     /// Folder ids skipped because they were missing or unreadable.
     pub unavailable_folders: Vec<i64>,
+    /// Complete release catalog of the artist for disambiguation and URL/slug matching.
+    pub catalog: Vec<ReleaseRow>,
 }
 
 /// A release that is already downloaded and linked to a local path.
@@ -215,7 +217,9 @@ pub fn run_scan_and_match(
         ..Default::default()
     };
     let all_releases = rel_repo::query_releases(conn, &query)?;
+    let catalog = all_releases.clone();
     let ignored = lib_repo::get_ignored_local(conn, band_id)?;
+    let rejected = lib_repo::get_rejected_pairs(conn, band_id)?;
 
     let ok_roots: Vec<PathBuf> = ok_folders.iter().map(|f| f.path.clone()).collect();
     let MatchableReleases {
@@ -238,12 +242,13 @@ pub fn run_scan_and_match(
         );
     }
 
-    let mut assignment = assign_matches(
+    let mut assignment = assign_matches_with_rejected(
         &unlinked_candidates,
         &adoptable,
         auto_match_min,
         review_match_min,
         &ignored,
+        &rejected,
         style,
     );
     drop_downloaded_page_only(&mut assignment, &adoptable);
@@ -274,6 +279,7 @@ pub fn run_scan_and_match(
         restorable: assignment.restorable,
         linked,
         unavailable_folders,
+        catalog,
     }))
 }
 

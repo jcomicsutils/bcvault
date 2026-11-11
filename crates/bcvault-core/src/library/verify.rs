@@ -242,6 +242,24 @@ pub fn find_relink_candidates(
     auto_match_min: f32,
     style: &FolderStyle,
 ) -> RelinkOutcome {
+    find_relink_candidates_with_rejected(
+        missing_releases,
+        candidates,
+        excluded_path_keys,
+        &HashSet::new(),
+        auto_match_min,
+        style,
+    )
+}
+
+pub fn find_relink_candidates_with_rejected(
+    missing_releases: &[ReleaseRow],
+    candidates: &[AlbumCandidate],
+    excluded_path_keys: &HashSet<String>,
+    rejected_pairs: &HashSet<(ItemKey, String)>,
+    auto_match_min: f32,
+    style: &FolderStyle,
+) -> RelinkOutcome {
     let available_candidates: Vec<&AlbumCandidate> = candidates
         .iter()
         .filter(|c| !excluded_path_keys.contains(&c.path_key))
@@ -259,7 +277,14 @@ pub fn find_relink_candidates(
     }
 
     // 1. Exact pass
-    let exact_edges = build_exact_edges_refs(&available_candidates, missing_releases, style);
+    let exact_edges: Vec<_> = build_exact_edges_refs(&available_candidates, missing_releases, style)
+        .into_iter()
+        .filter(|e| {
+            let rel_key = missing_releases[e.rel_idx].key;
+            let cand_pk = &available_candidates[e.cand_idx].path_key;
+            !rejected_pairs.contains(&(rel_key, cand_pk.clone()))
+        })
+        .collect();
     let resolution = resolve_exact_matches(&available_candidates, missing_releases, &exact_edges);
 
     let mut relinked = Vec::new();
@@ -329,6 +354,9 @@ pub fn find_relink_candidates(
     for rel in leftover_rels {
         let mut scored = Vec::new();
         for &cand in &leftover_cands {
+            if rejected_pairs.contains(&(rel.key, cand.path_key.clone())) {
+                continue;
+            }
             let s = score_release(cand, rel, style);
             scored.push(Scored {
                 candidate: cand,

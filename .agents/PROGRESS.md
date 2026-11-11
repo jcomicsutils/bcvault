@@ -4,6 +4,7 @@
 Task: none (REVIEW-AND-MATCH-FIX plan ready; see PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md)  ·  Branch: main  ·  Updated: 2026-11-10
 
 ## Done
+- none: filter rejected pairs and resolve releases by url or slug (`REVIEW-AND-MATCH-FIX.md` step 2)
 - none: add artist_folder_rejected table for rejected review pairs (`REVIEW-AND-MATCH-FIX.md` step 1, migration 0008, breaking)
 - none: plan persistent review rejection and searchable slug/URL release matching (`REVIEW-AND-MATCH-FIX.md`)
 - none: mark zero-track and user-flagged albums as unavailable (migration 0007, breaking)

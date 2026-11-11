@@ -1614,6 +1614,7 @@ mod tests {
             restorable: vec![],
             linked: vec![],
             unavailable_folders: vec![],
+            catalog: vec![],
         });
 
         let mut modal = FxReconcileReportModalState::new(report);
@@ -1796,6 +1797,7 @@ mod tests {
                 restorable: vec![],
                 linked: vec![],
                 unavailable_folders: vec![],
+                catalog: vec![],
             },
         )));
         assert!(state.has_open_modal());
