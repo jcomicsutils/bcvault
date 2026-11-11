@@ -98,10 +98,10 @@ Any releases and candidates not resolved in the exact pass are evaluated with fu
 ### 4.3 Match Thresholds & Report Tabs
 The settings sliders (`Auto-Match Min Score` and `Review Min Score`) control the acceptance of **non-exact (fuzzy) matches only**:
 1. **Matched**: Exact matches from step 1, plus fuzzy matches scoring >= `auto_match_min` (default 92%) that beat their runner-up by >= 5%. Pre-selected for automatic adoption.
-2. **Review**: Fuzzy proposals scoring >= `review_match_min` (default 60%) or containment matches requiring manual confirmation.
-3. **On Page Only**: Tracked releases with no local files.
-4. **Local Only**: Discovered folders that do not match any release on the artist's page.
-5. **Conflicts**: Genuine duplicate formats or conflicting tag/folder identities from the exact pass. Fuzzy scoring never creates conflicts.
+2. **Review**: Fuzzy proposals scoring >= `review_match_min` (default 60%) or containment matches requiring manual confirmation. Each card displays the release's URL slug (`album/<slug>` or `track/<slug>`), year, track count, classification, and an **Open** button so identically titled releases (such as multiple `"split"` entries) are always distinguishable. You can adopt a candidate, **Skip for now**, or mark a pairing as **Wrong, don't ask again** (individually or in bulk via **Mark all as wrong (don't ask again)** / **Mark skipped as wrong**). Permanently rejected `(release, folder)` pairs are stored in `artist_folder_rejected` (with full batch **Undo** support) and are never proposed again; once all false review pairings for a folder are rejected, the folder falls through to **Local Only**.
+3. **On Page Only**: Tracked releases with no local files, shown with their disambiguating URL slug, year, track count, and **Open** button.
+4. **Local Only**: Discovered folders that do not match any release on the artist's page. Choosing **Attach to release...** opens a **searchable release picker** where you can filter by title, year, or slug, or paste a full Bandcamp release URL (`https://artist.bandcamp.com/album/split-3`) or slug (`album/split-3` or `split-3`) to guarantee matching the exact page release.
+5. **Conflicts**: Genuine duplicate formats or conflicting tag/folder identities from the exact pass. Each candidate folder in a conflict can be left unresolved, ignored in future scans, or matched to a specific release using the same **searchable URL/slug release picker**.
 6. **Found Again (Restorable)**: Releases marked as `archived` whose audio files reappeared on disk.
 
 ### 4.4 Releases Downloaded by the App & Unavailable Releases

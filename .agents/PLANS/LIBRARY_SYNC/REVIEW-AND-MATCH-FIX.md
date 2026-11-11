@@ -2,7 +2,7 @@
 
 For the coding agent. Repo: bcvault (Rust workspace). Scope: `crates/bcvault-core/src/migrations/`, `crates/bcvault-core/src/db/{migrations.rs,repo/library.rs}`, `crates/bcvault-core/src/library/{matcher,verify,service}.rs`, `crates/bcvault-core/src/worker/{library,messages,supervisor}.rs`, `crates/bcvault-core/src/types.rs`, both UIs (`crates/bcvault/src/ui/modals.rs` and `crates/bcvault-fx/src/overlays/modals.rs`), and docs. Place this file at `.agents/PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md`.
 
-> Status: not started. Steps are `Task: none` commits (step numbers go in `PROGRESS.md`), like `MATCH-FIX.md` and `DOWNLOAD-DIR-FIX.md`. Amends `LIBRARY_SYNC_PLAN.md` §5, §6, and §10, and `MATCH-FIX.md` §3.5.
+> Status 10 Nov 2026: **implemented** on `main` (`Task: none` commits, migration `0008_rejected_matches.sql`). Steps are `Task: none` commits (step numbers go in `PROGRESS.md`), like `MATCH-FIX.md` and `DOWNLOAD-DIR-FIX.md`. Amends `LIBRARY_SYNC_PLAN.md` §5, §6, and §10, and `MATCH-FIX.md` §3.5.
 
 ## 0. Ground rules
 
