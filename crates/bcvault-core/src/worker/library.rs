@@ -938,7 +938,7 @@ impl LibraryService {
         })
         .await;
 
-        let (present_rels, missing_rels, unknown_rels) = match verify_res {
+        let (present_rels, missing_rels, mut unknown_rels) = match verify_res {
             Ok(triplet) => triplet,
             Err(e) => {
                 bridge.log(
@@ -995,33 +995,51 @@ impl LibraryService {
             );
         }
 
-        // 8. Auto-relink moved albums (if enabled, artist has a link, and not mass_missing)
+        // 8. Auto-relink moved albums (if enabled, artist has a link, and not mass_missing).
+        // Also check unknown_rels (such as releases last seen in a now-deleted out_dir)
+        // when the artist has at least one reachable (Ok) linked folder.
         let mut still_missing: Vec<ReleaseRow> = Vec::new();
         let mut best_candidates: std::collections::HashMap<ItemKey, MissingCandidate> =
             std::collections::HashMap::new();
         let mut relinked_count = 0;
 
-        if !mass_missing && st.auto_relink && !missing_rels.is_empty() {
+        if !mass_missing && st.auto_relink && (!missing_rels.is_empty() || !unknown_rels.is_empty())
+        {
+            let missing_key_set: std::collections::HashSet<ItemKey> =
+                missing_rels.iter().map(|r| r.key).collect();
             let mut by_band: std::collections::HashMap<i64, Vec<ReleaseRow>> =
                 std::collections::HashMap::new();
             for r in missing_rels {
                 by_band.entry(r.band_id).or_default().push(r);
             }
+            for (r, _, _, _) in &unknown_rels {
+                if r.local_status != Some(LocalStatus::Archived) {
+                    let has_ok_linked = linked_folders
+                        .get(&r.band_id)
+                        .is_some_and(|fs| fs.iter().any(|f| f.state == FolderState::Ok));
+                    if has_ok_linked {
+                        by_band.entry(r.band_id).or_default().push(r.clone());
+                    }
+                }
+            }
+
+            let mut relinked_unknown_keys: std::collections::HashSet<ItemKey> =
+                std::collections::HashSet::new();
 
             for (band_id, band_rels) in by_band {
-                let folders = pool
-                    .reader
-                    .call(move |c| lib_repo::get_folders(c, band_id))
-                    .await
-                    .unwrap_or_default();
+                let folders = linked_folders.get(&band_id).cloned().unwrap_or_default();
 
                 let ok_folders: Vec<ArtistFolder> = folders
                     .into_iter()
-                    .filter(|f| probe_folder(&f.path) == FolderState::Ok)
+                    .filter(|f| f.state == FolderState::Ok)
                     .collect();
 
                 if ok_folders.is_empty() {
-                    still_missing.extend(band_rels);
+                    for r in band_rels {
+                        if missing_key_set.contains(&r.key) {
+                            still_missing.push(r);
+                        }
+                    }
                     continue;
                 }
 
@@ -1097,6 +1115,9 @@ impl LibraryService {
                     if let Ok(updated_releases) = relink_res {
                         relinked_count += updated_releases.len();
                         for r in updated_releases {
+                            if !missing_key_set.contains(&r.key) {
+                                relinked_unknown_keys.insert(r.key);
+                            }
                             bridge.log(
                                 LogLevel::Info,
                                 "library",
@@ -1112,15 +1133,28 @@ impl LibraryService {
                             );
                             bridge.emit(WorkerToUiEvent::ReleaseUpdated(Box::new(r)));
                         }
+                        if let Ok(stats) = pool
+                            .reader
+                            .call(move |c| artists::stats_with_quota(c, band_id))
+                            .await
+                        {
+                            bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+                        }
                     }
                 }
 
                 for (unresolved_rel, best_cand_opt) in outcome.unresolved {
-                    if let Some(cand) = best_cand_opt {
-                        best_candidates.insert(unresolved_rel.key, cand);
+                    if missing_key_set.contains(&unresolved_rel.key) {
+                        if let Some(cand) = best_cand_opt {
+                            best_candidates.insert(unresolved_rel.key, cand);
+                        }
+                        still_missing.push(unresolved_rel);
                     }
-                    still_missing.push(unresolved_rel);
                 }
+            }
+
+            if !relinked_unknown_keys.is_empty() {
+                unknown_rels.retain(|(r, _, _, _)| !relinked_unknown_keys.contains(&r.key));
             }
         } else {
             still_missing = missing_rels;
@@ -1265,20 +1299,6 @@ impl LibraryService {
             }
         }
 
-        if out_dir_state != FolderState::Ok && is_all_scope {
-            let already_present = unavailable_folders
-                .iter()
-                .any(|f| f.root == UnavailableRoot::OutDir);
-            if !already_present {
-                unavailable_folders.push(UnavailableFolder {
-                    root: UnavailableRoot::OutDir,
-                    path: out_dir.clone(),
-                    state: out_dir_state,
-                    releases: Vec::new(),
-                });
-            }
-        }
-
         if !unavailable_folders.is_empty() {
             let batch_id = match pool
                 .writer
@@ -1316,6 +1336,35 @@ impl LibraryService {
                 folders: unavailable_folders,
                 prompt,
             });
+        }
+
+        // 11. On manual VerifyFiles, rescan reachable linked folders so unmarked (downloaded = 0),
+        // archived (KeepMarked), or out_dir-resident releases whose files are in the linked folder
+        // are automatically adopted or restored.
+        if trigger == VerifyTrigger::Manual && st.rescan_linked_on_sync {
+            for (&band_id, folders) in &linked_folders {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                let ok_folders: Vec<ArtistFolder> = folders
+                    .iter()
+                    .filter(|f| f.state == FolderState::Ok)
+                    .cloned()
+                    .collect();
+                if ok_folders.is_empty() {
+                    continue;
+                }
+                let adopted_or_restored = self
+                    .auto_adopt_and_restore_linked_on_verify(
+                        band_id,
+                        folders,
+                        &ok_folders,
+                        &st,
+                        &cancel,
+                    )
+                    .await;
+                relinked_count += adopted_or_restored as usize;
+            }
         }
 
         bridge.log(
@@ -1612,14 +1661,15 @@ impl LibraryService {
         let mut adopted_count = 0_u32;
         let mut linked = linked;
         let mut matched = assignment.matched;
-        if !matched.is_empty() {
+        let mut restorable = assignment.restorable;
+        if !matched.is_empty() || !restorable.is_empty() {
             let batch_res = pool
                 .writer
                 .call(|c| lib_repo::create_batch(c, "sync", &BatchSummary::default()))
                 .await;
             if let Ok(b_id) = batch_res {
                 let batch_id = b_id.max(0) as u64;
-                let decisions: Vec<MatchDecision> = matched
+                let mut decisions: Vec<MatchDecision> = matched
                     .iter()
                     .map(|m| MatchDecision::Adopt {
                         key: m.release_key,
@@ -1628,10 +1678,23 @@ impl LibraryService {
                         folder_mtime: None,
                     })
                     .collect();
+                for m in &restorable {
+                    decisions.push(MatchDecision::Restore {
+                        key: m.release_key,
+                        path: m.candidate_path.clone(),
+                    });
+                }
                 adopted_count = decisions.len() as u32;
                 self.apply_reconcile_internal(batch_id, decisions).await;
 
                 for m in matched.drain(..) {
+                    linked.push(crate::library::service::LinkedRelease {
+                        release_key: m.release_key,
+                        release_title: m.release_title,
+                        path: m.candidate_path,
+                    });
+                }
+                for m in restorable.drain(..) {
                     linked.push(crate::library::service::LinkedRelease {
                         release_key: m.release_key,
                         release_title: m.release_title,
@@ -1677,7 +1740,7 @@ impl LibraryService {
 
         if !assignment.review.is_empty()
             || !assignment.conflicts.is_empty()
-            || !assignment.restorable.is_empty()
+            || !restorable.is_empty()
         {
             let report = ReconcileReport {
                 batch_id: 0,
@@ -1687,7 +1750,7 @@ impl LibraryService {
                 page_only: assignment.page_only,
                 local_only: assignment.local_only,
                 conflicts: assignment.conflicts,
-                restorable: assignment.restorable,
+                restorable,
                 linked,
                 unavailable_folders: unavailable_folder_ids,
                 catalog,
@@ -1701,6 +1764,147 @@ impl LibraryService {
             adopted: adopted_count,
             review_count,
         }
+    }
+
+    async fn auto_adopt_and_restore_linked_on_verify(
+        &self,
+        band_id: i64,
+        all_folders: &[ArtistFolder],
+        ok_folders: &[ArtistFolder],
+        st: &Settings,
+        cancel: &CancellationToken,
+    ) -> u32 {
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+
+        let query = ReleaseQuery {
+            band_id: Some(band_id),
+            ..Default::default()
+        };
+        let ok_roots: Vec<PathBuf> = ok_folders.iter().map(|f| f.path.clone()).collect();
+        let all_roots: Vec<PathBuf> = all_folders.iter().map(|f| f.path.clone()).collect();
+
+        let rel_res = pool
+            .reader
+            .call(move |c| {
+                let rels = releases::query_releases(c, &query)?;
+                let ign = lib_repo::get_ignored_local(c, band_id)?;
+                let rej = lib_repo::get_rejected_pairs(c, band_id)?;
+                let split = split_matchable_releases(rels, &all_roots, &ok_roots);
+                Ok::<_, DbError>((split.adoptable, ign, rej, split.active_linked_keys))
+            })
+            .await;
+
+        let Ok((adoptable, ignored, rejected, active_linked_keys)) = rel_res else {
+            return 0;
+        };
+
+        if adoptable.is_empty() {
+            return 0;
+        }
+
+        let mut all_candidates = Vec::new();
+        for folder in ok_folders {
+            let scan_path = folder.path.clone();
+            let scan_cancel = cancel.clone();
+            if let Ok(Ok(r)) =
+                tokio::task::spawn_blocking(move || scan_linked_folder(&scan_path, &scan_cancel))
+                    .await
+            {
+                all_candidates.extend(r.candidates);
+            }
+        }
+
+        if cancel.is_cancelled() || all_candidates.is_empty() {
+            return 0;
+        }
+
+        all_candidates.sort_by(|a, b| {
+            lib_repo::normalize_path_key(&a.path).cmp(&lib_repo::normalize_path_key(&b.path))
+        });
+
+        let unlinked_candidates: Vec<crate::library::AlbumCandidate> = all_candidates
+            .into_iter()
+            .filter(|c| !active_linked_keys.contains(&lib_repo::normalize_path_key(&c.path)))
+            .collect();
+
+        if unlinked_candidates.is_empty() {
+            return 0;
+        }
+
+        let mut assignment = assign_matches_with_rejected(
+            &unlinked_candidates,
+            &adoptable,
+            st.auto_match_min,
+            st.review_match_min,
+            &ignored,
+            &rejected,
+            &st.folder_style,
+        );
+        drop_downloaded_page_only(&mut assignment, &adoptable);
+
+        let mut applied_count = 0_u32;
+        if !assignment.matched.is_empty() || !assignment.restorable.is_empty() {
+            if let Ok(b_id) = pool
+                .writer
+                .call(|c| lib_repo::create_batch(c, "verify", &BatchSummary::default()))
+                .await
+            {
+                let batch_id = b_id.max(0) as u64;
+                let mut decisions: Vec<MatchDecision> = assignment
+                    .matched
+                    .iter()
+                    .map(|m| MatchDecision::Adopt {
+                        key: m.release_key,
+                        path: m.candidate_path.clone(),
+                        format: m.format_guess,
+                        folder_mtime: None,
+                    })
+                    .collect();
+                for m in &assignment.restorable {
+                    decisions.push(MatchDecision::Restore {
+                        key: m.release_key,
+                        path: m.candidate_path.clone(),
+                    });
+                }
+                applied_count = decisions.len() as u32;
+                self.apply_reconcile_internal(batch_id, decisions).await;
+            }
+        }
+
+        let ok_folders_clone = ok_folders.to_vec();
+        let orphans_paths: Vec<PathBuf> = assignment
+            .local_only
+            .iter()
+            .map(|o| o.path.clone())
+            .collect();
+        let _ = pool
+            .writer
+            .call(move |c| {
+                let mut counts: std::collections::HashMap<i64, u32> =
+                    ok_folders_clone.iter().map(|f| (f.id, 0)).collect();
+                for p in &orphans_paths {
+                    if let Some(owner) = lib_repo::owning_folder(&ok_folders_clone, p) {
+                        *counts.entry(owner.id).or_default() += 1;
+                    }
+                }
+                for f in &ok_folders_clone {
+                    let cnt = counts.get(&f.id).copied().unwrap_or(0);
+                    lib_repo::update_folder_local_only_count(c, f.id, cnt)?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await;
+
+        if let Ok(stats) = pool
+            .reader
+            .call(move |c| artists::stats_with_quota(c, band_id))
+            .await
+        {
+            bridge.emit(WorkerToUiEvent::ArtistStats { band_id, stats });
+        }
+
+        applied_count
     }
 
     async fn match_artist_folder_internal(
@@ -1905,10 +2109,11 @@ impl LibraryService {
         };
 
         let mut matched = assignment.matched;
+        let mut restorable = assignment.restorable;
         let mut linked = linked;
         let mut adopted_count = 0_u32;
-        if auto_apply_confident && !matched.is_empty() {
-            let decisions: Vec<MatchDecision> = matched
+        if auto_apply_confident && (!matched.is_empty() || !restorable.is_empty()) {
+            let mut decisions: Vec<MatchDecision> = matched
                 .iter()
                 .map(|m| MatchDecision::Adopt {
                     key: m.release_key,
@@ -1917,10 +2122,23 @@ impl LibraryService {
                     folder_mtime: None,
                 })
                 .collect();
+            for m in &restorable {
+                decisions.push(MatchDecision::Restore {
+                    key: m.release_key,
+                    path: m.candidate_path.clone(),
+                });
+            }
             adopted_count = decisions.len() as u32;
             self.apply_reconcile_internal(batch_id, decisions).await;
 
             for m in matched.drain(..) {
+                linked.push(crate::library::service::LinkedRelease {
+                    release_key: m.release_key,
+                    release_title: m.release_title,
+                    path: m.candidate_path,
+                });
+            }
+            for m in restorable.drain(..) {
                 linked.push(crate::library::service::LinkedRelease {
                     release_key: m.release_key,
                     release_title: m.release_title,
@@ -1971,7 +2189,7 @@ impl LibraryService {
             page_only: assignment.page_only,
             local_only: assignment.local_only,
             conflicts: assignment.conflicts,
-            restorable: assignment.restorable,
+            restorable,
             linked,
             unavailable_folders: unavailable_folder_ids,
             catalog,
@@ -6986,5 +7204,269 @@ mod tests {
             folders.is_empty(),
             "the download directory must never be linked, got {folders:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_verify_relinks_downloads_moved_from_deleted_out_dir_to_linked_folder() {
+        let dir = tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("move_from_deleted_out_dir.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let out_dir = root.join("Downloads");
+        let linked_dir = root.join("LibraryArtist");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&linked_dir).unwrap();
+
+        // 5 pre-existing local-only albums in linked_dir (not on Bandcamp)
+        for i in 1..=5 {
+            let orphan = linked_dir.join(format!("Offpage Local {i}"));
+            fs::create_dir_all(&orphan).unwrap();
+            fs::write(orphan.join("01.flac"), b"audio").unwrap();
+        }
+
+        let svc = LibraryService::new(pool.clone(), bridge).with_default_out_dir(out_dir.clone());
+        let band_id = 8800;
+        let o_dir = out_dir.clone();
+        let l_dir = linked_dir.clone();
+
+        pool.writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir.clone(),
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-8800",
+                        name: "Artist 8800",
+                        url: "https://artist8800.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                let af = lib_repo::add_folder(c, band_id, &l_dir, &o_dir)?;
+                lib_repo::update_folder_local_only_count(c, af.id, 5)?;
+
+                // 6 releases on Bandcamp, downloaded by the app into out_dir
+                for i in 1..=6 {
+                    let key = ItemKey::new(ItemType::Album, 8800 + i);
+                    let title = format!("Page Release {i}");
+                    let url = format!("https://artist8800.bandcamp.com/album/page-release-{i}");
+                    releases::upsert_discovered(
+                        c,
+                        &DiscoveredRelease {
+                            key,
+                            band_id,
+                            title: &title,
+                            artist_name: "Artist 8800",
+                            url: &url,
+                            cover_url: None,
+                            art_id: None,
+                        },
+                    )?;
+                    releases::set_classification(c, key, crate::types::Classification::Free)?;
+                    let dl_path = o_dir.join(&title);
+                    fs::create_dir_all(&dl_path).unwrap();
+                    fs::write(dl_path.join("01.flac"), b"audio").unwrap();
+                    let hist_id = crate::db::repo::history::insert_started(
+                        c,
+                        &crate::db::repo::history::NewHistoryEntry {
+                            key,
+                            band_id,
+                            format: crate::types::AudioFormat::Flac,
+                            source: crate::types::DownloadSource::Api,
+                            counts_against_quota: false,
+                        },
+                    )?;
+                    releases::commit_download(
+                        c,
+                        key,
+                        crate::types::AudioFormat::Flac,
+                        &dl_path,
+                        1024,
+                        hist_id,
+                    )?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        // User moves all 6 downloaded folders from out_dir into linked_dir and removes out_dir
+        for i in 1..=6 {
+            let title = format!("Page Release {i}");
+            fs::rename(out_dir.join(&title), linked_dir.join(&title)).unwrap();
+        }
+        fs::remove_dir_all(&out_dir).unwrap();
+
+        let cancel = CancellationToken::new();
+        let outcome = svc
+            .verify_files(SyncScope::All, VerifyTrigger::Manual, cancel)
+            .await;
+        assert_eq!(outcome.relinked_count, 6);
+        assert_eq!(outcome.missing_count, 0);
+
+        let mut has_unavail = false;
+        let mut has_missing = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, WorkerToUiEvent::FolderUnavailable { .. }) {
+                has_unavail = true;
+            }
+            if matches!(ev, WorkerToUiEvent::MissingFound { .. }) {
+                has_missing = true;
+            }
+        }
+        assert!(
+            !has_unavail,
+            "Must NOT prompt FolderUnavailable when moved releases are relinked into linked_dir"
+        );
+        assert!(!has_missing, "Must NOT prompt MissingFound");
+
+        for i in 1..=6 {
+            let key = ItemKey::new(ItemType::Album, 8800 + i);
+            let title = format!("Page Release {i}");
+            let row = pool
+                .reader
+                .call(move |c| releases::get_release(c, key))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(row.downloaded);
+            assert_eq!(row.local_status, Some(LocalStatus::Present));
+            assert_eq!(row.local_path, Some(linked_dir.join(title)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_adopts_and_restores_releases_marked_deleted_after_move_to_linked_folder() {
+        let dir = tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("deleted_then_verify.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let out_dir = root.join("Downloads");
+        let linked_dir = root.join("LibraryArtist");
+        fs::create_dir_all(&linked_dir).unwrap();
+        // out_dir does not exist
+
+        let svc = LibraryService::new(pool.clone(), bridge).with_default_out_dir(out_dir.clone());
+        let band_id = 8900;
+        let key_unmarked = ItemKey::new(ItemType::Album, 8901);
+        let key_archived = ItemKey::new(ItemType::Album, 8902);
+        let o_dir = out_dir.clone();
+        let l_dir = linked_dir.clone();
+
+        // Both albums are placed in the linked folder
+        for title in ["Album Unmarked", "Album Archived"] {
+            let p = linked_dir.join(title);
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("01.flac"), b"audio").unwrap();
+        }
+
+        pool.writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir.clone(),
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-8900",
+                        name: "Artist 8900",
+                        url: "https://artist8900.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                lib_repo::add_folder(c, band_id, &l_dir, &o_dir)?;
+
+                // Release 1: was marked as not downloaded (downloaded = 0)
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key: key_unmarked,
+                        band_id,
+                        title: "Album Unmarked",
+                        artist_name: "Artist 8900",
+                        url: "https://artist8900.bandcamp.com/album/album-unmarked",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+
+                // Release 2: was marked as archived (KeepMarked) pointing at deleted out_dir
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key: key_archived,
+                        band_id,
+                        title: "Album Archived",
+                        artist_name: "Artist 8900",
+                        url: "https://artist8900.bandcamp.com/album/album-archived",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key_archived,
+                    &o_dir.join("Album Archived"),
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                lib_repo::archive(c, &[key_archived], b_id)?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        // Pressing Verify files (Manual) finds both albums in linked_dir and adopts/restores them!
+        let cancel = CancellationToken::new();
+        let outcome = svc
+            .verify_files(SyncScope::All, VerifyTrigger::Manual, cancel)
+            .await;
+        assert_eq!(outcome.relinked_count, 2);
+
+        let r1 = pool
+            .reader
+            .call(move |c| releases::get_release(c, key_unmarked))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r1.downloaded);
+        assert_eq!(r1.local_status, Some(LocalStatus::Present));
+        assert_eq!(r1.local_path, Some(linked_dir.join("Album Unmarked")));
+
+        let r2 = pool
+            .reader
+            .call(move |c| releases::get_release(c, key_archived))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r2.downloaded);
+        assert_eq!(r2.local_status, Some(LocalStatus::Present));
+        assert_eq!(r2.local_path, Some(linked_dir.join("Album Archived")));
     }
 }
