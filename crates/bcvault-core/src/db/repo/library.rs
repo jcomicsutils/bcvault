@@ -217,6 +217,11 @@ pub fn unlink_folder(conn: &Connection, folder_id: i64) -> Result<bool, DbError>
              WHERE band_id = ?1 AND (path_key = ?2 OR substr(path_key, 1, length(?2) + 1) = ?2 || '/')",
             params![band_id, path_key],
         )?;
+        conn.execute(
+            "DELETE FROM artist_folder_rejected
+             WHERE band_id = ?1 AND (path_key = ?2 OR substr(path_key, 1, length(?2) + 1) = ?2 || '/')",
+            params![band_id, path_key],
+        )?;
         let affected = conn.execute(
             "DELETE FROM artist_folders WHERE id = ?1",
             params![folder_id],
@@ -544,6 +549,13 @@ fn adopt_internal(conn: &mut Connection, args: AdoptArgs<'_>) -> Result<(), DbEr
         }
     }
 
+    let reject_pk = normalize_path_key(args.path);
+    tx.execute(
+        "DELETE FROM artist_folder_rejected
+         WHERE item_type = ?1 AND item_id = ?2 AND path_key = ?3",
+        params![args.key.kind.as_str(), args.key.id, reject_pk],
+    )?;
+
     let new_snap = get_release_snapshot(&tx, args.key)?
         .ok_or_else(|| DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
@@ -834,6 +846,65 @@ pub fn get_ignored_local(conn: &Connection, band_id: i64) -> Result<HashSet<Stri
     Ok(set)
 }
 
+pub fn reject_match_pair(
+    conn: &Connection,
+    band_id: i64,
+    key: ItemKey,
+    path_key: &str,
+    batch_id: Option<i64>,
+) -> Result<bool, DbError> {
+    let affected = conn.execute(
+        "INSERT OR IGNORE INTO artist_folder_rejected (band_id, item_type, item_id, path_key)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![band_id, key.kind.as_str(), key.id, path_key],
+    )?;
+    if affected > 0
+        && let Some(bid) = batch_id
+    {
+        conn.execute(
+            "INSERT INTO library_events (batch_id, item_type, item_id, kind, old_json, new_json)
+             VALUES (?1, ?2, ?3, 'rejected', NULL, ?4)",
+            params![bid, key.kind.as_str(), key.id, path_key],
+        )?;
+    }
+    Ok(affected > 0)
+}
+
+pub fn unreject_match_pair(
+    conn: &Connection,
+    band_id: i64,
+    key: ItemKey,
+    path_key: &str,
+) -> Result<bool, DbError> {
+    let affected = conn.execute(
+        "DELETE FROM artist_folder_rejected
+         WHERE band_id = ?1 AND item_type = ?2 AND item_id = ?3 AND path_key = ?4",
+        params![band_id, key.kind.as_str(), key.id, path_key],
+    )?;
+    Ok(affected > 0)
+}
+
+pub fn get_rejected_pairs(
+    conn: &Connection,
+    band_id: i64,
+) -> Result<HashSet<(ItemKey, String)>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT item_type, item_id, path_key FROM artist_folder_rejected WHERE band_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![band_id], |r| {
+        let t_str: String = r.get(0)?;
+        let kind = ItemType::parse(&t_str).unwrap_or(ItemType::Album);
+        let id: i64 = r.get(1)?;
+        let pk: String = r.get(2)?;
+        Ok((ItemKey { kind, id }, pk))
+    })?;
+    let mut set = HashSet::new();
+    for r in rows {
+        set.insert(r?);
+    }
+    Ok(set)
+}
+
 pub fn create_batch(conn: &Connection, kind: &str, summary: &BatchSummary) -> Result<i64, DbError> {
     let summary_json = serde_json::to_string(summary)?;
     conn.execute(
@@ -917,6 +988,15 @@ pub fn undo_batch(conn: &mut Connection, batch_id: i64) -> Result<BatchSummary, 
         if let Some(json_str) = old_json {
             let snap: ReleaseSnapshot = serde_json::from_str(&json_str)?;
             apply_release_snapshot(&tx, key, &snap)?;
+        }
+        if ev_kind == "rejected"
+            && let Some(ref pk) = new_json
+        {
+            tx.execute(
+                "DELETE FROM artist_folder_rejected
+                 WHERE item_type = ?1 AND item_id = ?2 AND path_key = ?3",
+                params![key.kind.as_str(), key.id, pk],
+            )?;
         }
         if ev_kind == "attached" {
             let path_opt: Option<PathBuf> = if let Some(new_json_str) = new_json {
@@ -1621,5 +1701,56 @@ mod tests {
         // Path outside belongs to None
         let target_outside = Path::new("/music/other/album");
         assert_eq!(owning_folder(&folders, target_outside), None);
+    }
+
+    #[test]
+    fn test_reject_match_pair_undo_and_unlink_cleanup() {
+        let mut conn = test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        let root1 = tmp.path().join("root1");
+        let root2 = tmp.path().join("root2");
+        std::fs::create_dir(&root1).unwrap();
+        std::fs::create_dir(&root2).unwrap();
+
+        let f1 = add_folder(&mut conn, 1, &root1, &out_dir).unwrap();
+        let f2 = add_folder(&mut conn, 1, &root2, &out_dir).unwrap();
+
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url)
+             VALUES ('album', 101, 1, 'Split 1', 'Artist 1', 'https://art1.bandcamp.com/album/split-1'),
+                    ('album', 102, 1, 'Split 2', 'Artist 1', 'https://art1.bandcamp.com/album/split-2')",
+            [],
+        )
+        .unwrap();
+
+        let k1 = ItemKey::new(ItemType::Album, 101);
+        let k2 = ItemKey::new(ItemType::Album, 102);
+        let pk1 = normalize_path_key(&f1.path.join("Wall Split Action 001"));
+        let pk2 = normalize_path_key(&f2.path.join("Other Split"));
+
+        let batch_id = create_batch(&conn, "adopt", &BatchSummary::default()).unwrap();
+        assert!(reject_match_pair(&conn, 1, k1, &pk1, Some(batch_id)).unwrap());
+        assert!(!reject_match_pair(&conn, 1, k1, &pk1, Some(batch_id)).unwrap()); // idempotent
+        assert!(reject_match_pair(&conn, 1, k2, &pk2, None).unwrap());
+
+        let rejected = get_rejected_pairs(&conn, 1).unwrap();
+        assert!(rejected.contains(&(k1, pk1.clone())));
+        assert!(rejected.contains(&(k2, pk2.clone())));
+
+        // Undo batch removes (k1, pk1) which was recorded in batch_id, leaving (k2, pk2)
+        undo_batch(&mut conn, batch_id).unwrap();
+        let rejected_after_undo = get_rejected_pairs(&conn, 1).unwrap();
+        assert!(!rejected_after_undo.contains(&(k1, pk1.clone())));
+        assert!(rejected_after_undo.contains(&(k2, pk2.clone())));
+
+        // Re-reject k1 under f1, then unlink f1 -> cleans up f1's rejected pair only
+        reject_match_pair(&conn, 1, k1, &pk1, None).unwrap();
+        unlink_folder(&conn, f1.id).unwrap();
+        let rejected_after_unlink = get_rejected_pairs(&conn, 1).unwrap();
+        assert!(!rejected_after_unlink.contains(&(k1, pk1)));
+        assert!(rejected_after_unlink.contains(&(k2, pk2)));
     }
 }

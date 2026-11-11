@@ -2065,6 +2065,19 @@ impl LibraryService {
                             summary.ignored += 1;
                             touched_bands.insert(band_id);
                         }
+                        MatchDecision::Reject { band_id, key, path } => {
+                            let path_key =
+                                crate::library::scan::normalize_candidate_path_key(&path);
+                            lib_repo::reject_match_pair(
+                                c,
+                                band_id,
+                                key,
+                                &path_key,
+                                Some(actual_batch_id),
+                            )?;
+                            summary.ignored += 1;
+                            touched_bands.insert(band_id);
+                        }
                     }
                 }
 

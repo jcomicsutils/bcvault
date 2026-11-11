@@ -18,9 +18,13 @@ pub const MIGRATIONS: &[(i32, &str)] = &[
         include_str!("../../migrations/0006_artist_folders_multi.sql"),
     ),
     (7, include_str!("../../migrations/0007_unavailable.sql")),
+    (
+        8,
+        include_str!("../../migrations/0008_rejected_matches.sql"),
+    ),
 ];
 
-pub const MAX_VERSION: i32 = 7;
+pub const MAX_VERSION: i32 = 8;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     run_with(conn, MIGRATIONS)
@@ -60,14 +64,14 @@ mod tests {
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
 
         // Re-running is a no-op
         run(&mut conn).unwrap();
         let v2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v2, 7);
+        assert_eq!(v2, 8);
 
         // Bump to version 99 and verify TooNew
         conn.pragma_update(None, "user_version", 99).unwrap();
@@ -76,7 +80,7 @@ mod tests {
             err,
             DbError::TooNew {
                 found: 99,
-                max_supported: 7
+                max_supported: 8
             }
         ));
     }
@@ -340,5 +344,43 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migration_0008_creates_artist_folder_rejected_with_cascades() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        run_with(&mut conn, &MIGRATIONS[..7]).unwrap();
+
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES (1, 'artist1', 'Artist 1', 'https://artist1.bandcamp.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, track_count, metadata_fetched_at)
+             VALUES ('album', 201, 1, 'Split', 'Artist 1', 'https://artist1.bandcamp.com/album/split-1', 'free', 4, 1000)",
+            [],
+        ).unwrap();
+
+        run(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO artist_folder_rejected (band_id, item_type, item_id, path_key)
+             VALUES (1, 'album', 201, '/music/artist1/wall split action 001')",
+            [],
+        ).unwrap();
+
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artist_folder_rejected WHERE band_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1);
+
+        // Deleting the release cascades to artist_folder_rejected
+        conn.execute("DELETE FROM releases WHERE item_id = 201", []).unwrap();
+        let cnt_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artist_folder_rejected WHERE band_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt_after, 0);
     }
 }

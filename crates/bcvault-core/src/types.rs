@@ -430,6 +430,11 @@ pub enum MatchDecision {
         band_id: i64,
         path: PathBuf,
     },
+    Reject {
+        band_id: i64,
+        key: ItemKey,
+        path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
