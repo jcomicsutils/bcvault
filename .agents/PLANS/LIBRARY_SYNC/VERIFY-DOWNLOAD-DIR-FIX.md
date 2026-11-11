@@ -2,7 +2,7 @@
 
 For the coding agent. Repo: bcvault (Rust workspace). Scope: `crates/bcvault-core/src/types.rs`, `crates/bcvault-core/src/worker/library.rs`, `crates/bcvault/src/ui/modals.rs`, `crates/bcvault-fx/src/overlays/modals.rs`, and docs. Place this file at `.agents/PLANS/LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md`.
 
-> Status: not started. Steps are `Task: none` commits (step numbers go in `PROGRESS.md`), like `DOWNLOAD-DIR-FIX.md` and `MISSING-FOLDER-FIX.md`. Amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3.
+> Status 11 Nov 2026: **implemented** on `main` (`Task: none` commits). Steps are `Task: none` commits (step numbers go in `PROGRESS.md`), like `DOWNLOAD-DIR-FIX.md` and `MISSING-FOLDER-FIX.md`. Amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3.
 
 ## 0. Ground rules
 

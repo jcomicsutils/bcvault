@@ -17,7 +17,7 @@
 | `LIBRARY_SYNC/MULTI_FOLDER.md` | Several linked folders per artist; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits) |
 | `LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md` | Keep the download dir out of artist links; match library albums to releases downloaded elsewhere; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits)|
 | `LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md` | Persistent "wrong, don't ask again" rejection for review proposals, interactive conflict resolution, and searchable/slug/URL release picker; amends `LIBRARY_SYNC_PLAN.md` §5, §6, and §10. (Done, `Task: none` commits)|
-| `LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md` | Relink and adopt albums moved from the download directory on verify; amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3. (Not started, `Task: none` commits)|
+| `LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md` | Relink and adopt albums moved from the download directory on verify; amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3. (Done, `Task: none` commits)|
 | `MAIL_REDEEM/MAIL_REDEEM_PLAN.md` | Mailbox redeem and cleanup (Phases M0 to M6). Not started. |
 | `AUTO_SYNC/AUTO_SYNC.md` | Scheduled auto sync, quick check, removed-release tracking. Not started. |
 | `ARCHIVE/ARCHIVE.md` | Selectable release archive (text and covers). Not started; merges after `AUTO_SYNC.md`. |
