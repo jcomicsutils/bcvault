@@ -406,6 +406,35 @@ impl LibraryService {
                 UnavailableAction::Keep => {
                     self.acked_unavailable.lock().await.insert(dec.root);
                 }
+                UnavailableAction::MovedToLinked => {
+                    let keys = dec.keys;
+                    let pool_clone = pool.clone();
+                    let bands_res = pool_clone
+                        .reader
+                        .call(move |c| {
+                            let mut bands = Vec::new();
+                            for &k in &keys {
+                                if let Some(r) = releases::get_release(c, k)?
+                                    && !lib_repo::get_folders(c, r.band_id)?.is_empty()
+                                    && !bands.contains(&r.band_id)
+                                {
+                                    bands.push(r.band_id);
+                                }
+                            }
+                            Ok::<_, DbError>(bands)
+                        })
+                        .await;
+                    if let Ok(bands) = bands_res {
+                        for band_id in bands {
+                            self.match_artist_folder_internal(
+                                band_id,
+                                true,
+                                CancellationToken::new(),
+                            )
+                            .await;
+                        }
+                    }
+                }
                 UnavailableAction::Deleted { policy, unlink } => {
                     let keys = dec.keys;
                     let b_id = batch_id as i64;
@@ -7468,5 +7497,102 @@ mod tests {
         assert!(r2.downloaded);
         assert_eq!(r2.local_status, Some(LocalStatus::Present));
         assert_eq!(r2.local_path, Some(linked_dir.join("Album Archived")));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_unavailable_moved_to_linked_scans_and_adopts() {
+        let dir = tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("moved_to_linked_action.db");
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            migrations::run(&mut conn).unwrap();
+        }
+
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+
+        let out_dir = root.join("Downloads");
+        let linked_dir = root.join("LibraryArtist");
+        fs::create_dir_all(&linked_dir).unwrap();
+
+        let moved_album = linked_dir.join("Moved Album");
+        fs::create_dir_all(&moved_album).unwrap();
+        fs::write(moved_album.join("01.flac"), b"audio").unwrap();
+
+        let svc = LibraryService::new(pool.clone(), bridge).with_default_out_dir(out_dir.clone());
+        let band_id = 9000;
+        let key = ItemKey::new(ItemType::Album, 9001);
+        let o_dir = out_dir.clone();
+        let l_dir = linked_dir.clone();
+
+        pool.writer
+            .call(move |c| {
+                let st = Settings {
+                    out_dir: o_dir.clone(),
+                    auto_relink: false,
+                    ..Settings::default()
+                };
+                settings::set_settings(c, &st)?;
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: "artist-9000",
+                        name: "Artist 9000",
+                        url: "https://artist9000.bandcamp.com",
+                        cover_url: None,
+                    },
+                )?;
+                lib_repo::add_folder(c, band_id, &l_dir, &o_dir)?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key,
+                        band_id,
+                        title: "Moved Album",
+                        artist_name: "Artist 9000",
+                        url: "https://artist9000.bandcamp.com/album/moved-album",
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                let b_id = lib_repo::create_batch(c, "test", &BatchSummary::default())?;
+                lib_repo::adopt(
+                    c,
+                    key,
+                    &o_dir.join("Moved Album"),
+                    Some(crate::types::AudioFormat::Flac),
+                    crate::types::Origin::App,
+                    None,
+                    b_id,
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+
+        svc.resolve_unavailable(
+            1,
+            vec![UnavailableDecision {
+                root: UnavailableRoot::OutDir,
+                keys: vec![key],
+                action: UnavailableAction::MovedToLinked,
+            }],
+        )
+        .await;
+
+        while rx.try_recv().is_ok() {}
+
+        let row = pool
+            .reader
+            .call(move |c| releases::get_release(c, key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.downloaded);
+        assert_eq!(row.local_status, Some(LocalStatus::Present));
+        assert_eq!(row.local_path, Some(moved_album));
     }
 }

@@ -4,6 +4,7 @@
 Task: none (VERIFY-DOWNLOAD-DIR-FIX plan ready; see PLANS/LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md)  ·  Branch: main  ·  Updated: 2026-11-11
 
 ## Done
+- none: add MovedToLinked action to resolve_unavailable and UI modals (`VERIFY-DOWNLOAD-DIR-FIX.md` step 2)
 - none: relink out_dir releases to linked folders and rescan on verify (`VERIFY-DOWNLOAD-DIR-FIX.md` step 1)
 - none: plan verify and download-dir relink fix (`VERIFY-DOWNLOAD-DIR-FIX.md`)
 - none: add comprehensive project documentation (`docs/architecture.md`, `docs/database.md`, `docs/user-guide.md`, `docs/endpoints.md`, `README.md`)

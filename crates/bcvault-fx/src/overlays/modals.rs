@@ -2834,21 +2834,47 @@ fn show_unavailable_modal(
                                     }
                                 });
 
-                                // Choice 2: Moved folder (Linked only)
-                                if let UnavailableRoot::Linked { folder_id } = card.folder.root {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new("I moved the folder:").size(12.0));
-                                        if paint::sharp_small_button(ui, "Choose new folder...").clicked() {
-                                            let picked = modal.picked_folder.clone();
-                                            rt_handle.spawn(async move {
-                                                if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
-                                                    && let Ok(mut lock) = picked.lock()
-                                                {
-                                                    *lock = Some((folder_id, folder.path().to_path_buf()));
+                                // Choice 2: Moved folder (Linked) or moved files to linked folder (OutDir)
+                                match card.folder.root {
+                                    UnavailableRoot::Linked { folder_id } => {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("I moved the folder:").size(12.0));
+                                            if paint::sharp_small_button(ui, "Choose new folder...").clicked() {
+                                                let picked = modal.picked_folder.clone();
+                                                rt_handle.spawn(async move {
+                                                    if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                                        && let Ok(mut lock) = picked.lock()
+                                                    {
+                                                        *lock = Some((folder_id, folder.path().to_path_buf()));
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
+                                    UnavailableRoot::OutDir => {
+                                        let has_linked_artist = card.folder.releases.iter().any(|r| {
+                                            state
+                                                .folders
+                                                .get(&r.band_id)
+                                                .is_some_and(|fs| !fs.is_empty())
+                                        });
+                                        if has_linked_artist {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new("I moved the files to the linked folder:")
+                                                        .size(12.0),
+                                                );
+                                                if paint::sharp_small_button(ui, "Scan linked folder").clicked() {
+                                                    decisions_to_send.push(UnavailableDecision {
+                                                        root: card.folder.root,
+                                                        keys: card.folder.releases.iter().map(|r| r.key).collect(),
+                                                        action: UnavailableAction::MovedToLinked,
+                                                    });
+                                                    cards_to_remove.push(idx);
                                                 }
                                             });
                                         }
-                                    });
+                                    }
                                 }
 
                                 // Choice 3: Deleted on purpose

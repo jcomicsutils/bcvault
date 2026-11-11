@@ -325,6 +325,8 @@ pub struct UnavailableFolder {
 pub enum UnavailableAction {
     /// Drive unplugged, will reconnect: change nothing.
     Keep,
+    /// Files were moved into the artist's linked folder(s): scan and match linked folders.
+    MovedToLinked,
     /// Deleted on purpose: apply `policy` to `keys`; optionally unlink the folder.
     Deleted { policy: DeletedPolicy, unlink: bool },
 }
