@@ -1107,6 +1107,132 @@ fn truncated_cell(
     .inner
 }
 
+fn fx_effective_catalog(
+    state: &FxState,
+    report: &bcvault_core::library::ReconcileReport,
+) -> Vec<bcvault_core::types::ReleaseRow> {
+    if !report.catalog.is_empty() {
+        return report.catalog.clone();
+    }
+    state
+        .rows
+        .iter()
+        .filter(|r| r.rel.band_id == report.band_id)
+        .map(|r| r.rel.clone())
+        .collect()
+}
+
+fn render_fx_release_attach_picker(
+    ui: &mut egui::Ui,
+    th: &crate::theme::FxTheme,
+    id_salt: &str,
+    path: &std::path::Path,
+    current_key: &mut bcvault_core::types::ItemKey,
+    search_map: &mut std::collections::HashMap<std::path::PathBuf, String>,
+    catalog: &[bcvault_core::types::ReleaseRow],
+    priority_keys: &[bcvault_core::types::ItemKey],
+) {
+    use bcvault_core::library::{
+        filter_releases_for_picker, format_release_picker_label, resolve_release_by_query,
+    };
+
+    let mut ordered_catalog = Vec::with_capacity(catalog.len());
+    for &pk in priority_keys {
+        if let Some(r) = catalog.iter().find(|r| r.key == pk) {
+            ordered_catalog.push(r.clone());
+        }
+    }
+    for r in catalog {
+        if !priority_keys.contains(&r.key) {
+            ordered_catalog.push(r.clone());
+        }
+    }
+
+    let query = search_map.entry(path.to_path_buf()).or_default();
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Search / URL / Slug:")
+                .color(th.text_dim)
+                .size(11.5),
+        );
+        let resp = ui.add(
+            egui::TextEdit::singleline(query)
+                .hint_text("Search title, slug, or paste Bandcamp URL...")
+                .desired_width(280.0),
+        );
+        if !query.is_empty() && paint::sharp_button(ui, "✕").clicked() {
+            query.clear();
+        }
+        if resp.changed() {
+            if let Some(exact) = resolve_release_by_query(query, &ordered_catalog) {
+                *current_key = exact;
+            } else {
+                let filtered = filter_releases_for_picker(query, &ordered_catalog);
+                if !filtered.iter().any(|r| r.key == *current_key)
+                    && let Some(first) = filtered.first()
+                {
+                    *current_key = first.key;
+                }
+            }
+        }
+    });
+
+    let exact_match = resolve_release_by_query(query, &ordered_catalog);
+    let filtered = filter_releases_for_picker(query, &ordered_catalog);
+
+    if !query.trim().is_empty() {
+        if exact_match.is_some() {
+            ui.label(
+                RichText::new("✓ Exact URL/slug match")
+                    .color(th.ok)
+                    .size(11.0),
+            );
+        } else if filtered.is_empty() {
+            ui.label(
+                RichText::new("⚠ No release on this artist page matches that query/URL")
+                    .color(th.warn)
+                    .size(11.0),
+            );
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Attach to:");
+        let selected_rel = ordered_catalog.iter().find(|r| r.key == *current_key);
+        let selected_label = selected_rel
+            .map(format_release_picker_label)
+            .unwrap_or_else(|| format!("Release #{}", current_key.id));
+
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(&selected_label)
+            .width(360.0)
+            .show_ui(ui, |ui| {
+                if filtered.is_empty() {
+                    ui.label(RichText::new("No matching releases").color(th.text_dim));
+                } else {
+                    for r in filtered {
+                        let lbl = format_release_picker_label(r);
+                        if ui
+                            .selectable_label(r.key == *current_key, &lbl)
+                            .on_hover_text(&r.url)
+                            .clicked()
+                        {
+                            *current_key = r.key;
+                        }
+                    }
+                }
+            });
+
+        if let Some(rel) = selected_rel
+            && paint::sharp_button(ui, "Open")
+                .on_hover_text(&rel.url)
+                .clicked()
+        {
+            let _ = open::that_detached(&rel.url);
+        }
+    });
+}
+
 fn show_reconcile_report_modal(
     ctx: &egui::Context,
     state: &mut FxState,
@@ -1438,6 +1564,40 @@ fn show_reconcile_report_modal(
                                 RichText::new("No items requiring review.").color(th.text_dim),
                             );
                         } else {
+                            let catalog = fx_effective_catalog(state, &modal.report);
+                            ui.horizontal_wrapped(|ui| {
+                                if paint::sharp_button(ui, "Mark all as wrong (don't ask again)")
+                                    .on_hover_text("Never propose these folder pairings again")
+                                    .clicked()
+                                {
+                                    modal.mark_all_review_wrong();
+                                }
+                                if paint::sharp_button(ui, "Mark skipped as wrong")
+                                    .on_hover_text("Mark all currently skipped review items as wrong (don't ask again)")
+                                    .clicked()
+                                {
+                                    modal.mark_unselected_review_wrong();
+                                }
+                                if paint::sharp_button(ui, "Skip all for now").clicked() {
+                                    modal.skip_all_review();
+                                }
+                                let adopt_n = modal.selected_review.len();
+                                let reject_n = modal.rejected_review.len();
+                                let skip_n = modal
+                                    .report
+                                    .review
+                                    .len()
+                                    .saturating_sub(adopt_n + reject_n);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{adopt_n} adopt · {reject_n} wrong · {skip_n} skip"
+                                    ))
+                                    .color(th.text_dim)
+                                    .size(11.5),
+                                );
+                            });
+                            ui.add_space(4.0);
+
                             for r in &modal.report.review {
                                 egui::Frame::NONE
                                     .corner_radius(CornerRadius::ZERO)
@@ -1445,12 +1605,15 @@ fn show_reconcile_report_modal(
                                     .stroke(Stroke::new(1.0_f32, th.border))
                                     .inner_margin(6.0)
                                     .show(ui, |ui| {
+                                        let rel_opt = catalog.iter().find(|row| row.key == r.release_key);
                                         ui.horizontal(|ui| {
-                                            let art_id = state
-                                                .rows
-                                                .iter()
-                                                .find(|row| row.rel.key == r.release_key)
-                                                .and_then(|row| row.art_id);
+                                            let art_id = rel_opt.and_then(|row| row.art_id).or_else(|| {
+                                                state
+                                                    .rows
+                                                    .iter()
+                                                    .find(|row| row.rel.key == r.release_key)
+                                                    .and_then(|row| row.art_id)
+                                            });
                                             let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), egui::Sense::hover());
                                             paint_cover_slot(
                                                 ui.painter(),
@@ -1462,14 +1625,29 @@ fn show_reconcile_report_modal(
                                                 1.0,
                                                 Vec2::ZERO,
                                             );
-                                            ui.add(egui::Label::new(RichText::new(&r.release_title).strong()).truncate())
-                                                .on_hover_text(&r.release_title);
+                                            let label_txt = rel_opt
+                                                .map(bcvault_core::library::format_release_picker_label)
+                                                .unwrap_or_else(|| r.release_title.clone());
+                                            ui.add(egui::Label::new(RichText::new(&label_txt).strong()).truncate())
+                                                .on_hover_text(
+                                                    rel_opt
+                                                        .map(|row| row.url.as_str())
+                                                        .unwrap_or(&r.release_title),
+                                                );
+                                            if let Some(rel) = rel_opt
+                                                && paint::sharp_button(ui, "Open")
+                                                    .on_hover_text(&rel.url)
+                                                    .clicked()
+                                            {
+                                                let _ = open::that_detached(&rel.url);
+                                            }
                                         });
 
                                         let chosen = modal.selected_review.get(&r.release_key).copied();
+                                        let is_rejected = modal.rejected_review.contains(&r.release_key);
 
                                         for (c_idx, c) in r.candidates.iter().enumerate() {
-                                            let is_chosen = chosen == Some(c_idx);
+                                            let is_chosen = !is_rejected && chosen == Some(c_idx);
                                             let fmt_str = c
                                                 .format_guess
                                                 .map(|f| format!("[{}]", f.label()))
@@ -1481,6 +1659,7 @@ fn show_reconcile_report_modal(
                                             );
                                             ui.horizontal(|ui| {
                                                 if ui.radio(is_chosen, "").clicked() {
+                                                    modal.rejected_review.remove(&r.release_key);
                                                     modal.selected_review.insert(r.release_key, c_idx);
                                                 }
                                                 let cand_w = (ui.available_width() - 65.0).max(100.0);
@@ -1507,10 +1686,32 @@ fn show_reconcile_report_modal(
                                             });
                                         }
 
-                                        let is_skipped = chosen.is_none();
-                                        if ui.radio(is_skipped, "Skip for now").clicked() {
-                                            modal.selected_review.remove(&r.release_key);
-                                        }
+                                        let is_skipped = chosen.is_none() && !is_rejected;
+                                        ui.horizontal(|ui| {
+                                            if ui.radio(is_skipped, "Skip for now").clicked() {
+                                                modal.selected_review.remove(&r.release_key);
+                                                modal.rejected_review.remove(&r.release_key);
+                                            }
+                                            if ui
+                                                .radio(
+                                                    is_rejected,
+                                                    RichText::new("Wrong, don't ask again").color(
+                                                        if is_rejected {
+                                                            th.warn
+                                                        } else {
+                                                            th.text
+                                                        },
+                                                    ),
+                                                )
+                                                .on_hover_text(
+                                                    "Permanently dismiss this pairing so future scans never ask again",
+                                                )
+                                                .clicked()
+                                            {
+                                                modal.selected_review.remove(&r.release_key);
+                                                modal.rejected_review.insert(r.release_key);
+                                            }
+                                        });
                                     });
                                 ui.add_space(4.0);
                             }
@@ -1523,6 +1724,7 @@ fn show_reconcile_report_modal(
                                     .color(th.text_dim),
                             );
                         } else {
+                            let catalog = fx_effective_catalog(state, &modal.report);
                             ui.label(
                                 RichText::new(
                                     "These releases exist on Bandcamp but have no local audio files in the linked folder:",
@@ -1531,16 +1733,16 @@ fn show_reconcile_report_modal(
                             );
                             ui.add_space(4.0);
                             for key in &modal.report.page_only {
-                                let art_id = state
-                                    .rows
-                                    .iter()
-                                    .find(|r| r.rel.key == *key)
-                                    .and_then(|r| r.art_id);
-                                let title = state
-                                    .rows
-                                    .iter()
-                                    .find(|r| r.rel.key == *key)
-                                    .map(|r| r.rel.title.clone())
+                                let rel_opt = catalog.iter().find(|r| r.key == *key);
+                                let art_id = rel_opt.and_then(|r| r.art_id).or_else(|| {
+                                    state
+                                        .rows
+                                        .iter()
+                                        .find(|r| r.rel.key == *key)
+                                        .and_then(|r| r.art_id)
+                                });
+                                let label = rel_opt
+                                    .map(bcvault_core::library::format_release_picker_label)
                                     .unwrap_or_else(|| format!("Release #{}", key.id));
                                 ui.horizontal(|ui| {
                                     let (cov_r, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
@@ -1554,8 +1756,17 @@ fn show_reconcile_report_modal(
                                         1.0,
                                         Vec2::ZERO,
                                     );
-                                    ui.add(egui::Label::new(RichText::new(&title).strong()).truncate())
-                                        .on_hover_text(&title);
+                                    ui.add(egui::Label::new(RichText::new(&label).strong()).truncate())
+                                        .on_hover_text(
+                                            rel_opt.map(|r| r.url.as_str()).unwrap_or(&label),
+                                        );
+                                    if let Some(rel) = rel_opt
+                                        && paint::sharp_button(ui, "Open")
+                                            .on_hover_text(&rel.url)
+                                            .clicked()
+                                    {
+                                        let _ = open::that_detached(&rel.url);
+                                    }
                                 });
                             }
                         }
@@ -1567,6 +1778,7 @@ fn show_reconcile_report_modal(
                                     .color(th.text_dim),
                             );
                         } else {
+                            let catalog = fx_effective_catalog(state, &modal.report);
                             ui.label(
                                 RichText::new(
                                     "These local audio folders could not be matched to any release on the Bandcamp page:",
@@ -1672,54 +1884,34 @@ fn show_reconcile_report_modal(
                                                 matches!(current_action, FxLocalAction::Attach(_));
                                             if ui.radio(is_attach, "Attach to release...").clicked()
                                                 && !is_attach
-                                                && let Some(first_rel) = state
-                                                    .rows
-                                                    .iter()
-                                                    .find(|r| r.rel.band_id == modal.report.band_id)
+                                                && let Some(first_rel) = catalog.first()
                                             {
                                                 modal.local_decisions.insert(
                                                     orphan.path.clone(),
-                                                    FxLocalAction::Attach(first_rel.rel.key),
+                                                    FxLocalAction::Attach(first_rel.key),
                                                 );
                                             }
                                         });
 
-                                        if let FxLocalAction::Attach(ref current_key) = current_action {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Attach to:");
-                                                let current_title = state
-                                                    .rows
-                                                    .iter()
-                                                    .find(|r| r.rel.key == *current_key)
-                                                    .map(|r| r.rel.title.clone())
-                                                    .unwrap_or_else(|| "Select release".to_string());
-                                                egui::ComboBox::from_id_salt(format!(
-                                                    "fx_attach_combo_{}",
-                                                    orphan.path.display()
-                                                ))
-                                                .selected_text(&current_title)
-                                                .width(280.0)
-                                                .show_ui(ui, |ui| {
-                                                    for r in state
-                                                        .rows
-                                                        .iter()
-                                                        .filter(|r| r.rel.band_id == modal.report.band_id)
-                                                    {
-                                                        if ui
-                                                            .selectable_label(
-                                                                r.rel.key == *current_key,
-                                                                &r.rel.title,
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            modal.local_decisions.insert(
-                                                                orphan.path.clone(),
-                                                                FxLocalAction::Attach(r.rel.key),
-                                                            );
-                                                        }
-                                                    }
-                                                });
-                                            });
+                                        if let FxLocalAction::Attach(mut target_key) = current_action {
+                                            let combo_id = format!(
+                                                "fx_attach_combo_{}",
+                                                orphan.path.display()
+                                            );
+                                            render_fx_release_attach_picker(
+                                                ui,
+                                                &th,
+                                                &combo_id,
+                                                &orphan.path,
+                                                &mut target_key,
+                                                &mut modal.local_attach_search,
+                                                &catalog,
+                                                &[],
+                                            );
+                                            modal.local_decisions.insert(
+                                                orphan.path.clone(),
+                                                FxLocalAction::Attach(target_key),
+                                            );
                                         }
                                     });
                                 ui.add_space(4.0);
@@ -1733,6 +1925,7 @@ fn show_reconcile_report_modal(
                                     .color(th.text_dim),
                             );
                         } else {
+                            let catalog = fx_effective_catalog(state, &modal.report);
                             for c in &modal.report.conflicts {
                                 egui::Frame::NONE
                                     .corner_radius(CornerRadius::ZERO)
@@ -1750,9 +1943,40 @@ fn show_reconcile_report_modal(
                                         )
                                         .on_hover_text(&c.description);
 
-                                        if !c.candidate_paths.is_empty() {
+                                        if !c.release_keys.is_empty() {
                                             ui.label(
-                                                RichText::new("Paths involved:")
+                                                RichText::new("Colliding Bandcamp releases:")
+                                                    .color(th.text_dim)
+                                                    .size(11.0),
+                                            );
+                                            for rk in &c.release_keys {
+                                                if let Some(rel) =
+                                                    catalog.iter().find(|r| r.key == *rk)
+                                                {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "  • {}",
+                                                                bcvault_core::library::format_release_picker_label(rel)
+                                                            ))
+                                                            .size(11.0),
+                                                        )
+                                                        .on_hover_text(&rel.url);
+                                                        if paint::sharp_button(ui, "Open")
+                                                            .on_hover_text(&rel.url)
+                                                            .clicked()
+                                                        {
+                                                            let _ = open::that_detached(&rel.url);
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+
+                                        if !c.candidate_paths.is_empty() {
+                                            ui.add_space(2.0);
+                                            ui.label(
+                                                RichText::new("Resolve local folders:")
                                                     .color(th.text_dim)
                                                     .size(11.0),
                                             );
@@ -1763,13 +1987,100 @@ fn show_reconcile_report_modal(
                                                     .unwrap_or_else(|| p.display().to_string());
                                                 ui.add(
                                                     egui::Label::new(
-                                                        RichText::new(format!("  - {name}"))
+                                                        RichText::new(format!("Folder: {name}"))
+                                                            .strong()
                                                             .monospace()
-                                                            .size(11.0),
+                                                            .size(11.5),
                                                     )
                                                     .truncate(),
                                                 )
                                                 .on_hover_text(p.display().to_string());
+
+                                                let current_action = modal
+                                                    .conflict_decisions
+                                                    .get(p)
+                                                    .cloned()
+                                                    .unwrap_or(FxLocalAction::Leave);
+
+                                                ui.horizontal(|ui| {
+                                                    if ui
+                                                        .radio(
+                                                            matches!(
+                                                                current_action,
+                                                                FxLocalAction::Leave
+                                                            ),
+                                                            "Leave unresolved",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        modal.conflict_decisions.insert(
+                                                            p.clone(),
+                                                            FxLocalAction::Leave,
+                                                        );
+                                                    }
+                                                    if ui
+                                                        .radio(
+                                                            matches!(
+                                                                current_action,
+                                                                FxLocalAction::Ignore
+                                                            ),
+                                                            "Ignore forever",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        modal.conflict_decisions.insert(
+                                                            p.clone(),
+                                                            FxLocalAction::Ignore,
+                                                        );
+                                                    }
+                                                    let is_attach = matches!(
+                                                        current_action,
+                                                        FxLocalAction::Attach(_)
+                                                    );
+                                                    if ui
+                                                        .radio(is_attach, "Match to release...")
+                                                        .clicked()
+                                                        && !is_attach
+                                                    {
+                                                        let default_key = c
+                                                            .release_keys
+                                                            .first()
+                                                            .copied()
+                                                            .or_else(|| {
+                                                                catalog.first().map(|r| r.key)
+                                                            });
+                                                        if let Some(key) = default_key {
+                                                            modal.conflict_decisions.insert(
+                                                                p.clone(),
+                                                                FxLocalAction::Attach(key),
+                                                            );
+                                                        }
+                                                    }
+                                                });
+
+                                                if let FxLocalAction::Attach(mut target_key) =
+                                                    current_action
+                                                {
+                                                    let combo_id = format!(
+                                                        "fx_conflict_attach_combo_{}",
+                                                        p.display()
+                                                    );
+                                                    render_fx_release_attach_picker(
+                                                        ui,
+                                                        &th,
+                                                        &combo_id,
+                                                        p,
+                                                        &mut target_key,
+                                                        &mut modal.local_attach_search,
+                                                        &catalog,
+                                                        &c.release_keys,
+                                                    );
+                                                    modal.conflict_decisions.insert(
+                                                        p.clone(),
+                                                        FxLocalAction::Attach(target_key),
+                                                    );
+                                                }
+                                                ui.add_space(2.0);
                                             }
                                         }
                                     });
@@ -1906,69 +2217,7 @@ fn show_reconcile_report_modal(
                     )
                     .clicked()
                 {
-                    let mut decisions = Vec::new();
-
-                    for m in &modal.report.matched {
-                        if modal.selected_matched.contains(&m.release_key) {
-                            decisions.push(MatchDecision::Adopt {
-                                key: m.release_key,
-                                path: m.candidate_path.clone(),
-                                format: m.format_guess,
-                                folder_mtime: None,
-                            });
-                        }
-                    }
-
-                    for r in &modal.report.review {
-                        if let Some(cand) = modal
-                            .selected_review
-                            .get(&r.release_key)
-                            .and_then(|&cand_idx| r.candidates.get(cand_idx))
-                        {
-                            decisions.push(MatchDecision::Adopt {
-                                key: r.release_key,
-                                path: cand.candidate_path.clone(),
-                                format: cand.format_guess,
-                                folder_mtime: None,
-                            });
-                        }
-                    }
-
-                    for m in &modal.report.restorable {
-                        if modal.selected_restorable.contains(&m.release_key) {
-                            decisions.push(MatchDecision::Restore {
-                                key: m.release_key,
-                                path: m.candidate_path.clone(),
-                            });
-                        }
-                    }
-
-                    for (path, action) in &modal.local_decisions {
-                        match action {
-                            FxLocalAction::Ignore => {
-                                decisions.push(MatchDecision::Ignore {
-                                    band_id: modal.report.band_id,
-                                    path: path.clone(),
-                                });
-                            }
-                            FxLocalAction::Attach(key) => {
-                                let format_guess = modal
-                                    .report
-                                    .local_only
-                                    .iter()
-                                    .find(|o| &o.path == path)
-                                    .and_then(|o| o.format_guess);
-                                decisions.push(MatchDecision::Attach {
-                                    key: *key,
-                                    path: path.clone(),
-                                    format: format_guess,
-                                    folder_mtime: None,
-                                });
-                            }
-                            FxLocalAction::Leave => {}
-                        }
-                    }
-
+                    let decisions = modal.build_decisions();
                     let _ = core_tx.send(UiToWorkerCommand::ApplyReconcile {
                         batch_id: modal.report.batch_id,
                         decisions,
