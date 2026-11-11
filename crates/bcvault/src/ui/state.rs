@@ -202,8 +202,10 @@ pub struct ReconcileReportModalState {
     pub active_tab: ReportTab,
     pub selected_matched: HashSet<ItemKey>,
     pub selected_review: HashMap<ItemKey, usize>,
+    pub rejected_review: HashSet<ItemKey>,
     pub selected_restorable: HashSet<ItemKey>,
     pub local_decisions: HashMap<std::path::PathBuf, LocalAction>,
+    pub conflict_decisions: HashMap<std::path::PathBuf, LocalAction>,
     pub local_attach_search: HashMap<std::path::PathBuf, String>,
 }
 
@@ -217,7 +219,9 @@ impl ReconcileReportModalState {
                 selected_review.insert(r.release_key, 0);
             }
         }
+        let rejected_review = HashSet::new();
         let local_decisions = HashMap::new();
+        let conflict_decisions = HashMap::new();
         let local_attach_search = HashMap::new();
 
         let active_tab = if !report.matched.is_empty() {
@@ -239,22 +243,145 @@ impl ReconcileReportModalState {
             active_tab,
             selected_matched,
             selected_review,
+            rejected_review,
             selected_restorable,
             local_decisions,
+            conflict_decisions,
             local_attach_search,
         }
     }
 
+    pub fn mark_all_review_wrong(&mut self) {
+        self.selected_review.clear();
+        for r in &self.report.review {
+            self.rejected_review.insert(r.release_key);
+        }
+    }
+
+    pub fn mark_unselected_review_wrong(&mut self) {
+        for r in &self.report.review {
+            if !self.selected_review.contains_key(&r.release_key) {
+                self.rejected_review.insert(r.release_key);
+            }
+        }
+    }
+
+    pub fn skip_all_review(&mut self) {
+        self.selected_review.clear();
+        self.rejected_review.clear();
+    }
+
     pub fn total_selected_count(&self) -> usize {
         let matched_cnt = self.selected_matched.len();
-        let review_cnt = self.selected_review.len();
+        let review_cnt = self.selected_review.len() + self.rejected_review.len();
         let restorable_cnt = self.selected_restorable.len();
         let local_cnt = self
             .local_decisions
             .values()
             .filter(|a| !matches!(a, LocalAction::Leave))
             .count();
-        matched_cnt + review_cnt + restorable_cnt + local_cnt
+        let conflict_cnt = self
+            .conflict_decisions
+            .values()
+            .filter(|a| !matches!(a, LocalAction::Leave))
+            .count();
+        matched_cnt + review_cnt + restorable_cnt + local_cnt + conflict_cnt
+    }
+
+    pub fn build_decisions(&self) -> Vec<bcvault_core::types::MatchDecision> {
+        use bcvault_core::types::MatchDecision;
+        let mut decisions = Vec::new();
+
+        for m in &self.report.matched {
+            if self.selected_matched.contains(&m.release_key) {
+                decisions.push(MatchDecision::Adopt {
+                    key: m.release_key,
+                    path: m.candidate_path.clone(),
+                    format: m.format_guess,
+                    folder_mtime: None,
+                });
+            }
+        }
+
+        for r in &self.report.review {
+            if self.rejected_review.contains(&r.release_key) {
+                for cand in &r.candidates {
+                    decisions.push(MatchDecision::Reject {
+                        band_id: self.report.band_id,
+                        key: r.release_key,
+                        path: cand.candidate_path.clone(),
+                    });
+                }
+            } else if let Some(cand) = self
+                .selected_review
+                .get(&r.release_key)
+                .and_then(|&cand_idx| r.candidates.get(cand_idx))
+            {
+                decisions.push(MatchDecision::Adopt {
+                    key: r.release_key,
+                    path: cand.candidate_path.clone(),
+                    format: cand.format_guess,
+                    folder_mtime: None,
+                });
+            }
+        }
+
+        for m in &self.report.restorable {
+            if self.selected_restorable.contains(&m.release_key) {
+                decisions.push(MatchDecision::Restore {
+                    key: m.release_key,
+                    path: m.candidate_path.clone(),
+                });
+            }
+        }
+
+        for (path, action) in &self.local_decisions {
+            match action {
+                LocalAction::Ignore => {
+                    decisions.push(MatchDecision::Ignore {
+                        band_id: self.report.band_id,
+                        path: path.clone(),
+                    });
+                }
+                LocalAction::Attach(key) => {
+                    let format_guess = self
+                        .report
+                        .local_only
+                        .iter()
+                        .find(|o| &o.path == path)
+                        .and_then(|o| o.format_guess);
+                    decisions.push(MatchDecision::Attach {
+                        key: *key,
+                        path: path.clone(),
+                        format: format_guess,
+                        folder_mtime: None,
+                    });
+                }
+                LocalAction::Leave => {}
+            }
+        }
+
+        for (path, action) in &self.conflict_decisions {
+            match action {
+                LocalAction::Ignore => {
+                    decisions.push(MatchDecision::Ignore {
+                        band_id: self.report.band_id,
+                        path: path.clone(),
+                    });
+                }
+                LocalAction::Attach(key) => {
+                    decisions.push(MatchDecision::Attach {
+                        key: *key,
+                        path: path.clone(),
+                        format: None,
+                        folder_mtime: None,
+                    });
+                }
+                LocalAction::Leave => {}
+            }
+        }
+
+        decisions
     }
 }
 
@@ -1291,5 +1418,97 @@ mod tests {
         });
         assert!(!st.folders.contains_key(&10));
         assert_eq!(st.folders.get(&20).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_modal_mark_wrong_and_conflict_resolution() {
+        use crate::library::matcher::{Conflict, ReviewItem, Score, ScoredCandidate};
+        use crate::types::{ItemType, MatchDecision};
+        use std::path::PathBuf;
+
+        let k1 = ItemKey::new(ItemType::Album, 1);
+        let k2 = ItemKey::new(ItemType::Album, 2);
+        let k3 = ItemKey::new(ItemType::Album, 3);
+        let cand_path = PathBuf::from("/music/Wall Split Action 001");
+        let conflict_path = PathBuf::from("/music/split");
+
+        let report = Box::new(ReconcileReport {
+            batch_id: 12,
+            band_id: 42,
+            matched: vec![],
+            review: vec![
+                ReviewItem {
+                    release_key: k1,
+                    release_title: "split".to_string(),
+                    candidates: vec![ScoredCandidate {
+                        candidate_path: cand_path.clone(),
+                        candidate_name: "Wall Split Action 001".to_string(),
+                        score: Score {
+                            value: 0.85,
+                            signals: vec![],
+                        },
+                        format_guess: None,
+                    }],
+                },
+                ReviewItem {
+                    release_key: k2,
+                    release_title: "split".to_string(),
+                    candidates: vec![ScoredCandidate {
+                        candidate_path: cand_path.clone(),
+                        candidate_name: "Wall Split Action 001".to_string(),
+                        score: Score {
+                            value: 0.85,
+                            signals: vec![],
+                        },
+                        format_guess: None,
+                    }],
+                },
+            ],
+            page_only: vec![],
+            local_only: vec![],
+            conflicts: vec![Conflict {
+                description: "Folder 'split' matches 2 releases".to_string(),
+                release_keys: vec![k1, k3],
+                candidate_paths: vec![conflict_path.clone()],
+            }],
+            restorable: vec![],
+            linked: vec![],
+            unavailable_folders: vec![],
+            catalog: vec![],
+        });
+
+        let mut modal = ReconcileReportModalState::new(report);
+        assert_eq!(modal.total_selected_count(), 2);
+
+        // Mark all review items as wrong (don't ask again)
+        modal.mark_all_review_wrong();
+        assert!(modal.selected_review.is_empty());
+        assert_eq!(modal.rejected_review.len(), 2);
+        assert_eq!(modal.total_selected_count(), 2);
+
+        // Resolve conflict by attaching conflict_path to k3
+        modal
+            .conflict_decisions
+            .insert(conflict_path.clone(), LocalAction::Attach(k3));
+        assert_eq!(modal.total_selected_count(), 3);
+
+        let decisions = modal.build_decisions();
+        assert_eq!(decisions.len(), 3);
+        assert!(decisions.contains(&MatchDecision::Reject {
+            band_id: 42,
+            key: k1,
+            path: cand_path.clone(),
+        }));
+        assert!(decisions.contains(&MatchDecision::Reject {
+            band_id: 42,
+            key: k2,
+            path: cand_path,
+        }));
+        assert!(decisions.contains(&MatchDecision::Attach {
+            key: k3,
+            path: conflict_path,
+            format: None,
+            folder_mtime: None,
+        }));
     }
 }

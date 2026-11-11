@@ -1073,6 +1073,127 @@ fn truncated_cell(
     .inner
 }
 
+fn effective_catalog(
+    state: &UiState,
+    report: &bcvault_core::library::ReconcileReport,
+) -> Vec<bcvault_core::types::ReleaseRow> {
+    if !report.catalog.is_empty() {
+        return report.catalog.clone();
+    }
+    state
+        .rows
+        .iter()
+        .filter(|cr| cr.row.band_id == report.band_id)
+        .map(|cr| cr.row.clone())
+        .collect()
+}
+
+fn render_release_attach_picker(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    path: &std::path::Path,
+    current_key: &mut bcvault_core::types::ItemKey,
+    search_map: &mut std::collections::HashMap<std::path::PathBuf, String>,
+    catalog: &[bcvault_core::types::ReleaseRow],
+    priority_keys: &[bcvault_core::types::ItemKey],
+) {
+    use bcvault_core::library::{
+        filter_releases_for_picker, format_release_picker_label, resolve_release_by_query,
+    };
+
+    let mut ordered_catalog = Vec::with_capacity(catalog.len());
+    for &pk in priority_keys {
+        if let Some(r) = catalog.iter().find(|r| r.key == pk) {
+            ordered_catalog.push(r.clone());
+        }
+    }
+    for r in catalog {
+        if !priority_keys.contains(&r.key) {
+            ordered_catalog.push(r.clone());
+        }
+    }
+
+    let query = search_map.entry(path.to_path_buf()).or_default();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Search / URL / Slug:").color(pal::TEXT_DIM).size(11.5));
+        let resp = ui.add(
+            egui::TextEdit::singleline(query)
+                .hint_text("Search title, slug, or paste Bandcamp URL...")
+                .desired_width(280.0),
+        );
+        if !query.is_empty() && sharp_small_button(ui, "✕").clicked() {
+            query.clear();
+        }
+        if resp.changed() {
+            if let Some(exact) = resolve_release_by_query(query, &ordered_catalog) {
+                *current_key = exact;
+            } else {
+                let filtered = filter_releases_for_picker(query, &ordered_catalog);
+                if !filtered.iter().any(|r| r.key == *current_key)
+                    && let Some(first) = filtered.first()
+                {
+                    *current_key = first.key;
+                }
+            }
+        }
+    });
+
+    let exact_match = resolve_release_by_query(query, &ordered_catalog);
+    let filtered = filter_releases_for_picker(query, &ordered_catalog);
+
+    if !query.trim().is_empty() {
+        if exact_match.is_some() {
+            ui.label(
+                RichText::new("✓ Exact URL/slug match")
+                    .color(pal::OK)
+                    .size(11.0),
+            );
+        } else if filtered.is_empty() {
+            ui.label(
+                RichText::new("⚠ No release on this artist page matches that query/URL")
+                    .color(pal::WARN)
+                    .size(11.0),
+            );
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Attach to:");
+        let selected_rel = ordered_catalog.iter().find(|r| r.key == *current_key);
+        let selected_label = selected_rel
+            .map(format_release_picker_label)
+            .unwrap_or_else(|| format!("Release #{}", current_key.id));
+
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(&selected_label)
+            .width(360.0)
+            .show_ui(ui, |ui| {
+                if filtered.is_empty() {
+                    ui.label(RichText::new("No matching releases").color(pal::TEXT_DIM));
+                } else {
+                    for r in filtered {
+                        let lbl = format_release_picker_label(r);
+                        if ui
+                            .selectable_label(r.key == *current_key, &lbl)
+                            .on_hover_text(&r.url)
+                            .clicked()
+                        {
+                            *current_key = r.key;
+                        }
+                    }
+                }
+            });
+
+        if let Some(rel) = selected_rel
+            && sharp_small_button(ui, "Open")
+                .on_hover_text(&rel.url)
+                .clicked()
+        {
+            let _ = open::that_detached(&rel.url);
+        }
+    });
+}
+
 fn show_reconcile_report_modal(
     ctx: &Context,
     state: &mut UiState,
@@ -1377,14 +1498,70 @@ fn show_reconcile_report_modal(
                                 RichText::new("No items requiring review.").color(pal::TEXT_DIM),
                             );
                         } else {
+                            let catalog = effective_catalog(state, &modal.report);
+                            ui.horizontal_wrapped(|ui| {
+                                if sharp_small_button(ui, "Mark all as wrong (don't ask again)")
+                                    .on_hover_text("Never propose these folder pairings again")
+                                    .clicked()
+                                {
+                                    modal.mark_all_review_wrong();
+                                }
+                                if sharp_small_button(ui, "Mark skipped as wrong")
+                                    .on_hover_text("Mark all currently skipped review items as wrong (don't ask again)")
+                                    .clicked()
+                                {
+                                    modal.mark_unselected_review_wrong();
+                                }
+                                if sharp_small_button(ui, "Skip all for now").clicked() {
+                                    modal.skip_all_review();
+                                }
+                                let adopt_n = modal.selected_review.len();
+                                let reject_n = modal.rejected_review.len();
+                                let skip_n = modal
+                                    .report
+                                    .review
+                                    .len()
+                                    .saturating_sub(adopt_n + reject_n);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{adopt_n} adopt · {reject_n} wrong · {skip_n} skip"
+                                    ))
+                                    .color(pal::TEXT_DIM)
+                                    .size(11.5),
+                                );
+                            });
+                            ui.add_space(4.0);
+
                             for r in &modal.report.review {
                                 ui.group(|ui| {
-                                    ui.add(egui::Label::new(RichText::new(&r.release_title).strong()).truncate())
-                                        .on_hover_text(&r.release_title);
+                                    let rel_opt = catalog.iter().find(| row | row.key == r.release_key);
+                                    ui.horizontal(|ui| {
+                                        let label_txt = rel_opt
+                                            .map(bcvault_core::library::format_release_picker_label)
+                                            .unwrap_or_else(|| r.release_title.clone());
+                                        ui.add(
+                                            egui::Label::new(RichText::new(&label_txt).strong())
+                                                .truncate(),
+                                        )
+                                        .on_hover_text(
+                                            rel_opt
+                                                .map(|row| row.url.as_str())
+                                                .unwrap_or(&r.release_title),
+                                        );
+                                        if let Some(rel) = rel_opt
+                                            && sharp_small_button(ui, "Open")
+                                                .on_hover_text(&rel.url)
+                                                .clicked()
+                                        {
+                                            let _ = open::that_detached(&rel.url);
+                                        }
+                                    });
+
                                     let chosen = modal.selected_review.get(&r.release_key).copied();
+                                    let is_rejected = modal.rejected_review.contains(&r.release_key);
 
                                     for (c_idx, c) in r.candidates.iter().enumerate() {
-                                        let is_chosen = chosen == Some(c_idx);
+                                        let is_chosen = !is_rejected && chosen == Some(c_idx);
                                         let fmt_str = c
                                             .format_guess
                                             .map(|f| format!("[{}]", f.label()))
@@ -1396,6 +1573,7 @@ fn show_reconcile_report_modal(
                                         );
                                         ui.horizontal(|ui| {
                                             if ui.radio(is_chosen, "").clicked() {
+                                                modal.rejected_review.remove(&r.release_key);
                                                 modal.selected_review.insert(r.release_key, c_idx);
                                             }
                                             let cand_w = (ui.available_width() - 65.0).max(100.0);
@@ -1422,10 +1600,32 @@ fn show_reconcile_report_modal(
                                         });
                                     }
 
-                                    let is_skipped = chosen.is_none();
-                                    if ui.radio(is_skipped, "Skip for now").clicked() {
-                                        modal.selected_review.remove(&r.release_key);
-                                    }
+                                    let is_skipped = chosen.is_none() && !is_rejected;
+                                    ui.horizontal(|ui| {
+                                        if ui.radio(is_skipped, "Skip for now").clicked() {
+                                            modal.selected_review.remove(&r.release_key);
+                                            modal.rejected_review.remove(&r.release_key);
+                                        }
+                                        if ui
+                                            .radio(
+                                                is_rejected,
+                                                RichText::new("Wrong, don't ask again").color(
+                                                    if is_rejected {
+                                                        pal::WARN
+                                                    } else {
+                                                        pal::TEXT
+                                                    },
+                                                ),
+                                            )
+                                            .on_hover_text(
+                                                "Permanently dismiss this pairing so future scans never ask again",
+                                            )
+                                            .clicked()
+                                        {
+                                            modal.selected_review.remove(&r.release_key);
+                                            modal.rejected_review.insert(r.release_key);
+                                        }
+                                    });
                                 });
                                 ui.add_space(4.0);
                             }
@@ -1438,6 +1638,7 @@ fn show_reconcile_report_modal(
                                     .color(pal::TEXT_DIM),
                             );
                         } else {
+                            let catalog = effective_catalog(state, &modal.report);
                             ui.label(
                                 RichText::new(
                                     "These releases exist on Bandcamp but have no local audio files in the linked folder:",
@@ -1446,16 +1647,23 @@ fn show_reconcile_report_modal(
                             );
                             ui.add_space(4.0);
                             for key in &modal.report.page_only {
-                                let title = state
-                                    .rows
-                                    .iter()
-                                    .find(|cr| cr.row.key == *key)
-                                    .map(|cr| cr.row.title.clone())
+                                let rel_opt = catalog.iter().find(|r| r.key == *key);
+                                let label = rel_opt
+                                    .map(bcvault_core::library::format_release_picker_label)
                                     .unwrap_or_else(|| format!("Release #{}", key.id));
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("-").color(pal::TEXT_DIM));
-                                    ui.add(egui::Label::new(RichText::new(&title).strong()).truncate())
-                                        .on_hover_text(&title);
+                                    ui.add(egui::Label::new(RichText::new(&label).strong()).truncate())
+                                        .on_hover_text(
+                                            rel_opt.map(|r| r.url.as_str()).unwrap_or(&label),
+                                        );
+                                    if let Some(rel) = rel_opt
+                                        && sharp_small_button(ui, "Open")
+                                            .on_hover_text(&rel.url)
+                                            .clicked()
+                                    {
+                                        let _ = open::that_detached(&rel.url);
+                                    }
                                 });
                             }
                         }
@@ -1466,6 +1674,7 @@ fn show_reconcile_report_modal(
                                 RichText::new("No unlinked local folders.").color(pal::TEXT_DIM),
                             );
                         } else {
+                            let catalog = effective_catalog(state, &modal.report);
                             ui.label(
                                 RichText::new(
                                     "These folders were found locally but do not match any release on the artist's Bandcamp page:",
@@ -1560,56 +1769,30 @@ fn show_reconcile_report_modal(
                                             .selectable_label(is_attach, "Attach to release...")
                                             .clicked()
                                             && !is_attach
+                                            && let Some(first_rel) = catalog.first()
                                         {
-                                            let target = state
-                                                .rows
-                                                .iter()
-                                                .find(|cr| cr.row.band_id == modal.report.band_id)
-                                                .map(|cr| cr.row.key);
-                                            if let Some(key) = target {
-                                                modal
-                                                    .local_decisions
-                                                    .insert(orphan.path.clone(), LocalAction::Attach(key));
-                                            }
+                                            modal.local_decisions.insert(
+                                                orphan.path.clone(),
+                                                LocalAction::Attach(first_rel.key),
+                                            );
                                         }
                                     });
 
-                                    if let LocalAction::Attach(ref current_key) = current_decision {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Attach to:");
-                                            let current_title = state
-                                                .rows
-                                                .iter()
-                                                .find(|cr| cr.row.key == *current_key)
-                                                .map(|cr| cr.row.title.clone())
-                                                .unwrap_or_else(|| "Select release".to_string());
-                                            egui::ComboBox::from_id_salt(format!(
-                                                "attach_combo_{}",
-                                                orphan.path.display()
-                                            ))
-                                            .selected_text(&current_title)
-                                            .width(280.0)
-                                            .show_ui(ui, |ui| {
-                                                for cr in state
-                                                    .rows
-                                                    .iter()
-                                                    .filter(|cr| cr.row.band_id == modal.report.band_id)
-                                                {
-                                                    if ui
-                                                        .selectable_label(
-                                                            cr.row.key == *current_key,
-                                                            &cr.row.title,
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        modal.local_decisions.insert(
-                                                            orphan.path.clone(),
-                                                            LocalAction::Attach(cr.row.key),
-                                                        );
-                                                    }
-                                                }
-                                            });
-                                        });
+                                    if let LocalAction::Attach(mut target_key) = current_decision {
+                                        let combo_id =
+                                            format!("attach_combo_{}", orphan.path.display());
+                                        render_release_attach_picker(
+                                            ui,
+                                            &combo_id,
+                                            &orphan.path,
+                                            &mut target_key,
+                                            &mut modal.local_attach_search,
+                                            &catalog,
+                                            &[],
+                                        );
+                                        modal
+                                            .local_decisions
+                                            .insert(orphan.path.clone(), LocalAction::Attach(target_key));
                                     }
                                 });
                                 ui.add_space(4.0);
@@ -1623,6 +1806,7 @@ fn show_reconcile_report_modal(
                                     .color(pal::TEXT_DIM),
                             );
                         } else {
+                            let catalog = effective_catalog(state, &modal.report);
                             for c in &modal.report.conflicts {
                                 ui.group(|ui| {
                                     ui.add(
@@ -1635,9 +1819,39 @@ fn show_reconcile_report_modal(
                                     )
                                     .on_hover_text(&c.description);
 
-                                    if !c.candidate_paths.is_empty() {
+                                    if !c.release_keys.is_empty() {
                                         ui.label(
-                                            RichText::new("Paths involved:")
+                                            RichText::new("Colliding Bandcamp releases:")
+                                                .color(pal::TEXT_DIM)
+                                                .size(11.0),
+                                        );
+                                        for rk in &c.release_keys {
+                                            if let Some(rel) = catalog.iter().find(|r| r.key == *rk)
+                                            {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "  • {}",
+                                                            bcvault_core::library::format_release_picker_label(rel)
+                                                        ))
+                                                        .size(11.0),
+                                                    )
+                                                    .on_hover_text(&rel.url);
+                                                    if sharp_small_button(ui, "Open")
+                                                        .on_hover_text(&rel.url)
+                                                        .clicked()
+                                                    {
+                                                        let _ = open::that_detached(&rel.url);
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    if !c.candidate_paths.is_empty() {
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            RichText::new("Resolve local folders:")
                                                 .color(pal::TEXT_DIM)
                                                 .size(11.0),
                                         );
@@ -1648,13 +1862,86 @@ fn show_reconcile_report_modal(
                                                 .unwrap_or_else(|| p.display().to_string());
                                             ui.add(
                                                 egui::Label::new(
-                                                    RichText::new(format!("  - {name}"))
+                                                    RichText::new(format!("Folder: {name}"))
+                                                        .strong()
                                                         .monospace()
-                                                        .size(11.0),
+                                                        .size(11.5),
                                                 )
                                                 .truncate(),
                                             )
                                             .on_hover_text(p.display().to_string());
+
+                                            let current_decision = modal
+                                                .conflict_decisions
+                                                .get(p)
+                                                .cloned()
+                                                .unwrap_or(LocalAction::Leave);
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .selectable_label(
+                                                        matches!(current_decision, LocalAction::Leave),
+                                                        "Leave",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    modal
+                                                        .conflict_decisions
+                                                        .insert(p.clone(), LocalAction::Leave);
+                                                }
+                                                if ui
+                                                    .selectable_label(
+                                                        matches!(current_decision, LocalAction::Ignore),
+                                                        "Ignore in future",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    modal
+                                                        .conflict_decisions
+                                                        .insert(p.clone(), LocalAction::Ignore);
+                                                }
+                                                let is_attach =
+                                                    matches!(current_decision, LocalAction::Attach(_));
+                                                if ui
+                                                    .selectable_label(is_attach, "Match to release...")
+                                                    .clicked()
+                                                    && !is_attach
+                                                {
+                                                    let default_key = c
+                                                        .release_keys
+                                                        .first()
+                                                        .copied()
+                                                        .or_else(|| catalog.first().map(|r| r.key));
+                                                    if let Some(key) = default_key {
+                                                        modal.conflict_decisions.insert(
+                                                            p.clone(),
+                                                            LocalAction::Attach(key),
+                                                        );
+                                                    }
+                                                }
+                                            });
+
+                                            if let LocalAction::Attach(mut target_key) =
+                                                current_decision
+                                            {
+                                                let combo_id = format!(
+                                                    "conflict_attach_combo_{}",
+                                                    p.display()
+                                                );
+                                                render_release_attach_picker(
+                                                    ui,
+                                                    &combo_id,
+                                                    p,
+                                                    &mut target_key,
+                                                    &mut modal.local_attach_search,
+                                                    &catalog,
+                                                    &c.release_keys,
+                                                );
+                                                modal.conflict_decisions.insert(
+                                                    p.clone(),
+                                                    LocalAction::Attach(target_key),
+                                                );
+                                            }
+                                            ui.add_space(2.0);
                                         }
                                     }
                                 });
@@ -1776,73 +2063,7 @@ fn show_reconcile_report_modal(
                     )
                     .clicked()
                 {
-                    let mut decisions = Vec::new();
-
-                    // Matched decisions
-                    for m in &modal.report.matched {
-                        if modal.selected_matched.contains(&m.release_key) {
-                            decisions.push(MatchDecision::Adopt {
-                                key: m.release_key,
-                                path: m.candidate_path.clone(),
-                                format: m.format_guess,
-                                folder_mtime: None,
-                            });
-                        }
-                    }
-
-                    // Review decisions
-                    for r in &modal.report.review {
-                        if let Some(cand) = modal
-                            .selected_review
-                            .get(&r.release_key)
-                            .and_then(|&cand_idx| r.candidates.get(cand_idx))
-                        {
-                            decisions.push(MatchDecision::Adopt {
-                                key: r.release_key,
-                                path: cand.candidate_path.clone(),
-                                format: cand.format_guess,
-                                folder_mtime: None,
-                            });
-                        }
-                    }
-
-                    // Restorable decisions
-                    for m in &modal.report.restorable {
-                        if modal.selected_restorable.contains(&m.release_key) {
-                            decisions.push(MatchDecision::Restore {
-                                key: m.release_key,
-                                path: m.candidate_path.clone(),
-                            });
-                        }
-                    }
-
-                    // Local-only decisions (Ignore / Attach)
-                    for (path, action) in &modal.local_decisions {
-                        match action {
-                            LocalAction::Ignore => {
-                                decisions.push(MatchDecision::Ignore {
-                                    band_id: modal.report.band_id,
-                                    path: path.clone(),
-                                });
-                            }
-                            LocalAction::Attach(key) => {
-                                let format_guess = modal
-                                    .report
-                                    .local_only
-                                    .iter()
-                                    .find(|o| &o.path == path)
-                                    .and_then(|o| o.format_guess);
-                                decisions.push(MatchDecision::Attach {
-                                    key: *key,
-                                    path: path.clone(),
-                                    format: format_guess,
-                                    folder_mtime: None,
-                                });
-                            }
-                            LocalAction::Leave => {}
-                        }
-                    }
-
+                    let decisions = modal.build_decisions();
                     let _ = cmd_tx.send(UiToWorkerCommand::ApplyReconcile {
                         batch_id: modal.report.batch_id,
                         decisions,
