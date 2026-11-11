@@ -6,8 +6,8 @@ For the coding agent. Repo: bcvault (Rust workspace). Scope: `bcvault-core` (arc
 
 - **Branch.** Create `feat/archive` from the repository default branch (`git symbolic-ref refs/remotes/origin/HEAD`). Never force-push.
 - **Merge order.** This plan merges after `feat/auto-sync` and rebases onto it. Expect conflicts in `worker/sync.rs` (the new fetch call) and in the Settings modals; keep modal changes in new functions or files.
-- **Migrations.** The schema is already at version 5 and the auto-sync plan takes 0006, so this plan uses `0007_archive.sql`. If the order changes, take the next free number; never renumber a merged migration.
-- Conventional Commits, one commit per step in section 8. Every commit compiles and passes tests. Run `scripts/check.sh` before each commit. Non-test code must not use `unwrap` or `expect`. The fx bans apply (`circle_`, `Shape::circle`, `rounding`, non-zero `corner_radius`, `Spinner`).
+- **Migrations.** The schema is at version 8 (`0008_rejected_matches.sql`) and `AUTO_SYNC.md` / `ARTIST_GROUPS.md` take the next free numbers (`0009`/`0010`), so this plan uses `0010_archive.sql` (or `0011_archive.sql` — take the lowest free number at merge time per `ROADMAP.md` §5; never renumber a merged migration).
+- Conventional Commits, one commit per step in section 5 (`Task: none`). Every commit compiles and passes tests. Run `scripts/check.sh` before each commit. Non-test code must not use `unwrap` or `expect`. The fx bans apply (`circle_`, `Shape::circle`, `rounding`, non-zero `corner_radius`, `Spinner`).
 - **Politeness.** Page data is extracted from the HTML that sync already fetches, so archiving text adds zero page requests. Covers go through `GateClass::Cdn`. Never add a request path that bypasses the gate.
 - **Archival rule.** Archived data is never deleted or shrunk automatically. Turning an option off, removing an artist, flagging a release removed, a failed fetch, or a page that now parses empty must not delete or blank anything. Only the explicit purge actions in 3.9 may delete archive data.
 - **Untrusted input.** Pages and images come from the network. Enforce the limits in 3.5 and 3.11.
@@ -55,7 +55,7 @@ Non-goals:
 
 Size mapping: S150 is `_7`, S350 is `_2`, S700 is `_16`, S1200 is `_10`, Original is `_0`.
 
-### 3.2 Text archive (main database, migration `0007_archive.sql`)
+### 3.2 Text archive (main database, migration `0010_archive.sql` or next free number)
 
 ```sql
 CREATE TABLE release_archive (
@@ -209,7 +209,7 @@ An Archive section:
 
 Each step leaves the workspace compiling with tests green.
 
-1. `feat(core): add archive settings, schema and archive database` adds `ArchiveSettings`, migration `0007`, `archive.sqlite`, its path, pool and migrations.
+1. `feat(core)!: add archive settings, schema and archive database` adds `ArchiveSettings`, migration `0010` (or lowest free number, with `BREAKING CHANGE:` footer), `archive.sqlite`, its path, pool and migrations.
 2. `feat(core): archive release details during the sync fetch` adds `fetch_release_full`, `archive::extract`, `archive::capture`, the merge rule and tests 1 to 4.
 3. `refactor(fx): read release details from the core archive` changes `DetailService`, adds the legacy import, and handles removed releases (tests 5 to 7).
 4. `feat(core): archive covers in their original format` covers URLs, fetching with limits, storage, the failure cache and the fallback in both UIs (tests 8, 9, 10, 17).

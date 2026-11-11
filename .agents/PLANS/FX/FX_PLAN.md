@@ -2,7 +2,7 @@
 
 *Rust 2024 · eframe/egui (same pinned minor as the classic app) · working name `bcvault-fx` · prepared 6 Nov 2026 · companion to `Initial Plan.md`*
 
-> Status 8 Nov 2026: **implemented** (F0 to F8; see `PROGRESS-FX.md`). Later plans amended the main schema (migrations `0003` to `0005`) and added library UI to FX; the code is authoritative where it differs.
+> Status 11 Nov 2026: **implemented** (F0 to F8; tracked in `.agents/PROGRESS.md`). Later plans amended the main schema (migrations `0003` to `0008`) and added library UI to FX; the code is authoritative where it differs.
 
 ## 0. How to use this plan
 
@@ -11,7 +11,7 @@
 **Execution protocol for the implementing agent**
 
 1. Rules 2 to 7 of `Initial Plan.md §0` still apply unchanged: fixtures for Bandcamp-facing code, `#![forbid(unsafe_code)]`, no `unwrap`/`expect`/`panic!` outside tests and bootstrap, **UI-thread purity**, **one `BandcampGate`**, `scraper::Html` never across an `.await`.
-2. Work phase by phase (§14). Keep `PROGRESS-FX.md` with the current task ID and open questions. A phase is done only when every box in its milestone is checked.
+2. Work phase by phase (§14). Keep `PROGRESS.md` with the current task ID and open questions. A phase is done only when every box in its milestone is checked.
 3. **Squareness is a hard constraint.** The grep guard in §3.4 runs in `scripts/check.sh` and CI. Nothing round ships, including spinners, avatars, dots, radio buttons and scrollbars.
 4. **Motion costs nothing at rest.** Animations are springs that retarget mid-flight (interruptible) and stop requesting repaints when settled. A test asserts the idle repaint delay (§13).
 5. **Every effect checks `EffectsLevel`** (`Off` / `Low` / `Full`) and `reduced_motion`. `Off` must look and perform like the classic app.
@@ -573,4 +573,4 @@ pub enum FxEvent {
 
 ## 16. Kickoff prompt for the agent
 
-> Read `Initial Plan.md` and `FX_PLAN.md`. Start with Phase F0 only: convert the repository into the workspace described in §2 as a pure refactor, keep every existing test green, and stop when the F0 milestone boxes are all checked. Record progress in `PROGRESS-FX.md`. Do not start F1 until I confirm.
+> Read `Initial Plan.md` and `FX_PLAN.md`. Start with Phase F0 only: convert the repository into the workspace described in §2 as a pure refactor, keep every existing test green, and stop when the F0 milestone boxes are all checked. Record progress in `PROGRESS.md`. Do not start F1 until I confirm.

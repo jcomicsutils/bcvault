@@ -1,6 +1,6 @@
 # AGENTS.md: standing instructions for the implementing agent
 
-*Applies to the whole repository and to every plan. Read this first, then `ROADMAP.md`, then the plan you are executing. Prepared 7 Nov 2026, revised 8 Nov 2026 (synced with the codebase after L0 to L6, MATCH-FIX and the badge rework landed).*
+*Applies to the whole repository and to every plan. Read this first, then `ROADMAP.md`, then the plan you are executing. Prepared 7 Nov 2026, revised 11 Nov 2026 (synced with the codebase at `v0.1.3` after migrations `0001` to `0008`, library fixes, and full plan catalog).*
 
 ## 1. Documents and precedence
 
@@ -8,43 +8,46 @@
 | --- | --- |
 | `AGENTS.md` (this file) | Standing rules, commit convention, quality gate, workflow. Wins over every plan on process. |
 | `ROADMAP.md` | Order of work across plans, dependencies, migration numbering, release plan, kickoff prompts. |
-| `COMMIT_PLAN.md` | Every task ID with its exact commit subject. |
-| `Initial Plan.md` | The base engine (Phases 0 to 5). Already implemented; its rules still apply. (Done)|
-| `FX_PLAN.md` | `bcvault-fx` front-end (Phases F0 to F8). (Done)|
-| `LIBRARY_SYNC/LIBRARY_SYNC_PLAN.md` | Artist folder links: one folder per artist, adopt and verify (Phases L0 to L6). (Done)|
-| `LIBRARY_SYNC/MATCH-FIX.md` | Exact-first matching and folder style templates; amends `LIBRARY_SYNC_PLAN.md` §5 and §6. (Done, `Task: none` commits)|
-| `LIBRARY_SYNC/MISSING-FOLDER-FIX.md` | Ask user when linked folder is gone; amends `LIBRARY_SYNC_PLAN.md` §5 and §6. (Done, `Task: none` commits)|
-| `LIBRARY_SYNC/MULTI_FOLDER.md` | Several linked folders per artist; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits) |
-| `LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md` | Keep the download dir out of artist links; match library albums to releases downloaded elsewhere; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits)|
-| `LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md` | Persistent "wrong, don't ask again" rejection for review proposals, interactive conflict resolution, and searchable/slug/URL release picker; amends `LIBRARY_SYNC_PLAN.md` §5, §6, and §10. (Done, `Task: none` commits)|
-| `LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md` | Relink and adopt albums moved from the download directory on verify; amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3. (Done, `Task: none` commits)|
-| `MAIL_REDEEM/MAIL_REDEEM_PLAN.md` | Mailbox redeem and cleanup (Phases M0 to M6). Not started. |
-| `AUTO_SYNC/AUTO_SYNC.md` | Scheduled auto sync, quick check, removed-release tracking. Not started. |
-| `ARCHIVE/ARCHIVE.md` | Selectable release archive (text and covers). Not started; merges after `AUTO_SYNC.md`. |
-| `USER_THEMES/USER_THEMES.md` | File-based themes for `bcvault-fx`. Not started. |
-| `PROGRESS.md`, `FX/PROGRESS-FX.md` | Live status. Wins over the status lines in every other document. |
+| `Initial Plan.md` | The base engine (Phases 0 to 5). Already implemented; its rules still apply. (Done) |
+| `PLANS/FX/FX_PLAN.md` | `bcvault-fx` front-end (Phases F0 to F8). (Done) |
+| `PLANS/LIBRARY_SYNC/LIBRARY_SYNC_PLAN.md` | Artist folder links: tie folder(s) to artist page, adopt and verify (Phases L0 to L6). (Done) |
+| `PLANS/LIBRARY_SYNC/MATCH-FIX.md` | Exact-first matching and folder style templates; amends `LIBRARY_SYNC_PLAN.md` §5 and §6. (Done, `Task: none` commits) |
+| `PLANS/LIBRARY_SYNC/MISSING-FOLDER-FIX.md` | Ask user when linked folder is gone; amends `LIBRARY_SYNC_PLAN.md` §5 and §6. (Done, `Task: none` commits) |
+| `PLANS/LIBRARY_SYNC/MULTI_FOLDER.md` | Several linked folders per artist; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits) |
+| `PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md` | Keep the download dir out of artist links; match library albums to releases downloaded elsewhere; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits) |
+| `PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md` | Persistent "wrong, don't ask again" rejection for review proposals, interactive conflict resolution, and searchable/slug/URL release picker; amends `LIBRARY_SYNC_PLAN.md` §5, §6, and §10. (Done, `Task: none` commits) |
+| `PLANS/LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md` | Relink and adopt albums moved from the download directory on verify; amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3. (Done, `Task: none` commits) |
+| `PLANS/SETTINGS_TABS/SETTINGS_TABS.md` | Tabbed settings, settings parity between both UIs, `Settings::sanitize`, and ZIP extraction options. Not started (`Task: none` commits). |
+| `PLANS/DOWNLOAD_FLOW/DOWNLOAD_FLOW.md` | Select all, download remaining, idempotent enqueue, and safer bulk downloads. Not started (`Task: none` commits). |
+| `PLANS/ARTIST_GROUPS/ARTIST_GROUPS.md` | Sidebar artist groups (manual and rule-based) and multi-artist release filtering. Not started (`Task: none` commits). |
+| `PLANS/KEYBOARD/KEYBOARD.md` | Complete keyboard operation, shortcut registry, focus regions, and modal focus scopes across both UIs. Not started (`Task: none` commits). |
+| `PLANS/AUTO_SYNC/AUTO_SYNC.md` | Scheduled auto sync, quick check, per-artist sync exclusion, removed-release tracking, and change feed. Not started (`Task: none` commits). |
+| `PLANS/ARCHIVE/ARCHIVE.md` | Selectable release archive (text and covers, optional JPEG XL). Not started; merges after `AUTO_SYNC.md` (`Task: none` commits). |
+| `PLANS/MAIL_REDEEM/MAIL_REDEEM_PLAN.md` | Mailbox redeem and cleanup (Phases M0 to M6). Not started. |
+| `PLANS/USER_THEMES/USER_THEMES.md` | File-based TOML themes for `bcvault-fx`. Not started (`Task: none` commits). |
+| `PROGRESS.md` | Live status across all plans and releases. Wins over the status lines in every other document. |
 
-Paths are relative to `.agents/` or `.agents/PLANS/`. `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`, `MATCH-FIX.md`, `MISSING-FOLDER-FIX.md`, `MULTI_FOLDER.md`, `DOWNLOAD-DIR-FIX.md` and `REVIEW-AND-MATCH-FIX.md` are step lists without phase IDs: their commits use `Task: none` and their step number goes in `PROGRESS.md`.
+Paths are relative to `.agents/`. `SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, `KEYBOARD.md`, `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`, `MATCH-FIX.md`, `MISSING-FOLDER-FIX.md`, `MULTI_FOLDER.md`, `DOWNLOAD-DIR-FIX.md`, `REVIEW-AND-MATCH-FIX.md` and `VERIFY-DOWNLOAD-DIR-FIX.md` are step lists without phase IDs: their commits use `Task: none` and their step number goes in `PROGRESS.md`. (Earlier drafts referenced a separate `COMMIT_PLAN.md` and `FX/PROGRESS-FX.md`; commit sequences now live directly inside each plan document and all progress is consolidated in `.agents/PROGRESS.md`.)
 
-**Precedence:** the user's latest message, then this file, then the feature plan, then `Initial Plan.md`. Where a feature plan amends the base plan (for example the main-DB migrations `0004`/`0005` added by the library plan, which amend FX's "main schema untouched"), the amendment wins. Fixtures beat assumptions: if captured data disagrees with a plan's hypothesis about Bandcamp or an email format, follow the fixture and note it in `PROGRESS.md`.
+**Precedence:** the user's latest message, then this file, then the feature plan, then `Initial Plan.md`. Where a feature plan amends the base plan (for example the main-DB migrations `0004` to `0008` added by the library plans, which amend FX's "main schema untouched"), the amendment wins. Fixtures beat assumptions: if captured data disagrees with a plan's hypothesis about Bandcamp or an email format, follow the fixture and note it in `PROGRESS.md`.
 
 ## 2. The task loop
 
-For every task ID in the plan you are executing:
+For every task ID or numbered step in the plan you are executing:
 
-1. **Read** the task, its milestone boxes and the matching row in `COMMIT_PLAN.md`. Update `PROGRESS.md` (`Current task`).
+1. **Read** the task or step, its milestone boxes and the commit sequence in the plan document. Update `PROGRESS.md` (`Current`).
 2. **Test first.** Write the failing test or fixture (parsers and SQL always; UI logic where it is pure). Bandcamp-facing code is developed against saved fixtures; the live site is touched only by capture tasks and the opt-in `live-tests` feature, and only after the user approved that capture.
 3. **Implement** the smallest change that makes the test pass.
 4. **Gate:** run `scripts/check.sh` (§4). Fix everything it reports. Never weaken a test, guard or lint to get green; if the plan itself is wrong, stop and follow §8.
-5. **Commit** with the message from `COMMIT_PLAN.md` (§5). One task is one commit unless the table splits it into lettered commits.
-6. **Log** in `PROGRESS.md` in the same commit (task ID in the `Done` list, new open questions, decisions).
-7. At the end of a phase, run the milestone verification (every checkbox, including the manual ones: ask the user to perform manual checks you cannot do), tick the boxes in `PROGRESS.md`, and tag (§6).
+5. **Commit** with the message from the plan's commit sequence (§5). One task or step is one commit unless the plan splits it into lettered commits.
+6. **Log** in `PROGRESS.md` in the same commit (task ID or step in the `Done` list, new open questions, decisions).
+7. At the end of a phase or plan, run the milestone verification (every checkbox, including the manual ones: ask the user to perform manual checks you cannot do), tick the boxes in `PROGRESS.md`, and tag (§6).
 
 ## 3. Hard rules (consolidated from all plans)
 
 1. `#![forbid(unsafe_code)]`. No `unwrap()`, `expect()` or `panic!` outside tests and `main` bootstrap; clippy enforces it.
-2. **UI-thread purity.** `App::update` and all view/overlay code may only draw, read in-memory state, send commands and `try_recv` events. No `block_on`, `rusqlite`, `reqwest`, file I/O or blocking `rfd` dialogs (the one allowed exception is startup font loading in `fx/theme/fonts.rs`).
-3. **One gate.** Every request to a Bandcamp host goes through `BandcampGate`. `reqwest::Client` is built only in `bandcamp/gate.rs`. IMAP traffic is not Bandcamp traffic, but every Bandcamp request the mail feature makes still uses the gate.
+2. **UI-thread purity.** `App::update` and all view/overlay code may only draw, read in-memory state, send commands and `try_recv` events. No `block_on`, `rusqlite`, `reqwest`, file I/O or blocking `rfd` dialogs (the one allowed exception is startup font loading in `crates/bcvault-fx/src/theme/mod.rs`).
+3. **One gate.** Every request to a Bandcamp host goes through `BandcampGate`. `reqwest::Client` is built only in the `bandcamp/` module (`crates/bcvault-core/src/bandcamp/`). IMAP traffic is not Bandcamp traffic, but every Bandcamp request the mail feature makes still uses the gate.
 4. `scraper::Html` is `!Send`: parse inside plain synchronous functions that return owned structs; never hold an `Html` across `.await`.
 5. **Square look.** Zero corner radius everywhere. FX paints only through `fx/paint` helpers. The grep guards in `scripts/guards.sh` must print nothing.
 6. **Motion costs nothing at rest.** Springs stop requesting repaints when settled; every effect honours `EffectsLevel` and `reduced_motion`.
@@ -56,10 +59,12 @@ For every task ID in the plan you are executing:
 12. Network, disk and mailbox politeness settings keep their conservative defaults unless the user changes them.
 13. **SemVer and git tags.** Follow Semantic Versioning (maintain coherent version numbers: patch for fixes, minor for features/breaking migrations while on 0.x). Always create annotated SemVer git tags (`vMAJOR.MINOR.PATCH`) whenever releases or significant milestones land. Use version tags exclusively (no `milestone/<ID>` tags). Never leave releases untagged.
 14. **Always update `PROGRESS.md`.** Every change, task completion, release bump, hotfix, or architectural deviation must update `PROGRESS.md` in the exact same commit. Never leave completed work undocumented or leave `PROGRESS.md` stale.
+15. **Keyboard accessibility (`KEYBOARD.md`).** Once `KEYBOARD.md` lands, every new panel, modal, view, or action must be focusable, reachable, activatable, and closable from the keyboard, exposed as an `FxAction` (and registered in the shortcut registry / palette where applicable), and added to the keyboard walkthrough.
+16. **Settings parity (`SETTINGS_TABS.md`).** Once `SETTINGS_TABS.md` lands, every new field added to `Settings` must be classified in both UI crates (`SettingsTab::fields` or `NOT_SHOWN` with a documented reason) in the same commit so the settings coverage test stays green.
 
 ## 4. Quality gate
 
-> Status (8 Nov 2026): only `scripts/check.sh` exists, and it is an older version (fmt, clippy, tests, two corner-radius guards). `guards.sh`, the commit checks, hooks, `.gitmessage` and `cliff.toml` from Appendix A are not installed yet (task T0, see `ROADMAP.md` §3). Until T0 lands, run the Appendix A commands by hand before each commit.
+> Status (11 Nov 2026): `scripts/check.sh`, `scripts/guards.sh`, `scripts/install-fx.sh`, and `.githooks/pre-push` are installed and active. Commit-msg hook scripts (`check-commit-msg.sh`, `check-commits.sh`), `.gitmessage`, and `cliff.toml` in Appendix A remain optional reference templates (skipped per user decision in T0).
 
 `scripts/check.sh` (full) and `scripts/check.sh --fast` (pre-commit) are defined in Appendix A.
 
@@ -67,7 +72,7 @@ For every task ID in the plan you are executing:
 | --- | --- | --- |
 | Fast | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `scripts/guards.sh` | pre-commit hook, after every edit loop |
 | Full | Fast + `cargo test --workspace` | before every commit that is not trivially docs-only, and pre-push |
-| Commit messages | `scripts/check-commit-msg.sh` (commit-msg hook), `scripts/check-commits.sh origin/main..HEAD` (pre-push, CI) | every commit |
+| Commit messages | `scripts/check-commit-msg.sh` (optional commit-msg hook), `scripts/check-commits.sh origin/main..HEAD` (optional pre-push, CI) | every commit (follow §5 rules) |
 
 **Every commit on every branch must build and pass the full gate.** There are no "WIP", "fix tests" or "make clippy happy" follow-up commits; amend or fixup into the task commit instead. Never use `--no-verify`.
 
@@ -96,18 +101,18 @@ Task: <ID>
 | `docs` | Documentation and plan documents (`docs/`, READMEs, endpoint notes) |
 | `build` | Cargo manifests, workspace layout, features, dependency changes that are not part of a feature commit |
 | `ci` | Scripts, hooks, workflows, guards |
-| `chore` | Housekeeping with no code effect (ignore files, licence headers) |
+| `chore` | Housekeeping with no code effect (ignore files, licence headers, release bumps) |
 | `style` | Formatting-only changes (rare; `cargo fmt` is enforced) |
 
 ### 5.2 Scopes
 
-Top-level scope is mandatory and validated; add `/sub` for a module. Allowed top-level scopes: `workspace`, `core`, `db`, `bandcamp`, `gate`, `worker`, `sync`, `downloads`, `quota`, `types`, `classic`, `fx`, `library`, `mail`, `tooling`, `deps`, `docs`, `plans`, `release`.
+Top-level scope is mandatory and validated; add `/sub` for a module. Allowed top-level scopes: `workspace`, `core`, `db`, `bandcamp`, `gate`, `worker`, `sync`, `downloads`, `quota`, `types`, `classic`, `ui`, `fx`, `library`, `mail`, `settings`, `groups`, `keyboard`, `theme`, `archive`, `tooling`, `deps`, `docs`, `plans`, `release`.
 
-Examples of sub-scopes: `fx/motion`, `fx/theme`, `fx/paint`, `fx/thumbs`, `fx/wall`, `fx/table`, `fx/sidebar`, `fx/toolbar`, `fx/dock`, `fx/toasts`, `fx/drawer`, `fx/nav`, `fx/palette`, `fx/artists`, `fx/stats`, `fx/shader`, `fx/db`, `library/scan`, `mail/imap`, `mail/parse`, `mail/links`, `mail/cleanup`.
+Examples of sub-scopes: `fx/motion`, `fx/theme`, `fx/paint`, `fx/thumbs`, `fx/wall`, `fx/table`, `fx/sidebar`, `fx/toolbar`, `fx/dock`, `fx/toasts`, `fx/drawer`, `fx/nav`, `fx/palette`, `fx/artists`, `fx/stats`, `fx/shader`, `fx/db`, `fx/settings`, `fx/selection`, `fx/groups`, `fx/keys`, `fx/actions`, ` fx/modals`, `classic/settings`, `classic/sidebar`, `classic/groups`, `classic/keys`, `classic/modals`, `library/scan`, `mail/imap`, `mail/parse`, `mail/links`, `mail/cleanup`.
 
 ### 5.3 Trailers and footers
 
-- `Task: <ID>` is required for `feat`, `fix`, `perf`, `refactor` and `test`. IDs are `B`/`F`/`L`/`M`/`T` + phase + `.` + task + optional letter (`F3.2b`, `L0.1`, `M4.3`, `T0.2`). Use `Task: none` for unplanned fixes. Repeat the trailer if a commit completes several tasks.
+- `Task: <ID>` is required for `feat`, `fix`, `perf`, `refactor` and `test`. IDs are `B`/`F`/`L`/`M`/`T` + phase + `.` + task + optional letter (`F3.2b`, `L0.1`, `M4.3`, `T0.2`). Use `Task: none` for step-list plans and unplanned fixes. Repeat the trailer if a commit completes several tasks.
 - `BREAKING CHANGE: ...` is required whenever the subject has `!`. Use `!` for anything that makes older binaries or data incompatible. Every main-DB migration that older binaries cannot open qualifies:
 
   ```text
@@ -126,8 +131,8 @@ Examples of sub-scopes: `fx/motion`, `fx/theme`, `fx/paint`, `fx/thumbs`, `fx/wa
 
 ### 5.4 Granularity and atomicity
 
-- One task ID is one commit unless `COMMIT_PLAN.md` lists lettered commits. A commit changes one concern, builds, and passes the full gate.
-- Keep a commit under about 400 changed lines excluding fixtures, generated files and `Cargo.lock`. If bigger, split along a seam (types, repo, service, UI).
+- One task ID or numbered plan step is one commit unless the plan lists lettered or split commits. A commit changes one concern, builds, and passes the full gate.
+- Keep a commit under about 400 changed lines excluding fixtures, generated files, pure file moves, and `Cargo.lock`. If bigger, split along a seam (types, repo, service, UI).
 - Fixtures go in their own `test(...)` commit when they are large (more than ~50 KB or more than 5 files); small fixtures ride with the code that uses them.
 - A dependency is added in the commit that first uses it (manifest and `Cargo.lock` together). Pure bumps are `build(deps): bump <crate> to <version>`.
 - Tests ship with the code they cover (same commit). "Tests first" means written first in your working loop, not committed red.
@@ -170,30 +175,31 @@ Bad (all rejected by the hook): `Update stuff`, `feat: add wall` (no scope), `fe
 
 ## 6. Branches, merging, tags
 
-- Branch per phase: `phase/<PHASEID>-<slug>`, for example `phase/F3-cover-wall`, `phase/L0-library-model`. Hotfixes: `fix/<slug>`. Plans without phase IDs (`AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`) use the `feat/<slug>` branch they name.
-- Open a pull request (or ask the user to review) **per phase** once all milestone boxes pass. Then `git rebase origin/main` and fast-forward merge.
+- Branch per phase: `phase/<PHASEID>-<slug>`, for example `phase/F3-cover-wall`, `phase/L0-library-model`. Hotfixes: `fix/<slug>`. Plans without phase IDs (`SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, `KEYBOARD.md`, `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`) use the `feat/<slug>` branch they name (or land directly on `main` when approved by the user).
+- Open a pull request (or ask the user to review) **per phase or plan** once all milestone boxes pass. Then `git rebase origin/main` and fast-forward merge.
 - Always follow SemVer and tag: after merge, create an annotated version tag `vMAJOR.MINOR.PATCH`. Never skip git tags when releasing versions or completing milestone phases.
-- `main` is always green and shippable. No direct commits to `main` except `docs(plans)` and `chore` housekeeping approved by the user.
+- `main` is always green and shippable. No direct commits to `main` except `docs(plans)` and `chore` housekeeping approved by the user (or when executing a plan directly on `main` at the user's request).
 
 ## 7. `PROGRESS.md`
 
 **Mandatory rule: `PROGRESS.md` must ALWAYS be updated.** Every task, bugfix, chore, release bump, or decision must be recorded here in the same commit. Never leave completed work undocumented or leave `PROGRESS.md` stale.
 
-Stored under `.agents/PROGRESS.md` (FX also keeps `.agents/FX/PROGRESS-FX.md`). Template:
+Stored under `.agents/PROGRESS.md`. Template:
 
 ```markdown
 # PROGRESS
 
 ## Current
-Task: F3.2b  ·  Branch: phase/F3-cover-wall  ·  Started: 2026-11-08
+Task: none  ·  Branch: main  ·  Updated: 2026-11-11
 
 ## Done
 - B0.1 to B5.x: base engine (released v0.1.0)
-- F0.1, F0.2a, F0.2b, ...
+- F0 to F8: FX front-end
+- L0.1 to L6.2: library sync
 
 ## Milestones
-- [x] F0 (tag milestone/F0)
-- [ ] F1: 3 of 7 boxes checked (list the unchecked ones)
+- [x] Base engine (Phase 0 - 5)
+- [x] FX (Phase F0 - F8)
 
 ## Open questions (needs the user)
 - 2026-11-08: ... (blocking? yes/no)
@@ -202,7 +208,7 @@ Task: F3.2b  ·  Branch: phase/F3-cover-wall  ·  Started: 2026-11-08
 - 2026-11-08: fixture shows X, plan assumed Y; followed fixture (commit: see `git log --grep "Task: F2.1"`)
 ```
 
-Do not record commit hashes (they change on rebase); use the `Task:` trailer to find commits.
+Do not record commit hashes (they change on rebase); use the `Task:` trailer or commit subject to find commits.
 
 ## 8. When to stop and ask
 
@@ -217,9 +223,9 @@ Otherwise decide, record it under *Decisions and deviations*, and continue. Neve
 
 ## 9. Definition of done
 
-**Task:** test written and passing, full gate green, behaviour documented where users or later agents need it, `PROGRESS.md` updated, commit message passes `check-commit-msg.sh`.
+**Task / Step:** test written and passing, full gate green, behaviour documented where users or later agents need it, `PROGRESS.md` updated, commit message follows §5.
 
-**Phase:** every milestone checkbox true (manual ones confirmed by the user), `scripts/check.sh` green on `main`, branch rebased and fast-forward merged, `milestone/<ID>` tag created, `PROGRESS.md` updated.
+**Phase / Plan:** every milestone checkbox true (manual ones confirmed by the user), `scripts/check.sh` green on `main`, branch rebased and fast-forward merged, SemVer `vMAJOR.MINOR.PATCH` tag created when releasing, `PROGRESS.md` updated.
 
 ## 10. Fixtures, credentials and privacy
 
@@ -230,7 +236,7 @@ Otherwise decide, record it under *Decisions and deviations*, and continue. Neve
 
 ---
 
-## Appendix A: scripts and configuration to create (task T0.x)
+## Appendix A: scripts and configuration (task T0.x)
 
 All scripts need `bash` and `ripgrep` (`rg`). On Windows use Git Bash. Make them executable.
 
@@ -268,12 +274,12 @@ UI_DIRS=(crates/bcvault/src/ui crates/bcvault-fx/src/views crates/bcvault-fx/src
          crates/bcvault-fx/src/paint crates/bcvault-fx/src/motion crates/bcvault-fx/src/theme)
 
 guard "UI code must not block or do I/O" \
-  rg -n 'block_on|rusqlite|reqwest|std::fs|tokio::fs|rfd::FileDialog' "${UI_DIRS[@]}" --glob '!**/fonts.rs'
+  rg -n 'block_on|rusqlite|reqwest|std::fs|tokio::fs|rfd::FileDialog' "${UI_DIRS[@]}" --glob '!**/theme/mod.rs'
 guard "classic UI: non-zero corner radius" no_round 'corner_radius\(' crates/bcvault/src/ui
 guard "fx: round primitives" no_round \
   'circle_|Shape::circle|rounding|corner_radius|CornerRadius::(same|from|new)|Spinner' crates/bcvault-fx/src
-guard "reqwest clients must be built in bandcamp/gate.rs only" \
-  rg -n 'reqwest::(Client|ClientBuilder)' crates --glob '!**/bandcamp/gate.rs' --glob '!**/tests/**' --glob '!**/examples/**'
+guard "reqwest clients must be built in bandcamp module only" \
+  rg -n 'reqwest::(Client|ClientBuilder)' crates --glob '!**/bandcamp/**' --glob '!**/tests/**' --glob '!**/examples/**'
 guard "secrets in log macros" \
   rg -n -i '(info|warn|error|debug|trace)!\(.*(password|passwd|secret|[?&]sig=|\bsig\b)' crates
 guard "shipped migrations must not be modified" bash -c '
@@ -305,7 +311,7 @@ if [[ "$subject" =~ ^Merge\  || "$subject" =~ ^Revert\ \" || "$subject" =~ ^(fix
   exit 0
 fi
 
-scopes='workspace|core|db|bandcamp|gate|worker|sync|downloads|quota|types|classic|fx|library|mail|tooling|deps|docs|plans|release'
+scopes='workspace|core|db|bandcamp|gate|worker|sync|downloads|quota|types|classic|ui|fx|library|mail|settings|groups|keyboard|theme|archive|tooling|deps|docs|plans|release'
 re="^(feat|fix|perf|refactor|test|docs|build|ci|chore|style)\\((${scopes})(/[a-z0-9-]+)?\\)(!)?: [a-z].*[^.]\$"
 
 [[ "$subject" =~ $re ]] || fail "expected type(scope): lowercase imperative summary, no trailing period"
@@ -349,6 +355,13 @@ exit "$status"
 ### Hooks (`.githooks/`) and installer
 
 ```bash
+# .githooks/pre-push (currently installed)
+#!/usr/bin/env bash
+exec scripts/install-fx.sh
+```
+
+```bash
+# Optional full hook suite (if commit-msg/pre-commit hooks are enabled)
 # .githooks/pre-commit
 #!/usr/bin/env bash
 exec scripts/check.sh --fast
@@ -356,23 +369,6 @@ exec scripts/check.sh --fast
 # .githooks/commit-msg
 #!/usr/bin/env bash
 exec scripts/check-commit-msg.sh "$1"
-
-# .githooks/pre-push
-#!/usr/bin/env bash
-set -euo pipefail
-scripts/check.sh
-if git rev-parse --verify -q origin/main >/dev/null; then scripts/check-commits.sh origin/main..HEAD; fi
-```
-
-```bash
-# scripts/install-hooks.sh
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
-chmod +x .githooks/* scripts/*.sh
-git config core.hooksPath .githooks
-git config commit.template .gitmessage
-echo "hooks installed"
 ```
 
 ### `.gitmessage`
@@ -413,21 +409,4 @@ commit_parsers = [
 ]
 ```
 
-### `.github/workflows/ci.yml` (only if the repository is hosted on GitHub; use current major versions of the actions, and add the system packages eframe needs on Linux)
-
-```yaml
-name: ci
-on:
-  push: { branches: [main] }
-  pull_request:
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - run: rustup show            # installs the toolchain pinned in rust-toolchain.toml
-      - run: sudo apt-get update && sudo apt-get install -y ripgrep
-      - run: scripts/check.sh
-      - run: scripts/check-commits.sh origin/main..HEAD
-```
+### `.github/workflows/ci.yml` (shipped in `.github/workflows/ci.yml`: builds Linux and Windows release archives and runs `./scripts/check.sh` on `v*` tags and `workflow_dispatch`)

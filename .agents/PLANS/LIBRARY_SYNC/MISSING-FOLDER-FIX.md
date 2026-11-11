@@ -1,8 +1,8 @@
 # Plan: ask the user when a whole linked folder is gone
 
-For the coding agent. Repo: bcvault (Rust workspace). Scope: `crates/bcvault-core/src/worker/{library,sync,supervisor,messages}.rs`, `types.rs`, `library/verify.rs` (only if needed), both UIs (state, dock, sidebar, one new dialog each), and docs. Place this file at `.agents/LIBRARY_SYNC/MISSING-FOLDER-FIX.md`.
+For the coding agent. Repo: bcvault (Rust workspace). Scope: `crates/bcvault-core/src/worker/{library,sync,supervisor,messages}.rs`, `types.rs`, `library/verify.rs` (only if needed), both UIs (state, dock, sidebar, one new dialog each), and docs. Place this file at `.agents/PLANS/LIBRARY_SYNC/MISSING-FOLDER-FIX.md`.
 
-> Status: not started. Steps are `Task: none` commits (step numbers go in `PROGRESS.md`), like `MATCH-FIX.md`.
+> Status 11 Nov 2026: **implemented** on `main` (Steps 1 to 5 in `v0.1.1` and `v0.1.2`; `Task: none` commits recorded in `PROGRESS.md`). Later amended by `MULTI_FOLDER.md` (`UnavailableRoot::Linked { folder_id }`) and `VERIFY-DOWNLOAD-DIR-FIX.md` (`UnavailableAction::MovedToLinked`).
 
 ## 0. Ground rules
 

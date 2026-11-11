@@ -6,7 +6,7 @@ For the coding agent. Repo: bcvault (Rust workspace). Scope: `bcvault-core` (pur
 
 - **Branch.** `feat/artist-groups` from the repository default branch. Never force-push.
 - **Merge order.** After `SETTINGS_TABS.md` and `DOWNLOAD_FLOW.md`; before `KEYBOARD.md`, which then covers the final sidebar row model. `AUTO_SYNC.md` also touches the sidebar and the Artists view; whichever merges second rebases. Add UI inside new functions and files, not into the existing list loops.
-- **Migration.** One new migration, **numbered by landing order** (`ROADMAP.md` §5): the lowest free number at merge time. At the time of writing `0007` is reserved by `AUTO_SYNC.md` and `0008` by `ARCHIVE.md`; if this lands first it takes `0007` and you renumber those unmerged plans and the ROADMAP table in the same docs commit. Never edit a merged migration. It is breaking for older binaries (`feat(db)!`, `BREAKING CHANGE:` footer; ship both apps together).
+- **Migration.** One new migration, **numbered by landing order** (`ROADMAP.md` §5): the lowest free number at merge time. The schema is currently at version 8 (`0008_rejected_matches.sql`), so if this lands before `AUTO_SYNC.md` it takes `0009_artist_groups.sql` and you renumber the remaining unmerged plans and the `ROADMAP.md` §5 table in the same docs commit. Never edit a merged migration. It is breaking for older binaries (`feat(db)!`, `BREAKING CHANGE:` footer; ship both apps together).
 - Conventional Commits, one commit per step in section 7, `Task: none`. Every commit compiles and passes `scripts/check.sh`. Non-test code must not use `unwrap` or `expect`.
 - **Never destroy information silently** (`AGENTS.md` rule 8). Groups are user-curated data: deleting a group asks for confirmation and states how many manual placements it holds. Groups never change releases, library state or files.
 - **UI-thread purity and square look** apply. Group evaluation is pure in-memory code and runs on the UI thread only over data already in state; it never touches the database.
@@ -156,7 +156,7 @@ One commit per step, every commit green.
 6. `feat(fx/sidebar): render groups with actions and palette commands`.
 7. `feat(fx/groups): add the group editor`.
 8. `feat(core): filter releases by several artists` (§3.6, test 13) and `feat(classic): view the releases of a group` and `feat(fx): view the releases of a group` as separate commits if the diff exceeds the size guideline.
-9. `feat(fx,classic): drag artists onto group headers` (optional; skip if it risks the schedule and record it in `PROGRESS.md`).
+9. `feat(fx/sidebar): drag artists onto group headers` (and `feat(classic/sidebar): drag artists onto group headers` if implemented in both; optional — skip if it risks the schedule and record it in `PROGRESS.md`).
 10. `docs(groups): document groups and rules` (README, `docs/groups.md` rule reference, ROADMAP migration row, `PROGRESS.md`).
 
 ## 8. Definition of done

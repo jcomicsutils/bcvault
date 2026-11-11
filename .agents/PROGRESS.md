@@ -1,9 +1,11 @@
 # PROGRESS
 
 ## Current
-Task: none (VERIFY-DOWNLOAD-DIR-FIX completed; ready for next plan)  ·  Branch: main  ·  Updated: 2026-11-11
+Task: none (released v0.1.3; `.agents` audited and synced; ready for next plan)  ·  Branch: main  ·  Updated: 2026-11-11
 
 ## Done
+- none: release v0.1.3 bump; audit and reconcile all `.agents/` markdown files (`AGENTS.md`, `ROADMAP.md`, `PROGRESS.md`, `Initial Plan.md`, and `PLANS/*`) with codebase, migrations `0001`–`0008`, and full plan catalog
+- none: remove unused `is_all_scope` variable and unused `MatchDecision` imports in worker and UI modals
 - none: document download-dir verify relink and rescan workflow (`VERIFY-DOWNLOAD-DIR-FIX.md` step 3)
 - none: add MovedToLinked action to resolve_unavailable and UI modals (`VERIFY-DOWNLOAD-DIR-FIX.md` step 2)
 - none: relink out_dir releases to linked folders and rescan on verify (`VERIFY-DOWNLOAD-DIR-FIX.md` step 1)
@@ -26,7 +28,7 @@ Task: none (VERIFY-DOWNLOAD-DIR-FIX completed; ready for next plan)  ·  Branch:
 - MULTI-FOLDER 2: scan, match and verify across an artist's folders (tests 10-17)
 - MULTI-FOLDER 1: allow several folders per artist (migration 0006, breaking)
 - B0.1 to B5.x: base engine (phase-sized commits, before the commit convention)
-- F0 to F8: FX front-end (one squashed commit plus fixes; details in `FX/PROGRESS-FX.md`)
+- F0 to F8: FX front-end (one squashed commit plus fixes)
 - L0.1: add library status columns and artist folder link schema
 - L0.2: add library statuses, settings fields and filters
 - L0.3: add artist folder links with overlap validation
@@ -98,20 +100,27 @@ Task: none (VERIFY-DOWNLOAD-DIR-FIX completed; ready for next plan)  ·  Branch:
 - [x] L4: Classic UI
 - [x] L5: FX integration and polish
 - [x] L6: Hardening
+- [x] MATCH-FIX: Exact-first matching and folder style templates (Steps 1 to 8)
+- [x] BADGE-REFORM: On-page eligible and non-eligible download counts (Steps 1 to 6, migration 0005)
+- [x] MISSING-FOLDER-FIX: Unavailable folder detection and batch resolution (Steps 1 to 5)
 - [x] MULTI-FOLDER: Many folders per artist, one artist per folder (Steps 1 to 6, migration 0006)
+- [x] DOWNLOAD-DIR-FIX: Real download-dir link guard and adoptable out_dir downloads (Steps 1 and 2)
+- [x] Unavailable classification: 0-track detection and manual unavailable toggle (migration 0007)
+- [x] REVIEW-AND-MATCH-FIX: Persistent review rejection, conflict resolution, and URL/slug release picker (Steps 1 to 5, migration 0008)
+- [x] VERIFY-DOWNLOAD-DIR-FIX: Auto-relink out_dir releases to linked folders and rescan on verify (Steps 1 to 3)
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
-- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; current HEAD is tagged `v0.1.2`).
+- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; current HEAD is `v0.1.3`).
 
 ## Open questions (needs the user)
-- 2026-11-08: create `milestone/F*` and `milestone/L*` tags retroactively, or record skipping them? (blocking: no)
+- 2026-11-08: create `milestone/F*` and `milestone/L*` tags retroactively, or record skipping them? (resolved: `AGENTS.md` rule 13 specifies SemVer version tags exclusively, no `milestone/<ID>` tags)
 
 ## Decisions and deviations
 - 2026-11-07: Fixed prefix bias in candidate matching by comparing folder title parts without artist prefix and replacing Jaro-Winkler with normalized Levenshtein and token-set Jaccard; tightened multi-folder conflict detection to prevent false cascades; displayed already-linked releases in ReconcileReport Matched tab.
 - 2026-11-07: Clamped modal dialog windows to viewport bounds with max_size, truncated long titles and folder paths across report tabs with hover tooltips, and wired the Escape key to close the topmost open modal dialog.
 - 2026-11-08: Applied MATCH-FIX plan: replaced NFKC/heuristic noise-stripping with exact-first matching architecture and user-declared FolderStyle templates + noise list. Exact matches resolve prior to fuzzy scoring via authoritative URL tags and connected components (only true duplicates/disagreements produce conflicts). Fuzzy scoring runs only on leftover items with digit multiset guard and containment capped at 0.85 (never auto-adopted). Persisted folder style in settings and exposed configuration editors in both Classic and FX UIs.
 - 2026-11-08: Replaced `{downloaded}/{eligible}/{total}` sidebar badge with `{eligible dl} (+ {non-eligible dl})/eligible/page total`. Updated SQL queries to determine current page releases via latest sync timestamps and split downloaded releases into eligible vs. non-eligible (paid or off-page). Added spring motion in FX and detailed hover tooltips across both front-ends.
-- 2026-11-08: Library work was committed directly on `main` (no `phase/L*` branches, no milestone tags). Migration numbers differ from the plan: `0003` was already taken by `custom_artist_name`, so library is `0004_library.sql`, and the badge rework added `0005_artist_folder_local_only.sql`. Planned: `0006` multi-folder, `0007` unavailable classification, `0008` auto sync, `0009` archive, mail takes the next free number.
-- 2026-11-08: L2.2 was committed as `feat(library): greedy 1-to-1 candidate assignment` (plan: `assign matches one-to-one and detect conflicts`); L1.5 (fixture builder) was folded into L1.3, as the plan allowed. `COMMIT_PLAN.md` updated to match.
+- 2026-11-08: Library work was committed directly on `main` (no `phase/L*` branches, no milestone tags). Migration numbers differ from the original plan: `0003` was already taken by `custom_artist_name`, so library is `0004_library.sql`, badge rework added `0005_artist_folder_local_only.sql`, multi-folder added `0006_artist_folders_multi.sql`, unavailable classification added `0007_unavailable.sql`, and review rejection added `0008_rejected_matches.sql`. Next free migration is `0009` (see `ROADMAP.md` §5).
+- 2026-11-08: L2.2 was committed as `feat(library): greedy 1-to-1 candidate assignment` (plan: `assign matches one-to-one and detect conflicts`); L1.5 (fixture builder) was folded into L1.3, as the plan allowed.
 - 2026-11-09: `.agents/` is now tracked in git (previously excluded via `.git/info/exclude`). Added `.githooks/pre-push` to automatically copy the newest compiled `bcvault-fx` binary to `~/.local/bin/` and generate/update `bcvault-fx.desktop` with standard audio category and generic icon.
 - 2026-11-08: T0 tooling: integrated architectural guards (UI purity, square look, single gate, secrets in logs, migration immutability) into scripts/check.sh and scripts/guards.sh; skipped commit hook and commit message enforcement ceremony. Fixed synchronous settings JSON export in bcvault-fx to run off the UI thread via spawn_blocking.
 - 2026-11-08: Applied MISSING-FOLDER-FIX plan: when an artist's linked folder or out_dir is unavailable (Missing or Unreadable), verify emits FolderUnavailable instead of silently keeping Unknown releases. Attribution checks each release against its true root so releases elsewhere verify normally. Unavailable roots are never auto-resolved, even with on_missing = Auto; the Resolve Unavailable Folder dialog provides Keep, Repoint, and Deleted policies with single-batch undo and optional unlinking. Added FOLDER n warning dock chips, Resolve unavailable folder... sidebar actions, and derived FOLDER MISSING badges in both classic and FX front-ends. Excluded Unknown releases from mass-missing ratio calculations.
@@ -125,3 +134,4 @@ Task: none (VERIFY-DOWNLOAD-DIR-FIX completed; ready for next plan)  ·  Branch:
 - 2026-11-11: Added full project documentation suite: `docs/architecture.md` (crate boundaries, UI-thread purity invariants, worker supervisor/message protocol, `BandcampGate` rate-limiting, sidecar services, paths/locks, quality gate), `docs/database.md` (`bcvault.db` v8 and `fx.sqlite` v1 schema tables, indexes, migration history, batch undo log), `docs/user-guide.md` (end-to-end guide for `bcvault-fx`, `bcvault`, and headless CLI, settings reference, filename patterns, quota rules), expanded `docs/endpoints.md` (input normalization, `/music` grid & overflow scraping, `script[data-tralbum]` classification tree, `buy_for_nothing`, `/statdownload/`, redeem validation, and CDN artwork tiers), and updated `README.md`.
 - 2026-11-11: Implemented `VERIFY-DOWNLOAD-DIR-FIX.md`: (1) auto-relink `unknown_rels` under `UnavailableRoot::OutDir` against reachable (`Ok`) linked artist folders in `verify_files` before emitting `FolderUnavailable`, and stop emitting empty 0-release `OutDir` cards on `SyncScope::All`; (2) auto-restore `assignment.restorable` in `rescan_and_adopt_on_sync` and `match_artist_folder_internal`, and rescan `Ok` linked folders at the end of manual `verify_files` so unmarked (`downloaded = 0`), archived (`KeepMarked`), and `out_dir`-resident releases are matched and adopted/restored into linked folders; (3) add `UnavailableAction::MovedToLinked` and a "Scan linked folder" button to `Resolve Unavailable Folder` for `OutDir` cards.
 - 2026-11-11: Removed unused `is_all_scope` variable in `bcvault-core::worker::library` and unused `MatchDecision` imports in `bcvault::ui::modals` and `bcvault-fx::overlays::modals`.
+- 2026-11-11: Audited and reconciled all `.agents/` markdown files (`AGENTS.md`, `ROADMAP.md`, `PROGRESS.md`, `Initial Plan.md`, and `PLANS/*`): removed duplicate `.agents/MISSING-FOLDER-FIX.md`, registered `SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, and `KEYBOARD.md` in `AGENTS.md` and `ROADMAP.md`, added rules 15 and 16 and expanded allowed commit scopes in `AGENTS.md`, updated migration numbering across `AUTO_SYNC.md`, `ARCHIVE.md`, and `ARTIST_GROUPS.md` for schema v8 (`MAX_VERSION = 8`), updated plan status callouts, and bumped workspace version to `v0.1.3`.

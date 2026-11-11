@@ -18,7 +18,7 @@
 4. A user action (button press) is the only trigger. After a failed login the app does not retry on its own. If you enable email cleanup (§7.1), one short second session may run when that press's downloads finish; anything left over is retried only on your next press, never in the background.
 5. Parsers are developed against owner-supplied, sanitised `.eml` files (§6.1). The first real sample has been received and is already reflected in this plan; where later fixtures disagree with the plan's assumptions, the fixtures win.
 
-**Workflow.** Follow `AGENTS.md` (standing rules, Conventional Commits, quality gate) and `ROADMAP.md` (order and migration numbering). Task IDs for this plan are `M<phase>.<n>[letter]` (for example `M3.2`); the exact commit subject for each is in `COMMIT_PLAN.md`.
+**Workflow.** Follow `AGENTS.md` (standing rules, Conventional Commits, quality gate) and `ROADMAP.md` (order and migration numbering). Task IDs for this plan are `M<phase>.<n>[letter]` (for example `M3.2`) or `Task: none` per phase/step; record completed tasks in `PROGRESS.md`.
 
 **Decisions made for you (veto any)**
 

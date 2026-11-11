@@ -1,8 +1,8 @@
 # Plan: several linked folders per artist
 
-For the coding agent. Repo: bcvault (Rust workspace). Place this file at `.agents/LIBRARY_SYNC/MULTI_FOLDER.md`. It amends `LIBRARY_SYNC_PLAN.md` §5 ("one folder per artist, one artist per folder") to **many folders per artist, one artist per folder**.
+For the coding agent. Repo: bcvault (Rust workspace). Place this file at `.agents/PLANS/LIBRARY_SYNC/MULTI_FOLDER.md`. It amends `LIBRARY_SYNC_PLAN.md` §5 ("one folder per artist, one artist per folder") to **many folders per artist, one artist per folder**.
 
-> Status: not started. Steps are `Task: none` commits (step numbers go in `PROGRESS.md`), like `MATCH-FIX.md`.
+> Status 11 Nov 2026: **implemented** on `main` (Steps 1 to 6, migration `0006_artist_folders_multi.sql`, shipped in `v0.1.3`; `Task: none` commits recorded in `PROGRESS.md`).
 > **Prerequisite:** `MISSING-FOLDER-FIX.md` has landed. This plan generalises its `UnavailableRoot::Linked { band_id }` to `Linked { folder_id }` and its single-link per-release root attribution to "longest matching link among N". If that fix has not landed, do it first and do not merge the two plans.
 > **Out of scope:** downloading into a linked folder (downloads keep using `out_dir` and the layout setting), per-folder scan depth, per-link folder style, link labels.
 

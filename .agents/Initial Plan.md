@@ -2,7 +2,7 @@
 
 *Rust 2024 · eframe/egui · tokio · reqwest · rusqlite (WAL) · working name `bcvault` · prepared 6 Nov 2026*
 
-> Status 8 Nov 2026: **implemented**, tagged `v0.1.0`. Later work moved the code into a workspace (`crates/bcvault-core`, `crates/bcvault`, `crates/bcvault-fx`) and added main-DB migrations `0003_custom_artist_name` to `0005`; paths in this plan are pre-split. The code is authoritative where it differs.
+> Status 11 Nov 2026: **implemented**, tagged `v0.1.0` (current workspace version `v0.1.3`). Later work moved the code into a workspace (`crates/bcvault-core`, `crates/bcvault`, `crates/bcvault-fx`) and added main-DB migrations `0003_custom_artist_name` to `0008_rejected_matches` (including `Classification::Unavailable` in `0007`); paths in this plan are pre-split. The code is authoritative where it differs.
 
 ## 0. How to use this plan
 

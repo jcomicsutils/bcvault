@@ -5,7 +5,7 @@ For the coding agent. Repo: bcvault (Rust workspace). Scope: `bcvault-core` (syn
 ## 0. Ground rules
 
 - **Branch.** Create `feat/auto-sync` from the repository default branch (`git symbolic-ref refs/remotes/origin/HEAD`), not from `feat/file-themes` (the library work is already on `main`). Never force-push.
-- **Merge order.** This plan merges before the archive plan, which rebases onto it (both touch `worker/sync.rs`). Every in-flight plan edits the Settings modals, so keep modal changes in new functions or files. Migration numbering: the schema is already at version 5, so this plan uses 0006`_auto_sync.sql`. If another migration landed first, take the next free number, and never renumber a merged migration.
+- **Merge order.** This plan merges before the archive plan, which rebases onto it (both touch `worker/sync.rs`). Every in-flight plan edits the Settings modals, so keep modal changes in new functions or files (or add a `Sync` tab if `SETTINGS_TABS.md` has landed). Migration numbering: the schema is at version 8 (`0008_rejected_matches.sql`), so this plan uses `0009_auto_sync.sql` (or the lowest free number at merge time per `ROADMAP.md` §5; never renumber a merged migration).
 - Conventional Commits, one commit per step in section 9. Every commit compiles and passes tests. Run `scripts/check.sh` before each commit. Non-test code must not use `unwrap` or `expect`. The fx bans from `scripts/check.sh` apply (`circle_`, `Shape::circle`, `rounding`, non-zero `corner_radius`, `Spinner`), including any badge you draw.
 - **Politeness is a product rule.** Every request goes through the existing client and `BandcampGate`. Never add a request path that bypasses the gate, and never bypass email or payment gates.
 - **Archival is a product rule.** No code path may delete, blank or overwrite a release, its metadata, its classification or its download state because it disappeared from Bandcamp or because a fetch failed. Missing releases are flagged only.
@@ -55,7 +55,7 @@ Reclassification events: when a release page is fetched, compare the old `classi
 
 ## 4. Removed and unlisted releases
 
-Migration `0006_auto_sync.sql` (verify that `ALTER TABLE ... ADD COLUMN` with `CHECK` works on these STRICT tables, and adapt if not):
+Migration `0009_auto_sync.sql` (or next free number; verify that `ALTER TABLE ... ADD COLUMN` with `CHECK` works on these STRICT tables, and adapt if not):
 
 ```sql
 ALTER TABLE artists ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 1 CHECK (auto_sync IN (0,1));
@@ -170,7 +170,7 @@ Behavior:
 
 Each step leaves the workspace compiling with tests green.
 
-1. `feat(db): add auto-sync, missing-release and sync-event schema` adds migration `0006`, repo functions and types.
+1. `feat(db)!: add auto-sync, missing-release and sync-event schema` adds migration `0009` (or lowest free number, with `BREAKING CHANGE:` footer), repo functions and types.
 2. `feat(sync): flag releases missing from the artist page` covers detection, guard, verification fetch, the typed 404 and 410 error, and `restored` events, for all modes.
 3. `feat(sync): add auto and quick-check sync modes` adds the variants, queue building and reclassification events.
 4. `feat(sync): allow excluding artists from automatic and bulk sync` adds the command, scope filtering and skipped counts.

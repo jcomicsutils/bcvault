@@ -3,7 +3,7 @@
 *Addendum to `Initial Plan.md` (and compatible with `FX_PLAN.md`) · lives in `bcvault-core`, UI in both front-ends · prepared 6 Nov 2026, revised 7 Nov 2026 (scope narrowed to one folder per artist)*
 
 > [!NOTE]
-> Status 8 Nov 2026: **implemented** (L0 to L6 on `main`). Differences from this text: the migration is `0004_library.sql` (`0003` was taken by `custom_artist_name`) and `0005_artist_folder_local_only.sql` adds `artist_folders.local_only_count`; normalisation lives in `library/textmatch.rs` (not `normalize.rs`); §5 normalisation and §6 scoring were replaced by `MATCH-FIX.md` (exact-first matching, `library/folder_style.rs` templates, no NFKC noise stripping, no Jaro-Winkler). Treat the code and `MATCH-FIX.md` as authoritative where they differ.
+> Status 11 Nov 2026: **implemented** (L0 to L6 on `main`). Differences and later amendments to this text: the initial migration is `0004_library.sql` (`0003` was taken by `custom_artist_name`), `0005_artist_folder_local_only.sql` adds `artist_folders.local_only_count`, `0006_artist_folders_multi.sql` (`MULTI_FOLDER.md`) generalises folder links to many-per-artist, `0007_unavailable.sql` adds `unavailable` classification, and `0008_rejected_matches.sql` (`REVIEW-AND-MATCH-FIX.md`) adds `artist_folder_rejected`; normalisation lives in `library/textmatch.rs` (not `normalize.rs`); §5 and §6 were amended by `MATCH-FIX.md`, `MISSING-FOLDER-FIX.md`, `MULTI_FOLDER.md`, `DOWNLOAD-DIR-FIX.md`, `REVIEW-AND-MATCH-FIX.md`, and `VERIFY-DOWNLOAD-DIR-FIX.md`. Treat the code and those amendment plans as authoritative where they differ.
 
 ## 0. How to use this plan
 
@@ -32,7 +32,7 @@
 5. **One folder, one artist, enforced.** A linked folder may not equal, contain or sit inside another artist's linked folder (§5.1).
 6. Prerequisite: Phase F0 of `FX_PLAN.md` (workspace split) is done, so core code is shared by both apps. Run the core phases (L0 to L3) in any order relative to the FX phases; the UI phases L4 and L5 follow the front-ends.
 
-**Workflow.** Follow `AGENTS.md` (standing rules, Conventional Commits, quality gate) and `ROADMAP.md` (order and migration numbering). Task IDs for this plan are `L<phase>.<n>[letter]`. The task list and subjects in `COMMIT_PLAN.md` were written for the previous, wider scope and must be regenerated from this revision (the phase names below are unchanged, their contents are smaller).
+**Workflow.** Follow `AGENTS.md` (standing rules, Conventional Commits, quality gate) and `ROADMAP.md` (order and migration numbering). Task IDs for this plan are `L<phase>.<n>[letter]` (all completed and recorded in `PROGRESS.md`).
 
 **Decisions made for you (veto any)**
 

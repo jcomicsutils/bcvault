@@ -2,7 +2,7 @@
 
 For the coding agent. Repo: bcvault (Rust workspace). Scope: `crates/bcvault-core/src/library/*`, the `Settings` struct, both UI settings modals, and docs.
 
-> Status 8 Nov 2026: **implemented** on `main` (eight `Task: none` commits, listed in `COMMIT_PLAN.md` section U). The `sync library` branch named below no longer exists; the work was committed on `main`.
+> Status 11 Nov 2026: **implemented** on `main` (eight `Task: none` commits, recorded in `PROGRESS.md`). The `sync library` branch named below no longer exists; the work was committed on `main`.
 
 ## 0. Ground rules
 
