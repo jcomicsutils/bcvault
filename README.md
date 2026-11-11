@@ -17,6 +17,18 @@
 
 ---
 
+## Documentation Index
+
+| Document | Description |
+| :--- | :--- |
+| **[User Guide](docs/user-guide.md)** | End-to-end manual for `bcvault-fx` (Eye-Candy Edition), `bcvault` (Classic Edition), and the headless CLI, including sync modes, filename patterns, quota rules, and all settings. |
+| **[Library Sync & Folder Links](docs/library.md)** | Deep dive into N:1 artist folder linking, candidate scanning, exact-first and fuzzy matching, folder style templates, review rejection, URL/slug release matching, and disk verification safeguards. |
+| **[System Architecture](docs/architecture.md)** | Crate boundaries, UI-thread purity invariants, worker supervisor & message protocol, `BandcampGate` rate-limiting, sidecar services, and developer workflow. |
+| **[Database Schema Reference](docs/database.md)** | Complete SQLite schema specification for `bcvault.db` (v8) and `fx.sqlite` (v1), partial indexes, migration history, and batch undo audit log. |
+| **[Bandcamp Endpoints & Scraping](docs/endpoints.md)** | Technical reference for `/music` grid scraping, `script[data-tralbum]` parsing, classification decision tree, `buy_for_nothing` checkout, `/statdownload/` polling, redeem validation, and artwork CDN tiers. |
+
+---
+
 ## Releases
 
 Pre-compiled release archives are available on the [GitHub Releases](https://github.com/jcomicsutils/bcvault/releases) page for every tagged release:
@@ -30,7 +42,7 @@ Pre-compiled release archives are available on the [GitHub Releases](https://git
 
 ### Discography Tracking and Classification
 - **Universal Resolver**: Ingests artist slugs (`artist-slug`), full Bandcamp URLs (`https://artist-slug.bandcamp.com`), and custom artist domains (`https://custom-domain.example.com`).
-- **Comprehensive Scraper**: Parses both initial `/music` release grids and dynamic `data-client-items` overflow batches.
+- **Comprehensive Scraper**: Parses both initial `/music` release grids and dynamic `data-client-items` overflow batches, with automatic fallback to `band_details`.
 - **Release Classification**:
   - `FREE`: Direct download available without payment or email requirement.
   - `NYP` (Name-Your-Price): Free download eligible via zero-dollar checkout.
@@ -45,15 +57,16 @@ Pre-compiled release archives are available on the [GitHub Releases](https://git
 - **Full Refresh**: Force-updates the complete discography metadata while preserving local download history and custom tags.
 
 ### Polite Scraping and Traffic Guard
-- **`BandcampGate` Pacing**: Centralized token-bucket rate limiter with configurable delays, random jitter, and per-artist concurrency limits.
+- **`BandcampGate` Pacing**: Centralized rate limiter with configurable delays, random jitter, and per-artist concurrency limits.
 - **Cooldown and Retry Enforcement**: Respects HTTP `429 Too Many Requests`, `503 Service Unavailable`, and `Retry-After` headers with exponential backoff.
 - **Rolling Quota Protection**: Tracks rolling 30-day downloads per artist locally (default: `150` soft warning / `200` hard cap) and halts queues if Bandcamp reports free monthly download exhaustion.
 - **Ethical Email Gate Handling**: Never attempts to spoof or bypass email verification or payment barriers. Provides direct browser redirection and a one-click **Redeem URL** intake dialog.
 
 ### Artist Folder Links and Library Sync
-- **1-to-1 Artist Folder Binding**: Tie a local music folder to any Bandcamp artist page with non-destructive candidate matching and format guessing (see [`docs/library.md`](docs/library.md)).
+- **Multi-Folder Artist Binding (N:1)**: Link one or more local music folders (across drives or directories) to any Bandcamp artist page with non-destructive candidate scanning, format guessing, and declarative folder style templates (see [`docs/library.md`](docs/library.md)).
+- **Persistent Review Rejection & URL/Slug Matching**: Dismiss false fuzzy/containment review proposals permanently with **Wrong, don't ask again**, resolve conflicts interactively, and attach local folders to exact releases by searching or pasting a Bandcamp URL or slug (`album/split-3`).
 - **Disk Verification & Safeguards**: Probes volume roots and storage devices to ensure unmounted drives never trigger accidental deletions. Mass-missing guard halts automated operations if >30% of albums disappear in a single pass.
-- **Archive Workflow & Auto-Relink**: Silently relinks albums moved within a linked folder. Supports keeping deleted albums marked as downloaded (`archived`) or unmarking them.
+- **Archive Workflow & Auto-Relink**: Silently relinks albums moved within or across an artist's linked folders. Supports keeping deleted albums marked as downloaded (`archived`) or unmarking them.
 - **Full Non-Destructive Undo**: Every library action creates a batch transaction with before/after audit entries in `library_events` and instant undo support.
 
 ### Design
@@ -69,7 +82,7 @@ Pre-compiled release archives are available on the [GitHub Releases](https://git
 
 | Crate | Path | Description |
 | :--- | :--- | :--- |
-| **`bcvault-core`** | [`crates/bcvault-core`](crates/bcvault-core) | Headless scraping engine, `BandcampGate` rate-limiting, release classification, audio format negotiation, stream extraction, and SQLite WAL database repository. |
+| **`bcvault-core`** | [`crates/bcvault-core`](crates/bcvault-core) | Headless scraping engine, `BandcampGate` rate-limiting, release classification, audio format negotiation, stream extraction, local library scanner/matcher, and SQLite WAL database repository. |
 | **`bcvault-fx`** | [`crates/bcvault-fx`](crates/bcvault-fx) | **Eye-Candy Edition GUI**: Virtualized Cover Wall, spring physics, dynamic OKLab theming, slide-over Detail Drawer, fuzzy Command Palette (`Ctrl+K`), Treemap and Calendar stats visualizations, and sidecar database. |
 | **`bcvault`** | [`crates/bcvault`](crates/bcvault) | **Classic Desktop GUI**: High-density spreadsheet table interface with virtualized rendering for 100,000+ release collections. |
 
@@ -135,19 +148,16 @@ cargo run --release -p bcvault
 ```
 High-density, low-latency table view optimized for rapidly triaging and batch-downloading thousands of items.
 
-### 3. Headless CLI (`bcvault-core`)
+### 3. Headless CLI (`bcvault`)
 
 Run operations from the terminal without graphical dependencies:
 
 ```bash
-# Add a new artist to the vault
-cargo run -p bcvault-core --example headless -- add <artist_slug_or_url>
-
-# Sync an artist discography
-cargo run -p bcvault-core --example headless -- sync <band_id>
+# Add and sync an artist discography
+cargo run --release -p bcvault --example headless -- add <artist_slug_or_url>
 
 # Batch-download eligible releases (formats: flac, mp3-320, mp3-v0, aac-hi, vorbis, alac, wav, aiff-lossless)
-cargo run -p bcvault-core --example headless -- download <band_id> flac ./my_music
+cargo run --release -p bcvault --example headless -- download <band_id> flac ./my_music
 ```
 
 ### 4. High-Load Benchmark
@@ -202,8 +212,8 @@ The storage location can be overridden at runtime by setting the `BCVAULT_DATA_D
 
 ### Database Files
 
-- **`bcvault.db`**: Primary transactional SQLite store operating in WAL mode. Contains normalized artist records, release catalogs, tracklists, download history, and quota ledgers.
-- **`fx.sqlite`**: Attached sidecar database tailored for fast, zero-allocation UI reads, caching OKLab dominant hues, 8x8 RGB blur hashes (`tiny8`), cover dimensions, and aggregated stats.
+- **`bcvault.db`**: Primary transactional SQLite store operating in WAL mode (Schema v8). Contains normalized artist records, release catalogs, download history, quota ledgers, linked artist folders, rejected review pairs, and library undo batches.
+- **`fx.sqlite`**: Attached sidecar database (Schema v1) tailored for fast, zero-allocation UI reads, caching OKLab dominant hues, 8×8 RGB blur hashes (`tiny8`), cover dimensions, and lazy release details.
 
 ---
 
