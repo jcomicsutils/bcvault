@@ -16,6 +16,7 @@
 | Download dir link guard and local-only fix (`PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md`) | Implemented (Steps 1 and 2, no migration) in `main` |
 | Unavailable classification (`0007_unavailable.sql`) | Implemented in `main` (0-track detection, manual unavailable toggle, and folder matching support) |
 | Review rejection & URL/slug match picker (`PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md`) | Implemented (Steps 1 to 5) in `main` (migration `0008_rejected_matches.sql`) |
+| Verify download-dir relink & rescan (`PLANS/LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md`) | Planned, not started; auto-relink moved `out_dir` albums on verify, rescan `Ok` linked folders on manual verify, and add `MovedToLinked` option. |
 | Tooling (T0) | In progress: architectural guards, `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed. |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync. |
