@@ -1010,10 +1010,7 @@ pub fn resolve_release_by_query(
     }
 
     // 1. Full URL match
-    if trimmed.contains("://")
-        || trimmed.contains(".bandcamp.com")
-        || trimmed.starts_with("http")
-    {
+    if trimmed.contains("://") || trimmed.contains(".bandcamp.com") || trimmed.starts_with("http") {
         let norm_input = normalize_bandcamp_url(trimmed);
         if let Some(rel) = releases
             .iter()
@@ -1024,8 +1021,7 @@ pub fn resolve_release_by_query(
         if let Some((kind, slug)) = extract_release_slug(trimmed)
             && let Some(rel) = releases.iter().find(|r| {
                 r.key.kind == kind
-                    && extract_release_slug(&r.url)
-                        .is_some_and(|(rk, rs)| rk == kind && rs == slug)
+                    && extract_release_slug(&r.url).is_some_and(|(rk, rs)| rk == kind && rs == slug)
             })
         {
             return Some(rel.key);
@@ -1046,12 +1042,13 @@ pub fn resolve_release_by_query(
 
     // 3. Unambiguous bare slug `<slug>` (no whitespace or '/')
     let clean_bare = trimmed.trim_matches('/').to_lowercase();
-    if !clean_bare.is_empty() && !clean_bare.contains(char::is_whitespace) && !clean_bare.contains('/') {
+    if !clean_bare.is_empty()
+        && !clean_bare.contains(char::is_whitespace)
+        && !clean_bare.contains('/')
+    {
         let slug_matches: Vec<&ReleaseRow> = releases
             .iter()
-            .filter(|r| {
-                extract_release_slug(&r.url).is_some_and(|(_, rs)| rs == clean_bare)
-            })
+            .filter(|r| extract_release_slug(&r.url).is_some_and(|(_, rs)| rs == clean_bare))
             .collect();
         if slug_matches.len() == 1 {
             return Some(slug_matches[0].key);
@@ -2110,7 +2107,7 @@ mod tests {
 
         let releases: Vec<ReleaseRow> = (1..=9)
             .map(|i| {
-                let mut r = make_release(100 + i, "split", 4, Some(2023));
+                let mut r = make_release(100 + i, "split", 4, None);
                 r.url = format!("https://artist.bandcamp.com/album/split-{i}");
                 r
             })
@@ -2156,9 +2153,9 @@ mod tests {
         cand_x.path = PathBuf::from("/music/artist/Split_X");
         cand_x.path_key = "/music/artist/split_x".to_string();
 
-        let mut rel_a = make_release(1, "Split", 4, Some(2022));
+        let mut rel_a = make_release(1, "Split", 4, None);
         rel_a.url = "https://artist.bandcamp.com/album/split-a".to_string();
-        let mut rel_b = make_release(2, "Split", 4, Some(2023));
+        let mut rel_b = make_release(2, "Split", 4, None);
         rel_b.url = "https://artist.bandcamp.com/album/split-b".to_string();
 
         // Reject (rel_a, cand_x) -> cand_x now matches rel_b uniquely without conflict!
@@ -2184,7 +2181,10 @@ mod tests {
     fn resolve_and_filter_releases_by_url_slug_and_query() {
         let releases: Vec<ReleaseRow> = (1..=10)
             .map(|i| {
-                let mut r = make_release(200 + i, "split", 4, Some(2015 + i as i32));
+                let mut r = make_release(200 + i, "split", 4, None);
+                r.published_at = chrono::NaiveDate::from_ymd_opt(2015 + i as i32, 6, 1)
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+                    .map(|dt| dt.and_utc().timestamp());
                 r.url = if i == 1 {
                     "https://artist.bandcamp.com/album/split".to_string()
                 } else {
@@ -2223,7 +2223,7 @@ mod tests {
         );
 
         // Ambiguous bare slug between album/split and track/split requires kind prefix
-        let mut track_split = make_release(999, "split", 1, Some(2020));
+        let mut track_split = make_release(999, "split", 1, None);
         track_split.key = ItemKey::new(ItemType::Track, 999);
         track_split.url = "https://artist.bandcamp.com/track/split".to_string();
         let mut with_track = releases.clone();
@@ -2240,10 +2240,7 @@ mod tests {
         );
 
         // Picker labels are all distinct across the 10 identically titled "split" albums
-        let labels: HashSet<String> = releases
-            .iter()
-            .map(format_release_picker_label)
-            .collect();
+        let labels: HashSet<String> = releases.iter().map(format_release_picker_label).collect();
         assert_eq!(labels.len(), 10);
 
         // Filtering by slug or year narrows the list

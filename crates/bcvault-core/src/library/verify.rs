@@ -277,14 +277,15 @@ pub fn find_relink_candidates_with_rejected(
     }
 
     // 1. Exact pass
-    let exact_edges: Vec<_> = build_exact_edges_refs(&available_candidates, missing_releases, style)
-        .into_iter()
-        .filter(|e| {
-            let rel_key = missing_releases[e.rel_idx].key;
-            let cand_pk = &available_candidates[e.cand_idx].path_key;
-            !rejected_pairs.contains(&(rel_key, cand_pk.clone()))
-        })
-        .collect();
+    let exact_edges: Vec<_> =
+        build_exact_edges_refs(&available_candidates, missing_releases, style)
+            .into_iter()
+            .filter(|e| {
+                let rel_key = missing_releases[e.rel_idx].key;
+                let cand_pk = &available_candidates[e.cand_idx].path_key;
+                !rejected_pairs.contains(&(rel_key, cand_pk.clone()))
+            })
+            .collect();
     let resolution = resolve_exact_matches(&available_candidates, missing_releases, &exact_edges);
 
     let mut relinked = Vec::new();

@@ -9,9 +9,9 @@ use crate::{
 use bcvault_core::{
     library::matcher::Signal,
     types::{
-        AudioFormat, DeletedPolicy, DownloadOpts, FolderState, MissingAction,
-        MissingDecision, OnMissing, OutputLayout, RememberChoice, UnavailableAction,
-        UnavailableDecision, UnavailableRoot,
+        AudioFormat, DeletedPolicy, DownloadOpts, FolderState, MissingAction, MissingDecision,
+        OnMissing, OutputLayout, RememberChoice, UnavailableAction, UnavailableDecision,
+        UnavailableRoot,
     },
     worker::messages::UiToWorkerCommand,
 };
@@ -1122,6 +1122,7 @@ fn fx_effective_catalog(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_fx_release_attach_picker(
     ui: &mut egui::Ui,
     th: &crate::theme::FxTheme,

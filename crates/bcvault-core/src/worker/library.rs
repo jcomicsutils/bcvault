@@ -13,8 +13,8 @@ use crate::library::service::{
     ReconcileReport, drop_downloaded_page_only, split_matchable_releases,
 };
 use crate::library::verify::{
-    VerifyResult, attribute_release_root, find_relink_candidates_with_rejected, group_unavailable_releases,
-    is_mass_missing, verify_single_release,
+    VerifyResult, attribute_release_root, find_relink_candidates_with_rejected,
+    group_unavailable_releases, is_mass_missing, verify_single_release,
 };
 use crate::types::{
     ArtistFolder, BatchSummary, DeletedPolicy, FolderState, ItemKey, LibraryPhase, LocalStatus,
@@ -1873,11 +1873,11 @@ impl LibraryService {
 
         let mut applied_count = 0_u32;
         if !assignment.matched.is_empty() || !assignment.restorable.is_empty() {
-            if let Ok(b_id) = pool
+            let batch_res = pool
                 .writer
                 .call(|c| lib_repo::create_batch(c, "verify", &BatchSummary::default()))
-                .await
-            {
+                .await;
+            if let Ok(b_id) = batch_res {
                 let batch_id = b_id.max(0) as u64;
                 let mut decisions: Vec<MatchDecision> = assignment
                     .matched

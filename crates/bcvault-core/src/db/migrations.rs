@@ -369,17 +369,27 @@ mod tests {
             "INSERT INTO artist_folder_rejected (band_id, item_type, item_id, path_key)
              VALUES (1, 'album', 201, '/music/artist1/wall split action 001')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let cnt: i64 = conn
-            .query_row("SELECT COUNT(*) FROM artist_folder_rejected WHERE band_id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM artist_folder_rejected WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(cnt, 1);
 
         // Deleting the release cascades to artist_folder_rejected
-        conn.execute("DELETE FROM releases WHERE item_id = 201", []).unwrap();
+        conn.execute("DELETE FROM releases WHERE item_id = 201", [])
+            .unwrap();
         let cnt_after: i64 = conn
-            .query_row("SELECT COUNT(*) FROM artist_folder_rejected WHERE band_id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM artist_folder_rejected WHERE band_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(cnt_after, 0);
     }

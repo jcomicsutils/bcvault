@@ -1,9 +1,9 @@
 use crate::{
     bandcamp::redeem::validate_redeem_url,
     types::{
-        DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MissingAction,
-        MissingDecision, OnMissing, OutputLayout, RememberChoice, UnavailableAction,
-        UnavailableDecision, UnavailableRoot,
+        DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MissingAction, MissingDecision,
+        OnMissing, OutputLayout, RememberChoice, UnavailableAction, UnavailableDecision,
+        UnavailableRoot,
     },
     ui::{
         state::{LocalAction, MissingItemChoice, ReportTab, UiState},
@@ -1115,7 +1115,11 @@ fn render_release_attach_picker(
 
     let query = search_map.entry(path.to_path_buf()).or_default();
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Search / URL / Slug:").color(pal::TEXT_DIM).size(11.5));
+        ui.label(
+            RichText::new("Search / URL / Slug:")
+                .color(pal::TEXT_DIM)
+                .size(11.5),
+        );
         let resp = ui.add(
             egui::TextEdit::singleline(query)
                 .hint_text("Search title, slug, or paste Bandcamp URL...")
