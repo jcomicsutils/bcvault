@@ -1,7 +1,7 @@
 use crate::{
     bandcamp::redeem::validate_redeem_url,
     types::{
-        DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MatchDecision, MissingAction,
+        DeletedPolicy, DownloadOpts, FolderState, FormatFallback, MissingAction,
         MissingDecision, OnMissing, OutputLayout, RememberChoice, UnavailableAction,
         UnavailableDecision, UnavailableRoot,
     },

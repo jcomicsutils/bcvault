@@ -9,7 +9,7 @@ use crate::{
 use bcvault_core::{
     library::matcher::Signal,
     types::{
-        AudioFormat, DeletedPolicy, DownloadOpts, FolderState, MatchDecision, MissingAction,
+        AudioFormat, DeletedPolicy, DownloadOpts, FolderState, MissingAction,
         MissingDecision, OnMissing, OutputLayout, RememberChoice, UnavailableAction,
         UnavailableDecision, UnavailableRoot,
     },

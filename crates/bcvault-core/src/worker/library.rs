@@ -811,7 +811,6 @@ impl LibraryService {
         };
 
         // 2. Determine artist IDs in scope
-        let is_all_scope = matches!(scope, SyncScope::All);
         let band_ids: Vec<i64> = match scope {
             SyncScope::Selected(v) => v,
             SyncScope::All => {
