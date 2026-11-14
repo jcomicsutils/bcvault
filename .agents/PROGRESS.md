@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (USER_THEMES step 8)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
+Task: none (USER_THEMES complete; ready for manual check & merge)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
 
 ## Done
+- none: import .toml theme files dropped onto the bcvault-fx window (`USER_THEMES` step 9)
 - none: document file-based themes, sharing, and the 10 built-in themes in docs/themes.md and README.md (`USER_THEMES` step 8)
 - none: add import, export, copy as text, and confirmed delete for user themes (`USER_THEMES` step 7)
 - none: add theme editor modal with live preview, validation, hints, and atomic save (`USER_THEMES` step 6)
@@ -129,6 +130,7 @@ Task: none (USER_THEMES step 8)  ·  Branch: feat/file-themes  ·  Updated: 2026
 - [x] VERIFY-DOWNLOAD-DIR-FIX: Auto-relink out_dir releases to linked folders and rescan on verify (Steps 1 to 3)
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
 - [x] SETTINGS_TABS: Tabbed settings, settings parity, and ZIP extraction options (Steps 1 to 7)
+- [x] USER_THEMES: File-based TOML themes for `bcvault-fx` with 10 built-ins (Catppuccin Mocha replacing Dusk), theme picker, live editor, import/export/drop/delete, and `docs/themes.md` (Steps 1 to 9)
 - Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; `v0.2.0` covers `SETTINGS_TABS`—tabbed settings, settings parity, ZIP extraction options, tab-switch animations, and fixed-width linked-folders scrollbar; current HEAD is `v0.2.0`).
 
 ## Open questions (needs the user)

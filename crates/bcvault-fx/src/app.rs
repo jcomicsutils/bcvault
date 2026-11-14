@@ -282,6 +282,19 @@ impl eframe::App for FxApp {
         self.state.window_focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         self.state.motion.begin_frame(ctx);
         self.drain_events(ctx, now_s);
+        let dropped_toml: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+                .collect()
+        });
+        if !dropped_toml.is_empty()
+            && let Ok(mut lock) = self.state.theme_picked_import.lock()
+        {
+            lock.get_or_insert_with(Vec::new).extend(dropped_toml);
+        }
         self.state.flush_debounced_queries(&self.fx_tx);
         self.state.check_lazy_drawer_detail(&self.fx_tx);
         self.state.sample_download_speed();
