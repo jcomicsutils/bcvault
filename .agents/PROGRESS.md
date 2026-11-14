@@ -4,6 +4,7 @@
 Task: none (SETTINGS_TABS complete; ready for manual check & merge)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
 
 ## Done
+- none: animate fx settings tab transitions and fix linked-folders scrollbar width (`SETTINGS_TABS` follow-up)
 - none: document settings tabs and ZIP options (`SETTINGS_TABS` step 7)
 - none: add output folder, Browse button, format, batch limit presets, and coverage test in classic settings (`SETTINGS_TABS` step 6)
 - none: add missing download, ZIP, network, Browse, and coverage test in fx settings (`SETTINGS_TABS` step 5)

@@ -200,8 +200,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
     let row_h = 24.0;
     egui::ScrollArea::vertical()
         .id_salt("fx_linked_folders_virtual")
+        .auto_shrink([false, false])
         .max_height(200.0)
         .show_rows(ui, row_h, flat.len(), |ui, range| {
+            let row_w = ui.available_width();
             for folder in &flat[range] {
                 let artist_name = ctx
                     .artists
@@ -209,24 +211,42 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
                     .find(|a| a.band_id == folder.band_id)
                     .map(|a| a.display_name().to_string())
                     .unwrap_or_else(|| format!("Artist {}", folder.band_id));
-                ui.horizontal(|ui| {
-                    let dot_color = match folder.state {
-                        FolderState::Ok => th.accent,
-                        FolderState::Missing => th.err,
-                        FolderState::Unreadable => th.warn,
-                    };
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
-                    paint::rect_filled(ui.painter(), r, dot_color);
-                    ui.label(RichText::new(&artist_name).strong());
-                    ui.label(
-                        RichText::new(folder.path.display().to_string())
-                            .color(th.text_dim)
-                            .monospace(),
-                    );
-                    if paint::sharp_small_button(ui, "Unlink").clicked() {
-                        to_unlink = Some(folder.id);
-                    }
-                });
+                let path_str = folder.path.display().to_string();
+                ui.allocate_ui_with_layout(
+                    Vec2::new(row_w, row_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let dot_color = match folder.state {
+                            FolderState::Ok => th.accent,
+                            FolderState::Missing => th.err,
+                            FolderState::Unreadable => th.warn,
+                        };
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                        paint::rect_filled(ui.painter(), r, dot_color);
+                        ui.add_sized(
+                            [150.0, row_h],
+                            egui::Label::new(RichText::new(&artist_name).strong()).truncate(),
+                        )
+                        .on_hover_text(&artist_name);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if paint::sharp_small_button(ui, "Unlink").clicked() {
+                                to_unlink = Some(folder.id);
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&path_str).color(th.text_dim).monospace(),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(&path_str);
+                                },
+                            );
+                        });
+                    },
+                );
             }
         });
     if let Some(fid) = to_unlink {

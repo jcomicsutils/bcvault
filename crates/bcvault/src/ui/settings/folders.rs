@@ -190,35 +190,58 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
     let row_h = 24.0;
     egui::ScrollArea::vertical()
         .id_salt("classic_linked_folders_virtual")
+        .auto_shrink([false, false])
         .max_height(200.0)
         .show_rows(ui, row_h, linked.len(), |ui, range| {
+            let row_w = ui.available_width();
             for folder in &linked[range] {
-                ui.horizontal(|ui| {
-                    let tip = match folder.state {
-                        FolderState::Ok => "Folder OK and accessible",
-                        FolderState::Missing => "Folder missing on disk",
-                        FolderState::Unreadable => "Folder unreadable or inaccessible",
-                    };
-                    paint_folder_status_dot(ui, folder.state).on_hover_text(tip);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(row_w, row_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let tip = match folder.state {
+                            FolderState::Ok => "Folder OK and accessible",
+                            FolderState::Missing => "Folder missing on disk",
+                            FolderState::Unreadable => "Folder unreadable or inaccessible",
+                        };
+                        paint_folder_status_dot(ui, folder.state).on_hover_text(tip);
 
-                    let artist_name = ctx
-                        .artists
-                        .iter()
-                        .find(|a| a.band_id == folder.band_id)
-                        .map(|a| a.display_name())
-                        .unwrap_or("Unknown Artist");
-                    ui.label(RichText::new(artist_name).strong());
+                        let artist_name = ctx
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == folder.band_id)
+                            .map(|a| a.display_name())
+                            .unwrap_or("Unknown Artist");
+                        ui.add_sized(
+                            [150.0, row_h],
+                            egui::Label::new(RichText::new(artist_name).strong()).truncate(),
+                        )
+                        .on_hover_text(artist_name);
 
-                    let path_str = folder.path.display().to_string();
-                    ui.label(RichText::new(&path_str).color(pal::TEXT_DIM).monospace())
-                        .on_hover_text(&path_str);
-
-                    if sharp_small_button(ui, "Unlink").clicked() {
-                        let _ = ctx.cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
-                            folder_id: folder.id,
+                        let path_str = folder.path.display().to_string();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if sharp_small_button(ui, "Unlink").clicked() {
+                                let _ = ctx.cmd_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                    folder_id: folder.id,
+                                });
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&path_str)
+                                                .color(pal::TEXT_DIM)
+                                                .monospace(),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(&path_str);
+                                },
+                            );
                         });
-                    }
-                });
+                    },
+                );
             }
         });
 }

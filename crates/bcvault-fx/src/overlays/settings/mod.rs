@@ -8,6 +8,7 @@ pub mod network;
 use crate::{
     actions::FxAction,
     db::Prefs,
+    motion::SpringCfg,
     paint,
     services::{messages::FxCommand, thumbs::TextureCache},
     state::FxState,
@@ -203,6 +204,13 @@ pub fn save_draft(
 
 fn switch_tab(state: &mut FxState, fx_tx: &UnboundedSender<FxCommand>, tab: SettingsTab) {
     if state.prefs.settings_tab != tab {
+        let old_idx = SettingsTab::ALL
+            .iter()
+            .position(|&t| t == state.prefs.settings_tab)
+            .unwrap_or(0);
+        let new_idx = SettingsTab::ALL.iter().position(|&t| t == tab).unwrap_or(0);
+        state.settings_tab_anim_dir = if new_idx >= old_idx { 1.0 } else { -1.0 };
+        state.settings_tab_anim_gen = state.settings_tab_anim_gen.wrapping_add(1);
         state.prefs.settings_tab = tab;
         state.settings_focus_first = true;
         let _ = fx_tx.send(FxCommand::SetPref {
@@ -277,6 +285,7 @@ pub fn show_settings_modal(
             ui.set_min_width(680.0);
             ui.set_max_width(680.0);
 
+            let mut active_tab_rect: Option<egui::Rect> = None;
             ui.horizontal_wrapped(|ui| {
                 let mut tab_resps = Vec::with_capacity(SettingsTab::ALL.len());
                 for &tab in SettingsTab::ALL {
@@ -300,6 +309,9 @@ pub fn show_settings_modal(
                     .corner_radius(CornerRadius::ZERO);
 
                     let resp = ui.add(btn);
+                    if selected {
+                        active_tab_rect = Some(resp.rect);
+                    }
                     if resp.clicked() && !selected {
                         switch_tab(state, fx_tx, tab);
                     }
@@ -312,63 +324,82 @@ pub fn show_settings_modal(
                             let next = (idx + 1) % tab_resps.len();
                             tab_resps[next].1.request_focus();
                             let t = tab_resps[next].0;
-                            if state.prefs.settings_tab != t {
-                                state.prefs.settings_tab = t;
-                                let _ = fx_tx.send(FxCommand::SetPref {
-                                    key: "settings_tab".to_string(),
-                                    value: t.as_str().to_string(),
-                                });
-                            }
+                            switch_tab(state, fx_tx, t);
                         } else if ui.input(|i| i.key_pressed(Key::ArrowLeft)) {
                             let prev = (idx + tab_resps.len() - 1) % tab_resps.len();
                             tab_resps[prev].1.request_focus();
                             let t = tab_resps[prev].0;
-                            if state.prefs.settings_tab != t {
-                                state.prefs.settings_tab = t;
-                                let _ = fx_tx.send(FxCommand::SetPref {
-                                    key: "settings_tab".to_string(),
-                                    value: t.as_str().to_string(),
-                                });
-                            }
+                            switch_tab(state, fx_tx, t);
                         }
                         break;
                     }
                 }
             });
 
+            if let Some(target_rect) = active_tab_rect {
+                let ind_x =
+                    state
+                        .motion
+                        .val("settings_tab_ind_x", target_rect.min.x, SpringCfg::SNAP);
+                let ind_w =
+                    state
+                        .motion
+                        .val("settings_tab_ind_w", target_rect.width(), SpringCfg::SNAP);
+                let ind_rect = egui::Rect::from_min_size(
+                    egui::pos2(ind_x, target_rect.max.y - 2.0),
+                    egui::vec2(ind_w.max(4.0), 2.0),
+                );
+                paint::rect_filled(ui.painter(), ind_rect, th.accent);
+            }
+
             ui.separator();
 
             let focus_first = std::mem::take(&mut state.settings_focus_first);
             let active_tab = state.prefs.settings_tab;
+            let enter = state.motion.val_from(
+                ("settings_tab_enter", state.settings_tab_anim_gen),
+                0.0,
+                1.0,
+                SpringCfg::SMOOTH,
+            );
+            let slide_x = (1.0 - enter) * 18.0 * state.settings_tab_anim_dir;
+
             egui::ScrollArea::vertical()
                 .id_salt("fx_settings_tab_scroll")
+                .auto_shrink([false, false])
                 .max_height(max_body_h)
                 .show(ui, |ui| {
-                    let mut tab_ctx = TabCtx {
-                        draft: &mut draft,
-                        filename_pattern_input: &mut state.filename_pattern_input,
-                        prefs: &mut state.prefs,
-                        tex_cache: &mut state.tex_cache,
-                        cover_cache_bytes: state.cover_cache_bytes,
-                        theme: th,
-                        artists: &state.artists,
-                        folders: &state.folders,
-                        folder_filter: &mut state.settings_folders_filter,
-                        picked_out_dir: &state.settings_picked_out_dir,
-                        core_tx,
-                        fx_tx,
-                        rt_handle,
-                        pending_actions,
-                        focus_first,
-                    };
-                    match active_tab {
-                        SettingsTab::Appearance => appearance::show(ui, &mut tab_ctx),
-                        SettingsTab::Downloads => downloads::show(ui, &mut tab_ctx),
-                        SettingsTab::Network => network::show(ui, &mut tab_ctx),
-                        SettingsTab::Library => library::show(ui, &mut tab_ctx),
-                        SettingsTab::Folders => folders::show(ui, &mut tab_ctx),
-                        SettingsTab::Advanced => advanced::show(ui, &mut tab_ctx),
-                    }
+                    ui.set_opacity(enter.clamp(0.0, 1.0));
+                    let content_rect = ui
+                        .available_rect_before_wrap()
+                        .translate(egui::vec2(slide_x, 0.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                        let mut tab_ctx = TabCtx {
+                            draft: &mut draft,
+                            filename_pattern_input: &mut state.filename_pattern_input,
+                            prefs: &mut state.prefs,
+                            tex_cache: &mut state.tex_cache,
+                            cover_cache_bytes: state.cover_cache_bytes,
+                            theme: th,
+                            artists: &state.artists,
+                            folders: &state.folders,
+                            folder_filter: &mut state.settings_folders_filter,
+                            picked_out_dir: &state.settings_picked_out_dir,
+                            core_tx,
+                            fx_tx,
+                            rt_handle,
+                            pending_actions,
+                            focus_first,
+                        };
+                        match active_tab {
+                            SettingsTab::Appearance => appearance::show(ui, &mut tab_ctx),
+                            SettingsTab::Downloads => downloads::show(ui, &mut tab_ctx),
+                            SettingsTab::Network => network::show(ui, &mut tab_ctx),
+                            SettingsTab::Library => library::show(ui, &mut tab_ctx),
+                            SettingsTab::Folders => folders::show(ui, &mut tab_ctx),
+                            SettingsTab::Advanced => advanced::show(ui, &mut tab_ctx),
+                        }
+                    });
                 });
 
             ui.separator();
@@ -526,5 +557,42 @@ mod tests {
             missing.is_empty() && unknown.is_empty(),
             "Settings coverage mismatch: missing={missing:?}, unknown={unknown:?}"
         );
+    }
+
+    #[test]
+    fn switch_tab_updates_anim_dir_and_gen_and_respects_reduced_motion() {
+        let mut state = FxState::new();
+        let (fx_tx, _fx_rx) = mpsc::unbounded_channel();
+        assert_eq!(state.prefs.settings_tab, SettingsTab::Downloads);
+        assert_eq!(state.settings_tab_anim_gen, 0);
+
+        // Moving forward: Downloads (1) -> Library (3) => dir = +1.0
+        switch_tab(&mut state, &fx_tx, SettingsTab::Library);
+        assert_eq!(state.prefs.settings_tab, SettingsTab::Library);
+        assert_eq!(state.settings_tab_anim_dir, 1.0);
+        assert_eq!(state.settings_tab_anim_gen, 1);
+
+        // Moving backward: Library (3) -> Appearance (0) => dir = -1.0
+        switch_tab(&mut state, &fx_tx, SettingsTab::Appearance);
+        assert_eq!(state.prefs.settings_tab, SettingsTab::Appearance);
+        assert_eq!(state.settings_tab_anim_dir, -1.0);
+        assert_eq!(state.settings_tab_anim_gen, 2);
+
+        // Motion enters from 0.0 -> 1.0 normally, and snaps to 1.0 when reduced_motion = true
+        state.motion.begin_frame_dt(1.0 / 60.0);
+        let v_anim = state.motion.val_from(
+            ("settings_tab_enter", state.settings_tab_anim_gen),
+            0.0,
+            1.0,
+            SpringCfg::SMOOTH,
+        );
+        assert!(v_anim < 1.0);
+
+        state.motion.reduced_motion = true;
+        let v_snap =
+            state
+                .motion
+                .val_from(("settings_tab_enter", 99_u64), 0.0, 1.0, SpringCfg::SMOOTH);
+        assert_eq!(v_snap, 1.0);
     }
 }
