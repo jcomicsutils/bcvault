@@ -369,37 +369,38 @@ pub fn show_settings_modal(
                 .auto_shrink([false, false])
                 .max_height(max_body_h)
                 .show(ui, |ui| {
-                    ui.set_opacity(enter.clamp(0.0, 1.0));
-                    let content_rect = ui
-                        .available_rect_before_wrap()
-                        .translate(egui::vec2(slide_x, 0.0));
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
-                        let mut tab_ctx = TabCtx {
-                            draft: &mut draft,
-                            filename_pattern_input: &mut state.filename_pattern_input,
-                            prefs: &mut state.prefs,
-                            tex_cache: &mut state.tex_cache,
-                            cover_cache_bytes: state.cover_cache_bytes,
-                            theme: th,
-                            artists: &state.artists,
-                            folders: &state.folders,
-                            folder_filter: &mut state.settings_folders_filter,
-                            picked_out_dir: &state.settings_picked_out_dir,
-                            core_tx,
-                            fx_tx,
-                            rt_handle,
-                            pending_actions,
-                            focus_first,
-                        };
-                        match active_tab {
-                            SettingsTab::Appearance => appearance::show(ui, &mut tab_ctx),
-                            SettingsTab::Downloads => downloads::show(ui, &mut tab_ctx),
-                            SettingsTab::Network => network::show(ui, &mut tab_ctx),
-                            SettingsTab::Library => library::show(ui, &mut tab_ctx),
-                            SettingsTab::Folders => folders::show(ui, &mut tab_ctx),
-                            SettingsTab::Advanced => advanced::show(ui, &mut tab_ctx),
-                        }
-                    });
+                    let base_rect = ui.available_rect_before_wrap();
+                    let shifted_rect = base_rect.translate(egui::vec2(slide_x, 0.0));
+                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(shifted_rect));
+                    child_ui.set_clip_rect(ui.clip_rect());
+                    child_ui.set_opacity(enter.clamp(0.0, 1.0));
+                    let mut tab_ctx = TabCtx {
+                        draft: &mut draft,
+                        filename_pattern_input: &mut state.filename_pattern_input,
+                        prefs: &mut state.prefs,
+                        tex_cache: &mut state.tex_cache,
+                        cover_cache_bytes: state.cover_cache_bytes,
+                        theme: th,
+                        artists: &state.artists,
+                        folders: &state.folders,
+                        folder_filter: &mut state.settings_folders_filter,
+                        picked_out_dir: &state.settings_picked_out_dir,
+                        core_tx,
+                        fx_tx,
+                        rt_handle,
+                        pending_actions,
+                        focus_first,
+                    };
+                    match active_tab {
+                        SettingsTab::Appearance => appearance::show(&mut child_ui, &mut tab_ctx),
+                        SettingsTab::Downloads => downloads::show(&mut child_ui, &mut tab_ctx),
+                        SettingsTab::Network => network::show(&mut child_ui, &mut tab_ctx),
+                        SettingsTab::Library => library::show(&mut child_ui, &mut tab_ctx),
+                        SettingsTab::Folders => folders::show(&mut child_ui, &mut tab_ctx),
+                        SettingsTab::Advanced => advanced::show(&mut child_ui, &mut tab_ctx),
+                    }
+                    let used_h = child_ui.min_rect().height();
+                    ui.allocate_space(egui::vec2(base_rect.width(), used_h));
                 });
 
             ui.separator();

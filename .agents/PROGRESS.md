@@ -4,6 +4,7 @@
 Task: none (SETTINGS_TABS complete; ready for manual check & merge)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
 
 ## Done
+- none: prevent fx settings window width bump during tab-switch slide (`SETTINGS_TABS` follow-up)
 - none: animate fx settings tab transitions and fix linked-folders scrollbar width (`SETTINGS_TABS` follow-up)
 - none: document settings tabs and ZIP options (`SETTINGS_TABS` step 7)
 - none: add output folder, Browse button, format, batch limit presets, and coverage test in classic settings (`SETTINGS_TABS` step 6)
