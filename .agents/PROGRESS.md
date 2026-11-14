@@ -4,6 +4,7 @@
 Task: none  ·  Branch: main  ·  Updated: 2026-11-14
 
 ## Done
+- none: update README.md built-in theme count and Catppuccin Macchiato/Frappe/Latte list
 - none: fix clippy::needless_range_loop in bcvault-fx wall.rs for CI Rust 1.100.0
 - none: canonicalize tempdir roots in bcvault-core library tests to fix Windows CI 8.3 short-path failures (`RUNNER~1` vs `runneradmin`)
 - none: release v0.3.0 bump (`USER_THEMES` merged)
