@@ -48,7 +48,7 @@ pub fn show(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if sharp_button(ui, "Settings").clicked() {
-                state.settings_draft = Some(state.settings.clone());
+                state.open_settings_modal();
             }
             if sharp_button(ui, "Link Folder to Artist...").clicked() {
                 state.link_folder_modal = Some(crate::ui::state::LinkFolderModalState::new_empty(

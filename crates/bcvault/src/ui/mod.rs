@@ -1,6 +1,7 @@
 pub mod bottom_dock;
 pub mod modals;
 pub mod release_table;
+pub mod settings;
 pub mod sidebar;
 pub mod state;
 pub mod theme;

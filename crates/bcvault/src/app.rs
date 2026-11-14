@@ -25,7 +25,8 @@ impl App {
     ) -> Self {
         ui::theme::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        let state = UiState::new();
+        let mut state = UiState::new();
+        state.paths = crate::paths::AppPaths::resolve();
         Self {
             rt_handle,
             state,

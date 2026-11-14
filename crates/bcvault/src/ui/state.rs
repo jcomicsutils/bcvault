@@ -522,6 +522,12 @@ pub struct UiState {
 
     pub settings: Settings,
     pub settings_draft: Option<Settings>,
+    pub settings_tab: crate::ui::settings::SettingsTab,
+    pub settings_confirm_discard: bool,
+    pub settings_focus_first: bool,
+    pub settings_focus_keep_editing: bool,
+    pub settings_folders_filter: String,
+    pub paths: Option<crate::paths::AppPaths>,
     pub folders: HashMap<i64, Vec<ArtistFolder>>,
     pub redeem_modal: Option<RedeemModalState>,
     pub quota_modal: Option<QuotaWarningModalState>,
@@ -587,6 +593,12 @@ impl UiState {
 
             settings: Settings::default(),
             settings_draft: None,
+            settings_tab: crate::ui::settings::SettingsTab::Downloads,
+            settings_confirm_discard: false,
+            settings_focus_first: false,
+            settings_focus_keep_editing: false,
+            settings_folders_filter: String::new(),
+            paths: None,
             folders: HashMap::new(),
             redeem_modal: None,
             quota_modal: None,
@@ -606,6 +618,13 @@ impl UiState {
             show_debug_overlay: false,
             last_event_backlog: 0,
         }
+    }
+
+    pub fn open_settings_modal(&mut self) {
+        self.settings_draft = Some(self.settings.clone());
+        self.settings_confirm_discard = false;
+        self.settings_focus_first = true;
+        self.settings_focus_keep_editing = false;
     }
 
     pub fn active_band_id(&self) -> Option<i64> {
