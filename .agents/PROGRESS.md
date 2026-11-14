@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (SETTINGS_TABS step 4/7)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
+Task: none (SETTINGS_TABS step 5/7)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
 
 ## Done
+- none: add missing download, ZIP, network, Browse, and coverage test in fx settings (`SETTINGS_TABS` step 5)
 - none: split fx settings modal into 6 tabs with settings_tab pref persistence (`SETTINGS_TABS` step 4)
 - none: split classic settings dialog into 6 tabs with dirty marker, Esc confirmation, and tests (`SETTINGS_TABS` step 3)
 - none: cover zip extraction, cleanup, corrupt zip, and queued UpdateSettings timing (`SETTINGS_TABS` step 2)
