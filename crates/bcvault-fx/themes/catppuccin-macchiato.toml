@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "catppuccin-macchiato"
+name = "Catppuccin Macchiato"
+description = "Soothing pastel dark theme with mauve accent"
+author = "Catppuccin"
+dark = true
+scanlines = false
+
+[colors]
+bg0 = "#181926"
+bg1 = "#24273A"
+bg2 = "#363A4F"
+border = "#494D64"
+border_hi = "#B7BDF8"
+text = "#CAD3F5"
+text_dim = "#A5ADCB"
+accent = "#C6A0F6"
+accent2 = "#8BD5CA"
+ok = "#A6DA95"
+warn = "#EED49F"
+err = "#ED8796"

@@ -9,7 +9,7 @@ use crate::{
         registry::{IssueSeverity, ThemeEntry},
     },
 };
-use egui::{Align2, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use egui::{FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
     let th = ctx.theme;
@@ -239,15 +239,8 @@ fn theme_swatch_tile(
             sx += swatch_sz + swatch_gap;
         }
 
-        let text_pos = Pos2::new(sx + 4.0, rect.center().y);
-        p.galley(
-            Align2::LEFT_CENTER.pos_in_rect(&Rect::from_min_max(
-                Pos2::new(text_pos.x, rect.min.y),
-                rect.max,
-            )),
-            galley,
-            th.text,
-        );
+        let text_pos = Pos2::new(sx + 4.0, rect.center().y - galley.size().y * 0.5);
+        p.galley(text_pos, galley, th.text);
     }
 
     let mut tip = String::new();

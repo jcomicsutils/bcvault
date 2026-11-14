@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "catppuccin-latte"
+name = "Catppuccin Latte"
+description = "Soothing pastel light theme with mauve accent"
+author = "Catppuccin"
+dark = false
+scanlines = false
+
+[colors]
+bg0 = "#E6E9EF"
+bg1 = "#EFF1F5"
+bg2 = "#DCE0E8"
+border = "#9CA0B0"
+border_hi = "#7287FD"
+text = "#4C4F69"
+text_dim = "#5C5F77"
+accent = "#8839EF"
+accent2 = "#179299"
+ok = "#40A02B"
+warn = "#DF8E1D"
+err = "#D20F39"

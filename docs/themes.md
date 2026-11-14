@@ -2,7 +2,7 @@
 
 `bcvault-fx` uses single-file TOML themes. Every built-in theme and every user-created theme uses the same format.
 
-## Built-in Themes (10)
+## Built-in Themes (13)
 
 | ID | Name | Dark | Scanlines | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -13,6 +13,9 @@
 | `midnight` | Midnight | Yes | No | Deep navy with a clear blue accent |
 | `ember` | Ember | Yes | No | Warm charcoal with a molten orange accent |
 | `catppuccin-mocha` | Catppuccin Mocha | Yes | No | Soothing pastel dark theme with mauve accent |
+| `catppuccin-macchiato` | Catppuccin Macchiato | Yes | No | Soothing pastel dark theme with mauve accent |
+| `catppuccin-frappe` | Catppuccin Frappe | Yes | No | Soothing pastel medium-dark theme with mauve accent |
+| `catppuccin-latte` | Catppuccin Latte | No | No | Soothing pastel light theme with mauve accent |
 | `contrast` | Contrast | Yes | No | Maximum-contrast black and white with a yellow accent |
 | `daylight` | Daylight | No | No | Cool light theme with a blue accent |
 | `sage` | Sage | No | No | Soft green-grey light theme with a forest accent |

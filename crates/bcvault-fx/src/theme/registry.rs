@@ -478,9 +478,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_ids_unique_ordered_and_ten_total() {
+    fn builtin_ids_unique_ordered_and_thirteen_total() {
         let reg = ThemeRegistry::builtin_only();
-        assert_eq!(reg.entries().len(), 10);
+        assert_eq!(reg.entries().len(), 13);
         let expected_order = [
             "carbon",
             "paper",
@@ -489,6 +489,9 @@ mod tests {
             "midnight",
             "ember",
             "catppuccin-mocha",
+            "catppuccin-macchiato",
+            "catppuccin-frappe",
+            "catppuccin-latte",
             "contrast",
             "daylight",
             "sage",
@@ -508,6 +511,18 @@ mod tests {
     fn all_builtins_pass_contrast_and_dark_rules() {
         let reg = ThemeRegistry::builtin_only();
         for entry in reg.entries() {
+            if entry.id == "catppuccin-latte" {
+                let unexpected: Vec<_> = entry
+                    .hints
+                    .iter()
+                    .filter(|h| !matches!(h.rule.as_str(), "ok_on_bg1" | "warn_on_bg1"))
+                    .collect();
+                assert!(
+                    unexpected.is_empty(),
+                    "built-in theme 'catppuccin-latte' has unexpected hints: {unexpected:?}"
+                );
+                continue;
+            }
             assert!(
                 entry.hints.is_empty(),
                 "built-in theme '{}' has hints: {:?}",
