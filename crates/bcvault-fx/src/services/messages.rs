@@ -124,6 +124,7 @@ pub enum FxCommand {
         key: String,
         value: String,
     },
+    SetThemeCommands(Vec<(String, String, String)>),
     TouchRecent {
         kind: String,
         r#ref: String,

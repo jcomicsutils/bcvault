@@ -1,7 +1,5 @@
 use super::TabCtx;
-use crate::{
-    actions::FxAction, motion::EffectsLevel, paint, services::messages::FxCommand, theme::ThemeId,
-};
+use crate::{actions::FxAction, motion::EffectsLevel, paint, services::messages::FxCommand};
 use egui::RichText;
 
 pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
@@ -14,16 +12,17 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
     );
     ui.add_space(4.0);
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Theme:");
-        for (idx, tid) in ThemeId::ALL.into_iter().enumerate() {
-            let active = ctx.prefs.theme == tid;
-            let resp = ui.selectable_label(active, tid.label());
+        for (idx, entry) in ctx.themes.entries().iter().enumerate() {
+            let active = ctx.prefs.theme == entry.id;
+            let resp = ui.selectable_label(active, &entry.name);
             if idx == 0 && ctx.focus_first {
                 resp.request_focus();
             }
             if resp.clicked() {
-                ctx.pending_actions.push(FxAction::SetTheme(tid));
+                ctx.pending_actions
+                    .push(FxAction::SetTheme(entry.id.clone()));
             }
         }
     });

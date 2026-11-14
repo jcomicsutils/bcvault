@@ -106,9 +106,19 @@ async fn run_fx_loop(
         repaint_hook.clone(),
     );
 
+    let mut theme_commands: Vec<(String, String, String)> =
+        crate::theme::registry::ThemeRegistry::builtin_only()
+            .entries()
+            .iter()
+            .map(|e| (e.id.clone(), e.name.clone(), e.description.clone()))
+            .collect();
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             FxCommand::Shutdown => break,
+            FxCommand::SetThemeCommands(cmds) => {
+                theme_commands = cmds;
+            }
             FxCommand::QueryWall { request_id, query } => {
                 let db_r = fx_db.reader.clone();
                 let tx = ev_tx.clone();
@@ -177,9 +187,10 @@ async fn run_fx_loop(
                 let db_r = fx_db.reader.clone();
                 let tx = ev_tx.clone();
                 let hook = repaint_hook.clone();
+                let cmds = theme_commands.clone();
                 tokio::spawn(async move {
                     if let Ok(hits) = db_r
-                        .call(move |c| Ok(run_palette_search(c, &text, scope)))
+                        .call(move |c| Ok(run_palette_search(c, &text, scope, &cmds)))
                         .await
                     {
                         let _ = tx.send(FxEvent::SearchResults { request_id, hits });

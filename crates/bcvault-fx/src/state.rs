@@ -7,7 +7,7 @@ use crate::{
         messages::{FxCommand, FxEvent, SearchHit, SearchScope, Tier, Toast, ToastKind},
         thumbs::TextureCache,
     },
-    theme::FxTheme,
+    theme::{FxTheme, registry::ThemeRegistry},
 };
 use bcvault_core::{
     library::service::ReconcileReport,
@@ -424,6 +424,8 @@ pub struct FxState {
     pub artists: Vec<ArtistView>,
     pub settings: Settings,
     pub prefs: Prefs,
+    pub themes: ThemeRegistry,
+    pub theme_preview: Option<FxTheme>,
     pub active_theme: FxTheme,
     pub motion: Motion,
     pub tex_cache: TextureCache,
@@ -545,7 +547,8 @@ impl Default for FxState {
 impl FxState {
     pub fn new() -> Self {
         let prefs = Prefs::default();
-        let active_theme = FxTheme::for_id(prefs.theme);
+        let themes = ThemeRegistry::builtin_only();
+        let active_theme = themes.resolve_theme(&prefs.theme);
         let now = Instant::now();
         Self {
             booted: false,
@@ -554,6 +557,8 @@ impl FxState {
             settings: Settings::default(),
             tex_cache: TextureCache::new(prefs.tex_budget_mb),
             prefs,
+            themes,
+            theme_preview: None,
             active_theme,
             motion: Motion::new(),
             palettes: HashMap::new(),
@@ -1438,10 +1443,10 @@ impl FxState {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
             }
             FxAction::SetTheme(theme) => {
-                self.prefs.theme = theme;
+                self.prefs.theme = theme.clone();
                 let _ = fx_tx.send(FxCommand::SetPref {
                     key: "theme".to_string(),
-                    value: theme.as_str().to_string(),
+                    value: theme,
                 });
             }
             FxAction::SetAdaptiveAccent(enabled) => {

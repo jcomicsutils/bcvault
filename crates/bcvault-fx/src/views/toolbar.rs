@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn toolbar_controls_are_vertically_aligned() {
         let ctx = egui::Context::default();
-        crate::theme::apply_theme(&ctx, &crate::theme::FxTheme::PAPER);
+        crate::theme::apply_theme(&ctx, &crate::theme::FxTheme::paper_for_tests());
         let mut state = FxState::new();
         state.view_mode = ViewMode::Wall;
 

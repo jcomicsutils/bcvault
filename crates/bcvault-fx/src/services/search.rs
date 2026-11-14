@@ -2,7 +2,6 @@ use crate::{
     actions::{FxAction, ViewMode},
     motion::EffectsLevel,
     services::messages::{SearchHit, SearchHitKind, SearchScope},
-    theme::ThemeId,
 };
 use bcvault_core::types::{ItemKey, ItemType, ReleaseFilter, SyncMode};
 use rusqlite::Connection;
@@ -65,6 +64,7 @@ pub fn run_palette_search(
     conn: &Connection,
     raw_text: &str,
     default_scope: SearchScope,
+    theme_commands: &[(String, String, String)],
 ) -> Vec<SearchHit> {
     let trimmed = raw_text.trim();
     let (scope, query_text) = if let Some(rest) = trimmed.strip_prefix('@') {
@@ -130,30 +130,6 @@ pub fn run_palette_search(
                 "Ctrl+B",
             ),
             (
-                "Theme: Carbon",
-                "Dark neutral slate theme",
-                FxAction::SetTheme(ThemeId::Carbon),
-                "",
-            ),
-            (
-                "Theme: Paper",
-                "High-contrast warm paper theme",
-                FxAction::SetTheme(ThemeId::Paper),
-                "",
-            ),
-            (
-                "Theme: Terminal",
-                "Phosphor green terminal theme",
-                FxAction::SetTheme(ThemeId::Terminal),
-                "",
-            ),
-            (
-                "Theme: Vapor",
-                "Deep violet and neon cyan theme",
-                FxAction::SetTheme(ThemeId::Vapor),
-                "",
-            ),
-            (
                 "Effects: Full",
                 "Enable all animations and atmosphere",
                 FxAction::SetEffects(EffectsLevel::Full),
@@ -205,6 +181,19 @@ pub fn run_palette_search(
                     match_indices: idx,
                     score: sc + 5,
                     kind: SearchHitKind::Command(act.clone(), hint),
+                });
+            }
+        }
+
+        for (id, name, desc) in theme_commands {
+            let title = format!("Theme: {name}");
+            if let Some((sc, idx)) = fuzzy_match(query_text, &title) {
+                hits.push(SearchHit {
+                    title,
+                    subtitle: desc.clone(),
+                    match_indices: idx,
+                    score: sc + 5,
+                    kind: SearchHitKind::Command(FxAction::SetTheme(id.clone()), ""),
                 });
             }
         }

@@ -1,4 +1,4 @@
-use crate::{motion::EffectsLevel, theme::ThemeId};
+use crate::motion::EffectsLevel;
 use bcvault_core::types::{ItemKey, ReleaseFilter, ReleaseQuery, SortDir, SyncMode};
 use serde::{Deserialize, Serialize};
 
@@ -208,7 +208,7 @@ pub enum FxAction {
     SyncAll(SyncMode),
     CardSize(i8),
     ToggleSidebar,
-    SetTheme(ThemeId),
+    SetTheme(String),
     SetAdaptiveAccent(bool),
     SetEffects(EffectsLevel),
     SetReducedMotion(bool),

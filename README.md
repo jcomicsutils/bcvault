@@ -70,11 +70,17 @@ Pre-compiled release archives are available on the [GitHub Releases](https://git
 - **Full Non-Destructive Undo**: Every library action creates a batch transaction with before/after audit entries in `library_events` and instant undo support.
 
 ### Design
-- **Adaptive Dynamic Themes**: OKLab contrast-safe color generation across four built-in themes:
-  - **Carbon**: Deep neutral slate and high-tech cyan/mint accents.
+- **Adaptive Dynamic Themes**: OKLab contrast-safe color generation across ten built-in themes:
+  - **Carbon**: Dark neutral slate and high-tech cyan/mint accents.
   - **Paper**: High-contrast editorial ink on warm newsprint.
   - **Terminal**: Monochromatic amber and green phosphor CRT glow.
   - **Vapor**: Twilight lavender with neon synthwave contrast.
+  - **Midnight**: Deep navy with a clear blue accent.
+  - **Ember**: Warm charcoal with a molten orange accent.
+  - **Catppuccin Mocha**: Soothing pastel dark theme with mauve accent.
+  - **Contrast**: Maximum-contrast black and white with a yellow accent.
+  - **Daylight**: Cool light theme with a blue accent.
+  - **Sage**: Soft green-grey light theme with a forest accent.
 
 ---
 

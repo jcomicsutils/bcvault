@@ -7,49 +7,7 @@ use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke, Style,
     TextStyle, Visuals, epaint::Shadow,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ThemeId {
-    #[default]
-    Carbon,
-    Paper,
-    Terminal,
-    Vapor,
-}
-
-impl ThemeId {
-    pub const ALL: [Self; 4] = [Self::Carbon, Self::Paper, Self::Terminal, Self::Vapor];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Carbon => "carbon",
-            Self::Paper => "paper",
-            Self::Terminal => "terminal",
-            Self::Vapor => "vapor",
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Carbon => "Carbon",
-            Self::Paper => "Paper",
-            Self::Terminal => "Terminal",
-            Self::Vapor => "Vapor",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "carbon" => Some(Self::Carbon),
-            "paper" => Some(Self::Paper),
-            "terminal" => Some(Self::Terminal),
-            "vapor" => Some(Self::Vapor),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FxTheme {
@@ -70,9 +28,7 @@ pub struct FxTheme {
 }
 
 impl FxTheme {
-    pub const FALLBACK: Self = Self::CARBON;
-
-    pub const CARBON: Self = Self {
+    pub const FALLBACK: Self = Self {
         bg0: Color32::from_rgb(0x0A, 0x0A, 0x0B),
         bg1: Color32::from_rgb(0x12, 0x13, 0x15),
         bg2: Color32::from_rgb(0x1B, 0x1D, 0x20),
@@ -89,64 +45,9 @@ impl FxTheme {
         scanlines: false,
     };
 
-    pub const PAPER: Self = Self {
-        bg0: Color32::from_rgb(0xF2, 0xF0, 0xEA),
-        bg1: Color32::from_rgb(0xE8, 0xE5, 0xDC),
-        bg2: Color32::from_rgb(0xDA, 0xD6, 0xCA),
-        border: Color32::from_rgb(0x1A, 0x1A, 0x1A),
-        border_hi: Color32::from_rgb(0x00, 0x00, 0x00),
-        text: Color32::from_rgb(0x11, 0x11, 0x11),
-        text_dim: Color32::from_rgb(0x50, 0x50, 0x50),
-        accent: Color32::from_rgb(0xBA, 0x00, 0x20),
-        accent2: Color32::from_rgb(0x00, 0x44, 0xFF),
-        ok: Color32::from_rgb(0x13, 0x73, 0x33),
-        warn: Color32::from_rgb(0xB0, 0x60, 0x00),
-        err: Color32::from_rgb(0xC5, 0x22, 0x1F),
-        is_dark: false,
-        scanlines: false,
-    };
-
-    pub const TERMINAL: Self = Self {
-        bg0: Color32::from_rgb(0x05, 0x08, 0x05),
-        bg1: Color32::from_rgb(0x0A, 0x10, 0x0A),
-        bg2: Color32::from_rgb(0x14, 0x20, 0x14),
-        border: Color32::from_rgb(0x1F, 0x3B, 0x1F),
-        border_hi: Color32::from_rgb(0x39, 0xFF, 0x14),
-        text: Color32::from_rgb(0xB6, 0xFF, 0xB0),
-        text_dim: Color32::from_rgb(0x6C, 0x9E, 0x68),
-        accent: Color32::from_rgb(0x39, 0xFF, 0x14),
-        accent2: Color32::from_rgb(0xFF, 0xD4, 0x00),
-        ok: Color32::from_rgb(0x39, 0xFF, 0x14),
-        warn: Color32::from_rgb(0xFF, 0xD4, 0x00),
-        err: Color32::from_rgb(0xFF, 0x55, 0x55),
-        is_dark: true,
-        scanlines: true,
-    };
-
-    pub const VAPOR: Self = Self {
-        bg0: Color32::from_rgb(0x0D, 0x0A, 0x1A),
-        bg1: Color32::from_rgb(0x15, 0x10, 0x2B),
-        bg2: Color32::from_rgb(0x1F, 0x18, 0x40),
-        border: Color32::from_rgb(0x3B, 0x2F, 0x73),
-        border_hi: Color32::from_rgb(0x8C, 0x7B, 0xFF),
-        text: Color32::from_rgb(0xF1, 0xEA, 0xFF),
-        text_dim: Color32::from_rgb(0xA7, 0x9C, 0xD6),
-        accent: Color32::from_rgb(0xFF, 0x4F, 0xD8),
-        accent2: Color32::from_rgb(0x3D, 0xE3, 0xFF),
-        ok: Color32::from_rgb(0x3D, 0xE3, 0xFF),
-        warn: Color32::from_rgb(0xFF, 0xC8, 0x57),
-        err: Color32::from_rgb(0xFF, 0x5C, 0x8A),
-        is_dark: true,
-        scanlines: false,
-    };
-
-    pub const fn for_id(id: ThemeId) -> Self {
-        match id {
-            ThemeId::Carbon => Self::CARBON,
-            ThemeId::Paper => Self::PAPER,
-            ThemeId::Terminal => Self::TERMINAL,
-            ThemeId::Vapor => Self::VAPOR,
-        }
+    #[cfg(test)]
+    pub fn paper_for_tests() -> Self {
+        registry::ThemeRegistry::builtin_only().resolve_theme("paper")
     }
 
     pub fn with_adaptive_accent(mut self, swatch: Option<[u8; 3]>) -> Self {
@@ -307,9 +208,9 @@ mod tests {
     #[test]
     fn fx_theme_is_zero_radius() {
         let ctx = egui::Context::default();
-        for id in ThemeId::ALL {
-            let th = FxTheme::for_id(id);
-            apply_theme(&ctx, &th);
+        let reg = registry::ThemeRegistry::builtin_only();
+        for entry in reg.entries() {
+            apply_theme(&ctx, &entry.theme);
             let s = ctx.style();
             assert_eq!(s.visuals.window_corner_radius, CornerRadius::ZERO);
             assert_eq!(s.visuals.menu_corner_radius, CornerRadius::ZERO);
@@ -324,19 +225,21 @@ mod tests {
 
     #[test]
     fn every_theme_meets_contrast_ratio() {
-        for id in ThemeId::ALL {
-            let th = FxTheme::for_id(id);
+        let reg = registry::ThemeRegistry::builtin_only();
+        for entry in reg.entries() {
+            let th = entry.theme;
+            let id = &entry.id;
             for (bg_name, bg) in [("bg0", th.bg0), ("bg1", th.bg1), ("bg2", th.bg2)] {
                 let ratio = contrast_ratio(th.text, bg);
                 assert!(
                     ratio >= 4.5,
-                    "theme {id:?} text on {bg_name} contrast ratio {ratio:.2} < 4.5"
+                    "theme {id} text on {bg_name} contrast ratio {ratio:.2} < 4.5"
                 );
             }
             let acc_ratio = contrast_ratio(th.accent, th.bg1);
             assert!(
                 acc_ratio >= 4.5,
-                "theme {id:?} accent on bg1 contrast ratio {acc_ratio:.2} < 4.5"
+                "theme {id} accent on bg1 contrast ratio {acc_ratio:.2} < 4.5"
             );
         }
     }

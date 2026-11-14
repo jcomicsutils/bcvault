@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn sidebar_does_not_overflow_or_leave_gap_before_central_panel() {
         let ctx = egui::Context::default();
-        apply_theme(&ctx, &FxTheme::PAPER);
+        apply_theme(&ctx, &FxTheme::paper_for_tests());
         let mut state = FxState::new();
         state.artists = vec![
             ArtistView {

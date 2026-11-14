@@ -2,7 +2,6 @@ use crate::{
     motion::{EffectsLevel, SpringCfg},
     paint,
     state::FxState,
-    theme::ThemeId,
 };
 use egui::{Color32, Order, Pos2, Rect, Vec2};
 
@@ -151,8 +150,8 @@ pub fn show_atmosphere_overlay(ctx: &egui::Context, state: &mut FxState, now_s: 
                 paint::glow_rect(painter, right, clear, edge_col, edge_col, clear);
             }
 
-            // 2. Scanlines option (Terminal theme or user toggle): 1px horizontal rules every 3px at 4% alpha
-            if state.prefs.scanlines || state.prefs.theme == ThemeId::Terminal {
+            // 2. Scanlines option (theme scanlines or user toggle): 1px horizontal rules every 3px at 4% alpha
+            if state.prefs.scanlines || state.active_theme.scanlines {
                 let scan_col = Color32::from_black_alpha(11);
                 let mut y = screen.min.y;
                 while y < screen.max.y {

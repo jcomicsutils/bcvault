@@ -286,8 +286,14 @@ impl eframe::App for FxApp {
         } else {
             None
         };
-        let target_theme =
-            FxTheme::for_id(self.state.prefs.theme).with_adaptive_accent(hovered_swatch);
+        let target_theme = if let Some(preview) = self.state.theme_preview {
+            preview
+        } else {
+            self.state
+                .themes
+                .resolve_theme(&self.state.prefs.theme)
+                .with_adaptive_accent(hovered_swatch)
+        };
         let animated_theme = target_theme.animate_through(&mut self.state.motion);
         self.state.active_theme = animated_theme;
         if self.last_applied_theme != animated_theme {

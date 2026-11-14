@@ -2,7 +2,6 @@ use crate::{
     actions::{FxQuery, FxSortKey, SmartView, ViewMode},
     motion::EffectsLevel,
     nav::{SavedView, ViewState},
-    theme::ThemeId,
 };
 use bcvault_core::{
     db::{Db, Role, repo::releases::escape_like},
@@ -23,7 +22,7 @@ pub const FX_MIGRATIONS: &[(i32, &str)] = &[(1, include_str!("../../migrations/0
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
-    pub theme: ThemeId,
+    pub theme: String,
     pub effects: EffectsLevel,
     pub reduced_motion: bool,
     pub adaptive_accent: bool,
@@ -40,7 +39,7 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
-            theme: ThemeId::Carbon,
+            theme: "carbon".to_string(),
             effects: EffectsLevel::Full,
             reduced_motion: false,
             adaptive_accent: true,
@@ -213,8 +212,9 @@ pub fn get_prefs(conn: &Connection) -> Result<Prefs, DbError> {
         let (k, v) = row?;
         match k.as_str() {
             "theme" => {
-                if let Some(t) = ThemeId::parse(&v) {
-                    prefs.theme = t;
+                let trimmed = v.trim();
+                if !trimmed.is_empty() && trimmed.len() <= 32 {
+                    prefs.theme = trimmed.to_string();
                 }
             }
             "effects" => {

@@ -205,15 +205,6 @@ mod tests {
     }
 
     #[test]
-    fn migrated_builtins_match_legacy_consts() {
-        let reg = ThemeRegistry::builtin_only();
-        assert_eq!(reg.resolve_theme("carbon"), FxTheme::CARBON);
-        assert_eq!(reg.resolve_theme("paper"), FxTheme::PAPER);
-        assert_eq!(reg.resolve_theme("terminal"), FxTheme::TERMINAL);
-        assert_eq!(reg.resolve_theme("vapor"), FxTheme::VAPOR);
-    }
-
-    #[test]
     fn resolve_falls_back_to_carbon_for_unknown_id() {
         let reg = ThemeRegistry::builtin_only();
         assert!(reg.get("does-not-exist").is_none());

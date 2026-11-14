@@ -12,7 +12,7 @@ use crate::{
     paint,
     services::{messages::FxCommand, thumbs::TextureCache},
     state::FxState,
-    theme::FxTheme,
+    theme::{FxTheme, registry::ThemeRegistry},
 };
 use bcvault_core::{
     types::{ArtistFolder, ArtistView, Settings},
@@ -133,6 +133,7 @@ pub struct TabCtx<'a> {
     pub tex_cache: &'a mut TextureCache,
     pub cover_cache_bytes: u64,
     pub theme: FxTheme,
+    pub themes: &'a ThemeRegistry,
     pub artists: &'a [ArtistView],
     pub folders: &'a HashMap<i64, Vec<ArtistFolder>>,
     pub folder_filter: &'a mut String,
@@ -381,6 +382,7 @@ pub fn show_settings_modal(
                         tex_cache: &mut state.tex_cache,
                         cover_cache_bytes: state.cover_cache_bytes,
                         theme: th,
+                        themes: &state.themes,
                         artists: &state.artists,
                         folders: &state.folders,
                         folder_filter: &mut state.settings_folders_filter,
