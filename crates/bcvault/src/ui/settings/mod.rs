@@ -13,6 +13,7 @@ use crate::ui::widgets::sharp_button;
 use crate::worker::messages::UiToWorkerCommand;
 use egui::{Align2, Color32, Context, CornerRadius, Key, Order, RichText, Stroke};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -51,11 +52,14 @@ impl SettingsTab {
         match self {
             Self::Appearance => &["show_thumbnails"],
             Self::Downloads => &[
+                "out_dir",
                 "layout",
                 "filename_pattern",
+                "format",
                 "format_fallback",
                 "auto_extract",
                 "delete_zip_after_extract",
+                "batch_limit",
             ],
             Self::Network => &[
                 "quota_soft",
@@ -79,6 +83,8 @@ impl SettingsTab {
         }
     }
 
+    pub const NOT_SHOWN: &'static [(&'static str, &'static str)] = &[];
+
     pub fn cycle(self, delta: isize) -> Self {
         let len = Self::ALL.len() as isize;
         let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0) as isize;
@@ -92,7 +98,9 @@ pub struct TabCtx<'a> {
     pub artists: &'a [ArtistView],
     pub folders: &'a HashMap<i64, Vec<ArtistFolder>>,
     pub folder_filter: &'a mut String,
+    pub picked_out_dir: &'a Arc<Mutex<Option<std::path::PathBuf>>>,
     pub cmd_tx: &'a UnboundedSender<UiToWorkerCommand>,
+    pub rt_handle: &'a tokio::runtime::Handle,
     pub paths: Option<&'a AppPaths>,
     pub focus_first: bool,
 }
@@ -160,11 +168,21 @@ pub fn show_settings_modal(
     ctx: &Context,
     state: &mut UiState,
     cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    rt_handle: &tokio::runtime::Handle,
     esc: bool,
 ) {
     let Some(mut draft) = state.settings_draft.take() else {
         return;
     };
+
+    if let Some(picked) = state
+        .settings_picked_out_dir
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        draft.out_dir = picked;
+    }
 
     let mut keep_open = true;
     let mut trigger_save = false;
@@ -275,7 +293,9 @@ pub fn show_settings_modal(
                         artists: &state.artists,
                         folders: &state.folders,
                         folder_filter: &mut state.settings_folders_filter,
+                        picked_out_dir: &state.settings_picked_out_dir,
                         cmd_tx,
+                        rt_handle,
                         paths: state.paths.as_ref(),
                         focus_first,
                     };
@@ -423,10 +443,12 @@ mod tests {
 
     #[test]
     fn cleanup_zip_checkbox_disabled_when_extraction_off() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = egui::Context::default();
         let (tx, _rx) = mpsc::unbounded_channel();
         let artists = Vec::new();
         let folders = HashMap::new();
+        let picked = Arc::new(Mutex::new(None));
 
         for auto_extract in [false, true] {
             let mut draft = Settings {
@@ -443,7 +465,9 @@ mod tests {
                         artists: &artists,
                         folders: &folders,
                         folder_filter: &mut filter,
+                        picked_out_dir: &picked,
                         cmd_tx: &tx,
+                        rt_handle: rt.handle(),
                         paths: None,
                         focus_first: false,
                     };
@@ -459,5 +483,41 @@ mod tests {
 
             assert_eq!(saw_cleanup_enabled, Some(auto_extract));
         }
+    }
+
+    #[test]
+    fn settings_tabs_and_not_shown_cover_all_settings_fields() {
+        use std::collections::BTreeSet;
+
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        let obj = json.as_object().unwrap();
+        let actual: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+
+        let mut declared = BTreeSet::new();
+        for &tab in SettingsTab::ALL {
+            for &field in tab.fields() {
+                assert!(
+                    declared.insert(field),
+                    "duplicate Settings field {field:?} in SettingsTab"
+                );
+            }
+        }
+        for &(field, reason) in SettingsTab::NOT_SHOWN {
+            assert!(
+                !reason.trim().is_empty(),
+                "NOT_SHOWN reason must not be empty"
+            );
+            assert!(
+                declared.insert(field),
+                "duplicate Settings field {field:?} in NOT_SHOWN"
+            );
+        }
+
+        let missing: Vec<_> = actual.difference(&declared).copied().collect();
+        let unknown: Vec<_> = declared.difference(&actual).copied().collect();
+        assert!(
+            missing.is_empty() && unknown.is_empty(),
+            "Settings coverage mismatch: missing={missing:?}, unknown={unknown:?}"
+        );
     }
 }

@@ -64,7 +64,7 @@ pub fn show(
         show_quota_modal(ctx, state, cmd_tx, esc);
     }
     if state.settings_draft.is_some() {
-        crate::ui::settings::show_settings_modal(ctx, state, cmd_tx, esc);
+        crate::ui::settings::show_settings_modal(ctx, state, cmd_tx, rt_handle, esc);
     }
     if state.confirm_remove_artist.is_some() {
         show_confirm_remove_modal(ctx, state, cmd_tx, esc);

@@ -1,6 +1,7 @@
 use super::TabCtx;
-use crate::types::{FormatFallback, OutputLayout};
+use crate::types::{AudioFormat, BATCH_LIMIT_PRESETS, FormatFallback, OutputLayout};
 use crate::ui::theme::pal;
+use crate::ui::widgets::sharp_button;
 use egui::RichText;
 
 pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
@@ -10,12 +11,32 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
         .num_columns(2)
         .spacing([12.0, 8.0])
         .show(ui, |ui| {
+            ui.label("Output Folder:");
+            ui.horizontal(|ui| {
+                let mut p_str = ctx.draft.out_dir.to_string_lossy().into_owned();
+                let resp = ui.add(egui::TextEdit::singleline(&mut p_str).desired_width(280.0));
+                if ctx.focus_first {
+                    resp.request_focus();
+                }
+                if resp.changed() {
+                    ctx.draft.out_dir = std::path::PathBuf::from(p_str);
+                }
+                if sharp_button(ui, "Browse...").clicked() {
+                    let slot = ctx.picked_out_dir.clone();
+                    ctx.rt_handle.spawn(async move {
+                        if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                            && let Ok(mut lock) = slot.lock()
+                        {
+                            *lock = Some(folder.path().to_path_buf());
+                        }
+                    });
+                }
+            });
+            ui.end_row();
+
             ui.label("Output Layout:");
             ui.horizontal(|ui| {
-                let first = ui.selectable_value(&mut ctx.draft.layout, OutputLayout::Flat, "Flat");
-                if ctx.focus_first {
-                    first.request_focus();
-                }
+                ui.selectable_value(&mut ctx.draft.layout, OutputLayout::Flat, "Flat");
                 ui.selectable_value(
                     &mut ctx.draft.layout,
                     OutputLayout::ByArtist,
@@ -47,6 +68,16 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
             });
             ui.end_row();
 
+            ui.label("Preferred Format:");
+            egui::ComboBox::from_id_salt("classic_settings_format_combo")
+                .selected_text(ctx.draft.format.label())
+                .show_ui(ui, |ui| {
+                    for f in AudioFormat::ALL {
+                        ui.selectable_value(&mut ctx.draft.format, f, f.label());
+                    }
+                });
+            ui.end_row();
+
             ui.label("Format Fallback:");
             ui.horizontal(|ui| {
                 ui.selectable_value(
@@ -60,6 +91,18 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
                     "Strict (Fail if missing)",
                 );
             });
+            ui.end_row();
+
+            ui.label("Batch Limit:");
+            egui::ComboBox::from_id_salt("classic_settings_batch_limit_combo")
+                .selected_text(ctx.draft.batch_limit.to_string())
+                .show_ui(ui, |ui| {
+                    for &lim in &BATCH_LIMIT_PRESETS {
+                        if lim <= ctx.draft.quota_hard {
+                            ui.selectable_value(&mut ctx.draft.batch_limit, lim, lim.to_string());
+                        }
+                    }
+                });
             ui.end_row();
         });
 
