@@ -87,6 +87,9 @@ pub fn show(
     let mut keep_open = true;
     let mut cancel_clicked = false;
     let mut save_clicked = false;
+    let mut export_clicked = false;
+    let mut copy_clicked = false;
+    let mut delete_confirmed = false;
 
     let screen = ctx.available_rect();
     let max_size = Vec2::new(
@@ -230,12 +233,33 @@ pub fn show(
                 });
 
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if paint::sharp_button(ui, "Save").clicked() {
                     save_clicked = true;
                 }
                 if paint::sharp_button(ui, "Cancel").clicked() {
                     cancel_clicked = true;
+                }
+                if paint::sharp_button(ui, "Export").clicked() {
+                    export_clicked = true;
+                }
+                if paint::sharp_button(ui, "Copy as text").clicked() {
+                    copy_clicked = true;
+                }
+                if !editor.is_new {
+                    if editor.confirm_delete {
+                        if ui
+                            .button(RichText::new("Confirm delete").color(th.err))
+                            .clicked()
+                        {
+                            delete_confirmed = true;
+                        }
+                        if paint::sharp_button(ui, "Keep").clicked() {
+                            editor.confirm_delete = false;
+                        }
+                    } else if paint::sharp_button(ui, "Delete").clicked() {
+                        editor.confirm_delete = true;
+                    }
                 }
             });
         });
@@ -243,6 +267,41 @@ pub fn show(
     if !keep_open || cancel_clicked {
         state.theme_preview = None;
         return;
+    }
+
+    if copy_clicked {
+        ctx.copy_text(editor.file.to_toml_string());
+        state.push_toast(
+            ToastKind::Info,
+            format!("Copied '{}' TOML to clipboard", editor.file.name),
+            now_s,
+        );
+    }
+
+    if export_clicked {
+        state.pending_theme_export_pick = Some(editor.file.clone());
+    }
+
+    if delete_confirmed && let Some(dir) = state.themes_dir.clone() {
+        match state.themes.delete_user_theme(&dir, &editor.file.id) {
+            Ok(()) => {
+                let _ = fx_tx.send(FxCommand::SetThemeCommands(state.themes.palette_commands()));
+                if state.prefs.theme == editor.file.id {
+                    pending_actions.push(FxAction::SetTheme("carbon".to_string()));
+                }
+                state.theme_preview = None;
+                state.push_toast(
+                    ToastKind::Info,
+                    format!("Deleted theme '{}'", editor.file.name),
+                    now_s,
+                );
+                return;
+            }
+            Err(err) => {
+                editor.save_error = Some(err.message);
+                editor.confirm_delete = false;
+            }
+        }
     }
 
     if save_clicked {

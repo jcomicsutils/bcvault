@@ -75,6 +75,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
             ctx.pending_actions
                 .push(FxAction::OpenThemeEditorFor(ctx.prefs.theme.clone()));
         }
+        if paint::sharp_button(ui, "Import").clicked() {
+            ctx.pending_actions.push(FxAction::ImportThemes);
+        }
+        if paint::sharp_button(ui, "Export").clicked() {
+            ctx.pending_actions
+                .push(FxAction::ExportTheme(ctx.prefs.theme.clone()));
+        }
         if paint::sharp_button(ui, "Open themes folder").clicked() {
             ctx.pending_actions.push(FxAction::OpenThemesFolder);
         }

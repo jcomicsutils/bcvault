@@ -428,6 +428,11 @@ pub struct FxState {
     pub themes_dir: Option<std::path::PathBuf>,
     pub theme_preview: Option<FxTheme>,
     pub theme_editor: Option<crate::overlays::theme_editor::ThemeEditorState>,
+    pub pending_theme_import_pick: bool,
+    pub theme_picked_import: std::sync::Arc<std::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
+    pub pending_theme_export_pick: Option<crate::theme::file::ThemeFile>,
+    pub theme_picked_export:
+        std::sync::Arc<std::sync::Mutex<Option<(crate::theme::file::ThemeFile, std::path::PathBuf)>>>,
     pub active_theme: FxTheme,
     pub motion: Motion,
     pub tex_cache: TextureCache,
@@ -578,6 +583,10 @@ impl FxState {
             themes_dir: None,
             theme_preview: None,
             theme_editor: None,
+            pending_theme_import_pick: false,
+            theme_picked_import: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            pending_theme_export_pick: None,
+            theme_picked_export: std::sync::Arc::new(std::sync::Mutex::new(None)),
             active_theme,
             motion: Motion::new(),
             palettes: HashMap::new(),
@@ -1528,6 +1537,14 @@ impl FxState {
                     );
                     self.theme_preview = Some(editor.file.to_fx_theme());
                     self.theme_editor = Some(editor);
+                }
+            }
+            FxAction::ImportThemes => {
+                self.pending_theme_import_pick = true;
+            }
+            FxAction::ExportTheme(id) => {
+                if let Some(entry) = self.themes.get(&id) {
+                    self.pending_theme_export_pick = Some(entry.file.clone());
                 }
             }
             FxAction::SetAdaptiveAccent(enabled) => {

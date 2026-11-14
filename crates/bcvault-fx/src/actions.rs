@@ -213,6 +213,8 @@ pub enum FxAction {
     OpenThemesFolder,
     OpenThemeEditorNew,
     OpenThemeEditorFor(String),
+    ImportThemes,
+    ExportTheme(String),
     SetAdaptiveAccent(bool),
     SetEffects(EffectsLevel),
     SetReducedMotion(bool),

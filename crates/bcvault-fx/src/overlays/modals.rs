@@ -47,6 +47,88 @@ pub fn show_modals(
         });
     }
 
+    if let Some(paths) = state
+        .theme_picked_import
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+        && let Some(dir) = state.themes_dir.clone()
+    {
+        let summary = state.themes.import_theme_files(&dir, &paths);
+        let _ = fx_tx.send(FxCommand::SetThemeCommands(state.themes.palette_commands()));
+        let msg = if summary.skipped > 0 {
+            format!(
+                "Imported {}, skipped {} (see problems)",
+                summary.imported, summary.skipped
+            )
+        } else if !summary.renamed.is_empty() {
+            format!(
+                "Imported {} theme(s) ({} renamed to avoid clash)",
+                summary.imported,
+                summary.renamed.len()
+            )
+        } else {
+            format!("Imported {} theme(s)", summary.imported)
+        };
+        let kind = if summary.skipped > 0 {
+            crate::services::messages::ToastKind::Warn
+        } else {
+            crate::services::messages::ToastKind::Info
+        };
+        state.push_toast(kind, msg, now_s);
+    }
+
+    if state.pending_theme_import_pick {
+        state.pending_theme_import_pick = false;
+        let slot = state.theme_picked_import.clone();
+        rt_handle.spawn(async move {
+            if let Some(files) = rfd::AsyncFileDialog::new()
+                .add_filter("TOML theme", &["toml"])
+                .pick_files()
+                .await
+                && let Ok(mut lock) = slot.lock()
+            {
+                *lock = Some(files.into_iter().map(|f| f.path().to_path_buf()).collect());
+            }
+        });
+    }
+
+    if let Some((file, dest)) = state
+        .theme_picked_export
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take())
+    {
+        match crate::theme::registry::ThemeRegistry::export_theme_to_path(&file, &dest) {
+            Ok(()) => state.push_toast(
+                crate::services::messages::ToastKind::Info,
+                format!("Exported theme '{}'", file.name),
+                now_s,
+            ),
+            Err(err) => state.push_toast(
+                crate::services::messages::ToastKind::Error,
+                err.message,
+                now_s,
+            ),
+        }
+    }
+
+    if let Some(file) = state.pending_theme_export_pick.take() {
+        let slot = state.theme_picked_export.clone();
+        let default_name = format!("{}.toml", file.id);
+        rt_handle.spawn(async move {
+            if let Some(dest) = rfd::AsyncFileDialog::new()
+                .set_file_name(&default_name)
+                .add_filter("TOML theme", &["toml"])
+                .save_file()
+                .await
+                && let Ok(mut lock) = slot.lock()
+            {
+                *lock = Some((file, dest.path().to_path_buf()));
+            }
+        });
+    }
+
     // 1. Settings Modal (FX Preferences + Core Engine Settings)
     crate::overlays::settings::show_settings_modal(
         ctx,

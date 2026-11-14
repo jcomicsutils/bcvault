@@ -1,7 +1,7 @@
 use crate::theme::FxTheme;
 use crate::theme::builtin::BUILTIN_THEME_FILES;
 use crate::theme::file::{
-    MAX_THEME_FILE_BYTES, ThemeError, ThemeFile, ThemeHint, parse, parse_bytes,
+    MAX_THEME_FILE_BYTES, ThemeError, ThemeFile, ThemeHint, parse, parse_bytes, unique_slug,
 };
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,14 @@ pub struct LoadIssue {
     pub path: PathBuf,
     pub message: String,
     pub severity: IssueSeverity,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub imported: usize,
+    pub skipped: usize,
+    pub renamed: Vec<(String, String)>,
+    pub last_imported_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -316,6 +324,122 @@ impl ThemeRegistry {
         self.load_user_dir(dir);
         Ok(target_path)
     }
+
+    pub fn import_theme_files(&mut self, dir: &Path, paths: &[PathBuf]) -> ImportSummary {
+        let mut summary = ImportSummary::default();
+        let mut new_issues = Vec::new();
+
+        for path in paths {
+            let meta = match std::fs::symlink_metadata(path) {
+                Ok(m) => m,
+                Err(err) => {
+                    new_issues.push(LoadIssue {
+                        path: path.clone(),
+                        message: format!("failed to inspect file: {err}"),
+                        severity: IssueSeverity::Error,
+                    });
+                    summary.skipped += 1;
+                    continue;
+                }
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                new_issues.push(LoadIssue {
+                    path: path.clone(),
+                    message: "not a regular file".to_string(),
+                    severity: IssueSeverity::Error,
+                });
+                summary.skipped += 1;
+                continue;
+            }
+            if meta.len() > MAX_THEME_FILE_BYTES as u64 {
+                new_issues.push(LoadIssue {
+                    path: path.clone(),
+                    message: format!(
+                        "file exceeds maximum size of {MAX_THEME_FILE_BYTES} bytes ({} bytes)",
+                        meta.len()
+                    ),
+                    severity: IssueSeverity::Error,
+                });
+                summary.skipped += 1;
+                continue;
+            }
+
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(err) => {
+                    new_issues.push(LoadIssue {
+                        path: path.clone(),
+                        message: format!("failed to read file: {err}"),
+                        severity: IssueSeverity::Error,
+                    });
+                    summary.skipped += 1;
+                    continue;
+                }
+            };
+
+            let mut parsed = match parse_bytes(&bytes) {
+                Ok(p) => p,
+                Err(err) => {
+                    new_issues.push(LoadIssue {
+                        path: path.clone(),
+                        message: err.message,
+                        severity: IssueSeverity::Error,
+                    });
+                    summary.skipped += 1;
+                    continue;
+                }
+            };
+
+            let orig_id = parsed.file.id.clone();
+            if self.contains_id(&orig_id) {
+                let next_id = unique_slug(&orig_id, |id| self.contains_id(id));
+                summary.renamed.push((orig_id, next_id.clone()));
+                parsed.file.id = next_id;
+            }
+
+            match self.save_user_theme(dir, &parsed.file, None) {
+                Ok(_) => {
+                    summary.imported += 1;
+                    summary.last_imported_id = Some(parsed.file.id);
+                }
+                Err(err) => {
+                    new_issues.push(LoadIssue {
+                        path: path.clone(),
+                        message: err.message,
+                        severity: IssueSeverity::Error,
+                    });
+                    summary.skipped += 1;
+                }
+            }
+        }
+
+        if !new_issues.is_empty() {
+            self.issues.extend(new_issues);
+        }
+        summary
+    }
+
+    pub fn export_theme_to_path(file: &ThemeFile, dest: &Path) -> Result<(), ThemeError> {
+        file.validate()?;
+        std::fs::write(dest, file.to_toml_string().as_bytes())
+            .map_err(|e| ThemeError::new(format!("failed to export theme: {e}")))
+    }
+
+    pub fn delete_user_theme(&mut self, dir: &Path, id: &str) -> Result<(), ThemeError> {
+        let Some(entry) = self.get(id) else {
+            return Err(ThemeError::new(format!("theme '{id}' not found")));
+        };
+        let path = match &entry.source {
+            ThemeSource::User(p) => p.clone(),
+            ThemeSource::Builtin => {
+                return Err(ThemeError::new("built-in themes cannot be deleted"));
+            }
+        };
+        std::fs::remove_file(&path)
+            .map_err(|e| ThemeError::new(format!("failed to delete theme file: {e}")))?;
+        self.load_user_dir(dir);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -519,5 +643,66 @@ mod tests {
             .unwrap();
         assert_eq!(saved_alt, alt_path);
         assert_eq!(reg.get("renamed-id").unwrap().name, "Renamed Edited");
+    }
+
+    #[test]
+    fn import_never_overwrites_renames_clashes_and_tracks_summary() {
+        let themes_dir = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+
+        let valid = BUILTIN_THEME_FILES[0]
+            .1
+            .replace("id = \"carbon\"", "id = \"custom-one\"")
+            .replace("name = \"Carbon\"", "name = \"Custom One\"");
+        let p_valid = src_dir.path().join("custom.toml");
+        std::fs::write(&p_valid, &valid).unwrap();
+
+        let p_builtin_clash = src_dir.path().join("carbon_copy.toml");
+        std::fs::write(&p_builtin_clash, BUILTIN_THEME_FILES[0].1).unwrap();
+
+        let p_user_clash = src_dir.path().join("dup.toml");
+        std::fs::write(&p_user_clash, &valid).unwrap();
+
+        let p_bad = src_dir.path().join("bad.toml");
+        std::fs::write(&p_bad, "not valid toml [").unwrap();
+
+        let mut reg = ThemeRegistry::builtin_only();
+        let summary = reg.import_theme_files(
+            themes_dir.path(),
+            &[p_valid, p_builtin_clash, p_user_clash, p_bad],
+        );
+        assert_eq!(summary.imported, 3);
+        assert_eq!(summary.skipped, 1);
+        assert!(reg.get("custom-one").is_some());
+        assert!(reg.get("carbon-2").is_some());
+        assert!(reg.get("custom-one-2").is_some());
+        assert_eq!(summary.renamed.len(), 2);
+    }
+
+    #[test]
+    fn export_then_import_roundtrips_and_delete_removes_file() {
+        let themes_dir = tempfile::tempdir().unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let mut reg = ThemeRegistry::builtin_only();
+
+        let mut custom = reg.resolve("vapor").unwrap().file.clone();
+        custom.id = "my-vapor".to_string();
+        custom.name = "My Vapor".to_string();
+        let saved_path = reg
+            .save_user_theme(themes_dir.path(), &custom, None)
+            .unwrap();
+        assert!(saved_path.exists());
+
+        let exported_path = export_dir.path().join("my-vapor.toml");
+        ThemeRegistry::export_theme_to_path(&custom, &exported_path).unwrap();
+
+        reg.delete_user_theme(themes_dir.path(), "my-vapor")
+            .unwrap();
+        assert!(!saved_path.exists());
+        assert!(reg.get("my-vapor").is_none());
+
+        let summary = reg.import_theme_files(themes_dir.path(), &[exported_path]);
+        assert_eq!(summary.imported, 1);
+        assert_eq!(reg.get("my-vapor").unwrap().file, custom);
     }
 }
