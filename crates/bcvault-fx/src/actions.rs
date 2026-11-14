@@ -209,6 +209,8 @@ pub enum FxAction {
     CardSize(i8),
     ToggleSidebar,
     SetTheme(String),
+    ReloadThemes,
+    OpenThemesFolder,
     SetAdaptiveAccent(bool),
     SetEffects(EffectsLevel),
     SetReducedMotion(bool),

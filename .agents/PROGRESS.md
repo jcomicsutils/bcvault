@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (USER_THEMES step 4)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
+Task: none (USER_THEMES step 5)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
 
 ## Done
+- none: add wrapped theme swatch picker, Built-in/Yours sections, Reload, Open folder, and issues list (`USER_THEMES` step 5)
 - none: load user themes from AppPaths::themes_dir at boot with collision/limit rules (`USER_THEMES` step 4)
 - none: resolve themes through ThemeRegistry instead of ThemeId (`USER_THEMES` step 3)
 - none: add ten built-in theme files (with catppuccin-mocha replacing dusk) and ThemeRegistry (`USER_THEMES` step 2)

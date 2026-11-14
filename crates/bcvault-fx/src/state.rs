@@ -1466,6 +1466,35 @@ impl FxState {
                     value: theme,
                 });
             }
+            FxAction::ReloadThemes => {
+                if let Some(dir) = self.themes_dir.clone() {
+                    let issues = self.themes.load_user_dir(&dir);
+                    let _ = fx_tx.send(FxCommand::SetThemeCommands(self.themes.palette_commands()));
+                    let user_count = self.themes.user_entries().count();
+                    let msg = if issues.is_empty() {
+                        format!("Reloaded {user_count} user theme(s)")
+                    } else {
+                        format!(
+                            "Reloaded {user_count} user theme(s), {} problem(s)",
+                            issues.len()
+                        )
+                    };
+                    self.push_toast(
+                        if issues.is_empty() {
+                            ToastKind::Info
+                        } else {
+                            ToastKind::Warn
+                        },
+                        msg,
+                        now_s,
+                    );
+                }
+            }
+            FxAction::OpenThemesFolder => {
+                if let Some(dir) = &self.themes_dir {
+                    let _ = open::that_detached(dir);
+                }
+            }
             FxAction::SetAdaptiveAccent(enabled) => {
                 self.prefs.adaptive_accent = enabled;
                 let _ = fx_tx.send(FxCommand::SetPref {
