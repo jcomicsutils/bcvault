@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (SETTINGS_TABS complete; ready for manual check & merge)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
+Task: none  ·  Branch: main  ·  Updated: 2026-11-14
 
 ## Done
+- none: release v0.2.0 bump (`SETTINGS_TABS` merged)
 - none: prevent fx settings window width bump during tab-switch slide (`SETTINGS_TABS` follow-up)
 - none: animate fx settings tab transitions and fix linked-folders scrollbar width (`SETTINGS_TABS` follow-up)
 - none: document settings tabs and ZIP options (`SETTINGS_TABS` step 7)
@@ -119,8 +120,8 @@ Task: none (SETTINGS_TABS complete; ready for manual check & merge)  ·  Branch:
 - [x] REVIEW-AND-MATCH-FIX: Persistent review rejection, conflict resolution, and URL/slug release picker (Steps 1 to 5, migration 0008)
 - [x] VERIFY-DOWNLOAD-DIR-FIX: Auto-relink out_dir releases to linked folders and rescan on verify (Steps 1 to 3)
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
-- [x] SETTINGS_TABS: Tabbed settings, settings parity, and ZIP extraction options (Steps 1 to 7; manual live-site ZIP download check pending user confirmation)
-- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; current HEAD is `v0.1.3`).
+- [x] SETTINGS_TABS: Tabbed settings, settings parity, and ZIP extraction options (Steps 1 to 7)
+- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; `v0.2.0` covers `SETTINGS_TABS`—tabbed settings, settings parity, ZIP extraction options, tab-switch animations, and fixed-width linked-folders scrollbar; current HEAD is `v0.2.0`).
 
 ## Open questions (needs the user)
 - 2026-11-13: When ZIP extraction fails, the job fails, the ZIP stays on disk, and the release is not marked downloaded (failed attempt recorded in history). Should the release instead be marked downloaded with `local_path` at the ZIP and a warning? (Not changed by `SETTINGS_TABS`; blocking? no)
