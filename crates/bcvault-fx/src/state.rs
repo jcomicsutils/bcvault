@@ -431,8 +431,9 @@ pub struct FxState {
     pub pending_theme_import_pick: bool,
     pub theme_picked_import: std::sync::Arc<std::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     pub pending_theme_export_pick: Option<crate::theme::file::ThemeFile>,
-    pub theme_picked_export:
-        std::sync::Arc<std::sync::Mutex<Option<(crate::theme::file::ThemeFile, std::path::PathBuf)>>>,
+    pub theme_picked_export: std::sync::Arc<
+        std::sync::Mutex<Option<(crate::theme::file::ThemeFile, std::path::PathBuf)>>,
+    >,
     pub active_theme: FxTheme,
     pub motion: Motion,
     pub tex_cache: TextureCache,
