@@ -38,6 +38,7 @@ fn main() -> anyhow::Result<()> {
             let ctx = cc.egui_ctx.clone();
             let repaint_hook: bcvault_core::worker::bridge::RepaintHook =
                 Arc::new(move || ctx.request_repaint());
+            let themes_dir = paths.themes_dir.clone();
             let core_worker = spawn_worker(&handle, paths.clone(), Some(repaint_hook.clone()))?;
             let fx_worker = spawn_fx_services(
                 &handle,
@@ -51,6 +52,7 @@ fn main() -> anyhow::Result<()> {
                 core_worker,
                 fx_worker,
                 handle.clone(),
+                themes_dir,
             )))
         }),
     );

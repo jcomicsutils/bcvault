@@ -1144,4 +1144,27 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn prefs_theme_preserves_legacy_and_unknown_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+
+        for (stored, expected_resolved) in [
+            ("paper", "paper"),
+            ("terminal", "terminal"),
+            ("missing-user-theme", "carbon"),
+        ] {
+            conn.execute(
+                "INSERT OR REPLACE INTO prefs(key, value) VALUES ('theme', ?1)",
+                [stored],
+            )
+            .unwrap();
+            let prefs = get_prefs(&conn).unwrap();
+            assert_eq!(prefs.theme, stored);
+            let reg = crate::theme::registry::ThemeRegistry::builtin_only();
+            assert_eq!(reg.resolve(&prefs.theme).unwrap().id, expected_resolved);
+        }
+    }
 }

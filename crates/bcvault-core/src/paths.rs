@@ -19,6 +19,7 @@ pub struct AppPaths {
     pub fx_db_path: PathBuf,
     pub cover_cache_dir: PathBuf,
     pub log_dir: PathBuf,
+    pub themes_dir: PathBuf,
     pub default_download_dir: PathBuf,
 }
 
@@ -55,6 +56,7 @@ impl AppPaths {
         let fx_db_path = data_dir.join("fx.sqlite");
         let cover_cache_dir = cache_dir.join("covers");
         let log_dir = data_dir.join("logs");
+        let themes_dir = data_dir.join("themes");
         let default_download_dir = directories::UserDirs::new()
             .and_then(|u| {
                 u.audio_dir()
@@ -71,6 +73,7 @@ impl AppPaths {
             fx_db_path,
             cover_cache_dir,
             log_dir,
+            themes_dir,
             default_download_dir,
         }
     }
@@ -84,6 +87,7 @@ impl AppPaths {
         std::fs::create_dir_all(&self.cache_dir)?;
         std::fs::create_dir_all(&self.cover_cache_dir)?;
         std::fs::create_dir_all(&self.log_dir)?;
+        std::fs::create_dir_all(&self.themes_dir)?;
         self.rotate_logs(5 * 1024 * 1024, 5)?;
         Ok(())
     }

@@ -425,6 +425,7 @@ pub struct FxState {
     pub settings: Settings,
     pub prefs: Prefs,
     pub themes: ThemeRegistry,
+    pub themes_dir: Option<std::path::PathBuf>,
     pub theme_preview: Option<FxTheme>,
     pub active_theme: FxTheme,
     pub motion: Motion,
@@ -545,6 +546,21 @@ impl Default for FxState {
 }
 
 impl FxState {
+    pub fn resolved_theme(&self) -> FxTheme {
+        self.theme_preview
+            .unwrap_or_else(|| self.themes.resolve_theme(&self.prefs.theme))
+    }
+
+    pub fn resolved_target_theme(&self, hovered_swatch: Option<[u8; 3]>) -> FxTheme {
+        if let Some(preview) = self.theme_preview {
+            preview
+        } else {
+            self.themes
+                .resolve_theme(&self.prefs.theme)
+                .with_adaptive_accent(hovered_swatch)
+        }
+    }
+
     pub fn new() -> Self {
         let prefs = Prefs::default();
         let themes = ThemeRegistry::builtin_only();
@@ -558,6 +574,7 @@ impl FxState {
             tex_cache: TextureCache::new(prefs.tex_budget_mb),
             prefs,
             themes,
+            themes_dir: None,
             theme_preview: None,
             active_theme,
             motion: Motion::new(),
@@ -2202,5 +2219,24 @@ mod tests {
             format: None,
             folder_mtime: None,
         }));
+    }
+
+    #[test]
+    fn theme_preview_overrides_resolved_theme_and_disables_adaptive_accent() {
+        let mut state = FxState::new();
+        let base = state.resolved_theme();
+        assert_eq!(base, state.themes.resolve_theme("carbon"));
+
+        let swatch = Some([0xFF, 0x00, 0x80]);
+        let adapted = state.resolved_target_theme(swatch);
+        assert_ne!(adapted.accent, base.accent);
+
+        let preview = state.themes.resolve_theme("paper");
+        state.theme_preview = Some(preview);
+        assert_eq!(state.resolved_theme(), preview);
+        assert_eq!(state.resolved_target_theme(swatch), preview);
+
+        state.theme_preview = None;
+        assert_eq!(state.resolved_theme(), base);
     }
 }

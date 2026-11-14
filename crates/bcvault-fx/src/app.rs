@@ -41,9 +41,18 @@ impl FxApp {
         core_worker: WorkerHandle,
         fx_worker: FxWorkerHandle,
         rt_handle: tokio::runtime::Handle,
+        themes_dir: std::path::PathBuf,
     ) -> Self {
         install_fonts(&cc.egui_ctx);
         let mut state = FxState::new();
+        state.themes.load_user_dir(&themes_dir);
+        state.themes_dir = Some(themes_dir);
+        let _ = fx_worker
+            .cmd_tx
+            .send(crate::services::messages::FxCommand::SetThemeCommands(
+                state.themes.palette_commands(),
+            ));
+        state.active_theme = state.resolved_theme();
         if let Err(reason) = validate_atmosphere_shader(GRAIN_VIGNETTE_FRAG_GLSL) {
             state.shader_disabled_reason = Some(reason);
         }
@@ -286,14 +295,7 @@ impl eframe::App for FxApp {
         } else {
             None
         };
-        let target_theme = if let Some(preview) = self.state.theme_preview {
-            preview
-        } else {
-            self.state
-                .themes
-                .resolve_theme(&self.state.prefs.theme)
-                .with_adaptive_accent(hovered_swatch)
-        };
+        let target_theme = self.state.resolved_target_theme(hovered_swatch);
         let animated_theme = target_theme.animate_through(&mut self.state.motion);
         self.state.active_theme = animated_theme;
         if self.last_applied_theme != animated_theme {

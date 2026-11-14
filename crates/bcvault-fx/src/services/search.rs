@@ -293,4 +293,17 @@ mod tests {
         assert_eq!(idx1, vec![0, 1, 2]);
         assert!(fuzzy_match("xyz", "Modular Horizons").is_none());
     }
+
+    #[test]
+    fn palette_search_emits_one_theme_command_per_registry_entry() {
+        let conn = Connection::open_in_memory().unwrap();
+        let reg = crate::theme::registry::ThemeRegistry::builtin_only();
+        let cmds = reg.palette_commands();
+        let hits = run_palette_search(&conn, ">Theme:", SearchScope::Commands, &cmds);
+        assert_eq!(hits.len(), reg.entries().len());
+        for entry in reg.entries() {
+            let expected = format!("Theme: {}", entry.name);
+            assert!(hits.iter().any(|h| h.title == expected));
+        }
+    }
 }

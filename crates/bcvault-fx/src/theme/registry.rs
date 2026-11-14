@@ -1,7 +1,9 @@
 use crate::theme::FxTheme;
 use crate::theme::builtin::BUILTIN_THEME_FILES;
-use crate::theme::file::{ThemeFile, ThemeHint, parse};
-use std::path::PathBuf;
+use crate::theme::file::{MAX_THEME_FILE_BYTES, ThemeFile, ThemeHint, parse, parse_bytes};
+use std::path::{Path, PathBuf};
+
+pub const MAX_USER_THEMES: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemeSource {
@@ -70,8 +72,188 @@ impl ThemeRegistry {
         &self.entries
     }
 
+    pub fn builtin_entries(&self) -> impl Iterator<Item = &ThemeEntry> {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.source, ThemeSource::Builtin))
+    }
+
+    pub fn user_entries(&self) -> impl Iterator<Item = &ThemeEntry> {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.source, ThemeSource::User(_)))
+    }
+
     pub fn issues(&self) -> &[LoadIssue] {
         &self.issues
+    }
+
+    pub fn palette_commands(&self) -> Vec<(String, String, String)> {
+        self.entries
+            .iter()
+            .map(|e| (e.id.clone(), e.name.clone(), e.description.clone()))
+            .collect()
+    }
+
+    pub fn load_user_dir(&mut self, dir: &Path) -> Vec<LoadIssue> {
+        *self = Self::builtin_only();
+        let mut issues = Vec::new();
+        if !dir.exists() {
+            self.issues = issues.clone();
+            return issues;
+        }
+
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(err) => {
+                issues.push(LoadIssue {
+                    path: dir.to_path_buf(),
+                    message: format!("failed to read themes directory: {err}"),
+                    severity: IssueSeverity::Error,
+                });
+                self.issues = issues.clone();
+                return issues;
+            }
+        };
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for item in read_dir {
+            match item {
+                Ok(entry) => {
+                    let path = entry.path();
+                    let meta = match std::fs::symlink_metadata(&path) {
+                        Ok(m) => m,
+                        Err(err) => {
+                            issues.push(LoadIssue {
+                                path,
+                                message: format!("failed to inspect entry: {err}"),
+                                severity: IssueSeverity::Warning,
+                            });
+                            continue;
+                        }
+                    };
+                    if meta.file_type().is_symlink() || !meta.is_file() {
+                        continue;
+                    }
+                    if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                        continue;
+                    }
+                    candidates.push(path);
+                }
+                Err(err) => {
+                    issues.push(LoadIssue {
+                        path: dir.to_path_buf(),
+                        message: format!("directory entry error: {err}"),
+                        severity: IssueSeverity::Warning,
+                    });
+                }
+            }
+        }
+
+        candidates.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+        let builtin_count = self.entries.len();
+        let mut loaded_user_count = 0usize;
+
+        for path in candidates {
+            if loaded_user_count >= MAX_USER_THEMES {
+                issues.push(LoadIssue {
+                    path,
+                    message: format!("skipped: user theme limit ({MAX_USER_THEMES}) reached"),
+                    severity: IssueSeverity::Warning,
+                });
+                continue;
+            }
+
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(err) => {
+                    issues.push(LoadIssue {
+                        path,
+                        message: format!("failed to stat file: {err}"),
+                        severity: IssueSeverity::Error,
+                    });
+                    continue;
+                }
+            };
+            if meta.len() > MAX_THEME_FILE_BYTES as u64 {
+                issues.push(LoadIssue {
+                    path,
+                    message: format!(
+                        "file exceeds maximum size of {MAX_THEME_FILE_BYTES} bytes ({} bytes)",
+                        meta.len()
+                    ),
+                    severity: IssueSeverity::Error,
+                });
+                continue;
+            }
+
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(err) => {
+                    issues.push(LoadIssue {
+                        path,
+                        message: format!("failed to read file: {err}"),
+                        severity: IssueSeverity::Error,
+                    });
+                    continue;
+                }
+            };
+
+            let parsed = match parse_bytes(&bytes) {
+                Ok(p) => p,
+                Err(err) => {
+                    issues.push(LoadIssue {
+                        path,
+                        message: err.message,
+                        severity: IssueSeverity::Error,
+                    });
+                    continue;
+                }
+            };
+
+            if self.contains_id(&parsed.file.id) {
+                issues.push(LoadIssue {
+                    path,
+                    message: format!("duplicate theme id '{}'", parsed.file.id),
+                    severity: IssueSeverity::Error,
+                });
+                continue;
+            }
+
+            for warn in parsed.warnings {
+                issues.push(LoadIssue {
+                    path: path.clone(),
+                    message: warn,
+                    severity: IssueSeverity::Warning,
+                });
+            }
+
+            let file = parsed.file;
+            let hints = file.hints();
+            let theme = file.to_fx_theme();
+            self.entries.push(ThemeEntry {
+                id: file.id.clone(),
+                name: file.name.clone(),
+                description: file.description.clone(),
+                author: file.author.clone(),
+                source: ThemeSource::User(path),
+                theme,
+                file,
+                hints,
+            });
+            loaded_user_count += 1;
+        }
+
+        self.entries[builtin_count..].sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        self.issues = issues.clone();
+        issues
     }
 
     pub fn get(&self, id: &str) -> Option<&ThemeEntry> {
@@ -209,5 +391,60 @@ mod tests {
         let reg = ThemeRegistry::builtin_only();
         assert!(reg.get("does-not-exist").is_none());
         assert_eq!(reg.resolve("does-not-exist").unwrap().id, "carbon");
+    }
+
+    #[test]
+    fn load_user_dir_handles_valid_invalid_clashes_non_toml_subdir_symlink_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid_toml = BUILTIN_THEME_FILES[0]
+            .1
+            .replace("id = \"carbon\"", "id = \"z-custom\"")
+            .replace("name = \"Carbon\"", "name = \"Z Custom\"");
+        std::fs::write(dir.path().join("01_valid.toml"), &valid_toml).unwrap();
+
+        let alpha_toml = BUILTIN_THEME_FILES[0]
+            .1
+            .replace("id = \"carbon\"", "id = \"a-custom\"")
+            .replace("name = \"Carbon\"", "name = \"A Custom\"");
+        std::fs::write(dir.path().join("02_alpha.toml"), &alpha_toml).unwrap();
+
+        std::fs::write(dir.path().join("03_invalid.toml"), "not = valid = toml [").unwrap();
+        std::fs::write(
+            dir.path().join("04_builtin_clash.toml"),
+            BUILTIN_THEME_FILES[0].1,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("05_dup_id.toml"), &valid_toml).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), &valid_toml).unwrap();
+        std::fs::create_dir(dir.path().join("subdir.toml")).unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            dir.path().join("01_valid.toml"),
+            dir.path().join("06_symlink.toml"),
+        )
+        .unwrap();
+
+        let mut reg = ThemeRegistry::builtin_only();
+        let issues = reg.load_user_dir(dir.path());
+        assert_eq!(reg.user_entries().count(), 2);
+        let user_ids: Vec<&str> = reg.user_entries().map(|e| e.id.as_str()).collect();
+        assert_eq!(user_ids, vec!["a-custom", "z-custom"]);
+        assert_eq!(issues.len(), 3); // invalid, builtin clash, dup id
+
+        // Test 100-theme limit
+        let limit_dir = tempfile::tempdir().unwrap();
+        for i in 0..101 {
+            let t = BUILTIN_THEME_FILES[0]
+                .1
+                .replace("id = \"carbon\"", &format!("id = \"t-{i:03}\""))
+                .replace("name = \"Carbon\"", &format!("name = \"Theme {i:03}\""));
+            std::fs::write(limit_dir.path().join(format!("{i:03}.toml")), t).unwrap();
+        }
+        let mut reg2 = ThemeRegistry::builtin_only();
+        let issues2 = reg2.load_user_dir(limit_dir.path());
+        assert_eq!(reg2.user_entries().count(), 100);
+        assert_eq!(issues2.len(), 1);
+        assert!(issues2[0].message.contains("100"));
     }
 }
