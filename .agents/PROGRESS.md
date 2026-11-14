@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (SETTINGS_TABS step 1/7)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
+Task: none (SETTINGS_TABS step 2/7)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
 
 ## Done
+- none: cover zip extraction, cleanup, corrupt zip, and queued UpdateSettings timing (`SETTINGS_TABS` step 2)
 - none: add Settings::sanitize and shared range/preset constants in types.rs (`SETTINGS_TABS` step 1)
 - none: resolve matcher test types, clippy lints and rustfmt formatting for CI
 - none: release v0.1.3 bump; audit and reconcile all `.agents/` markdown files (`AGENTS.md`, `ROADMAP.md`, `PROGRESS.md`, `Initial Plan.md`, and `PLANS/*`) with codebase, migrations `0001`–`0008`, and full plan catalog

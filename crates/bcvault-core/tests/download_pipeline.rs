@@ -872,3 +872,333 @@ async fn quota_enforcement_api_rejections_and_redeem() {
 
     root_cancel.cancel();
 }
+
+async fn run_album_zip_download_case(
+    item_id: i64,
+    zip_bytes: Vec<u8>,
+    auto_extract: bool,
+    delete_zip_after_extract: bool,
+) -> (
+    Result<std::path::PathBuf, JobError>,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    bcvault_core::types::ReleaseRow,
+) {
+    let server = MockServer::start().await;
+    let dl_path = format!("/download/album-{item_id}.zip");
+    let dl_url = format!("{}{dl_path}", server.uri());
+    let bfn_json = serde_json::json!({
+        "ok": true,
+        "downloads": {
+            "flac": { "url": dl_url }
+        }
+    });
+
+    Mock::given(method("POST"))
+        .and(path(BUY_FOR_NOTHING_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(bfn_json))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(dl_path))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "Content-Disposition",
+                    format!("attachment; filename=\"TestArtist - Album {item_id}.zip\""),
+                )
+                .set_body_bytes(zip_bytes),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pool = DbPool::open(&dir.path().join("dl.db")).unwrap();
+    let out_dir = dir.path().join("out");
+    let key = ItemKey::new(ItemType::Album, item_id);
+    seed_test_release(
+        &pool,
+        10,
+        key,
+        "TestArtist",
+        &format!("Album {item_id}"),
+        Classification::Free,
+        2,
+    )
+    .await;
+
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(ev_tx, None);
+    let gate = BandcampGate::with_delays(5, 0, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let mut settings = Settings::default_with_dir(out_dir.clone());
+    settings.auto_extract = auto_extract;
+    settings.delete_zip_after_extract = delete_zip_after_extract;
+
+    let root_cancel = CancellationToken::new();
+    let mgr = DownloadManager::new(pool.clone(), client, bridge, settings, root_cancel.clone());
+
+    mgr.enqueue_downloads(
+        vec![key],
+        DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: out_dir.clone(),
+            batch_limit: 150,
+        },
+        false,
+    )
+    .await;
+
+    let mut outcome = None;
+    while let Some(ev) = ev_rx.recv().await {
+        if let WorkerToUiEvent::JobState { state, .. } = ev {
+            match state {
+                JobState::Done { path, .. } => {
+                    outcome = Some(Ok(path));
+                    break;
+                }
+                JobState::Failed(err) => {
+                    outcome = Some(Err(err));
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let row = pool
+        .reader
+        .call(move |c| releases::get_release(c, key))
+        .await
+        .unwrap()
+        .unwrap();
+
+    root_cancel.cancel();
+    (outcome.unwrap(), dir, out_dir, row)
+}
+
+#[tokio::test]
+async fn zip_auto_extract_true_keeps_zip_when_delete_false() {
+    let zip_bytes = build_zip_bytes(&[("01 - Track.flac", b"audio-data")]);
+    let (res, _dir, out_dir, row) = run_album_zip_download_case(1001, zip_bytes, true, false).await;
+
+    let extracted_dir = res.expect("download should succeed");
+    assert!(
+        extracted_dir.is_dir(),
+        "local_path should be extracted directory"
+    );
+    assert!(extracted_dir.join("01 - Track.flac").exists());
+    let zip_path = out_dir.join("TestArtist - Album 1001.zip");
+    assert!(
+        zip_path.exists(),
+        "ZIP should remain when delete_zip_after_extract = false"
+    );
+    assert!(row.downloaded);
+    assert_eq!(row.local_path, Some(extracted_dir));
+}
+
+#[tokio::test]
+async fn zip_auto_extract_true_deletes_zip_when_delete_true() {
+    let zip_bytes = build_zip_bytes(&[("01 - Track.flac", b"audio-data")]);
+    let (res, _dir, out_dir, row) = run_album_zip_download_case(1002, zip_bytes, true, true).await;
+
+    let extracted_dir = res.expect("download should succeed");
+    assert!(
+        extracted_dir.is_dir(),
+        "local_path should be extracted directory"
+    );
+    assert!(extracted_dir.join("01 - Track.flac").exists());
+    let zip_path = out_dir.join("TestArtist - Album 1002.zip");
+    assert!(
+        !zip_path.exists(),
+        "ZIP should be removed when delete_zip_after_extract = true"
+    );
+    assert!(row.downloaded);
+    assert_eq!(row.local_path, Some(extracted_dir));
+}
+
+#[tokio::test]
+async fn zip_auto_extract_false_keeps_zip_and_marks_downloaded() {
+    let zip_bytes = build_zip_bytes(&[("01 - Track.flac", b"audio-data")]);
+    let (res, _dir, out_dir, row) =
+        run_album_zip_download_case(1003, zip_bytes, false, false).await;
+
+    let zip_path = res.expect("download should succeed");
+    assert_eq!(zip_path, out_dir.join("TestArtist - Album 1003.zip"));
+    assert!(zip_path.is_file(), "ZIP should be kept on disk");
+    assert!(row.downloaded);
+    assert_eq!(row.local_path, Some(zip_path));
+}
+
+#[tokio::test]
+async fn zip_corrupt_with_delete_true_fails_and_keeps_zip() {
+    let corrupt_bytes = b"not-a-valid-zip-archive".to_vec();
+    let (res, _dir, out_dir, row) =
+        run_album_zip_download_case(1004, corrupt_bytes, true, true).await;
+
+    assert!(res.is_err(), "corrupt ZIP should fail extraction");
+    let zip_path = out_dir.join("TestArtist - Album 1004.zip");
+    assert!(
+        zip_path.is_file(),
+        "corrupt ZIP must not be deleted when extraction fails"
+    );
+    assert!(!row.downloaded);
+}
+
+#[tokio::test]
+async fn update_settings_while_job_queued_applies_to_next_job_to_start() {
+    // Timing in DownloadManager::run_job: settings are cloned from `self.state` at the
+    // moment `run_job` begins (entering JobState::Resolving). A job already running keeps
+    // its start-time snapshot, while a queued job that has not yet started `run_job` uses
+    // the updated settings from `update_settings`.
+    let server = MockServer::start().await;
+    let zip_bytes = build_zip_bytes(&[("01 - Track.flac", b"audio-data")]);
+
+    let dl_url_1 = format!("{}/download/album-2001.zip", server.uri());
+    let dl_url_2 = format!("{}/download/album-2002.zip", server.uri());
+
+    Mock::given(method("POST"))
+        .and(path(BUY_FOR_NOTHING_PATH))
+        .respond_with(move |req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let id = body["item_id"].as_str().unwrap();
+            let u = if id == "2001" { &dl_url_1 } else { &dl_url_2 };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "downloads": { "flac": { "url": u } }
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let gate_notify = Arc::new(tokio::sync::Notify::new());
+    let gate_notify_req = gate_notify.clone();
+    let zip_1 = zip_bytes.clone();
+    Mock::given(method("GET"))
+        .and(path("/download/album-2001.zip"))
+        .respond_with(move |_req: &Request| {
+            // Wait briefly so the test can update settings while job 2002 is still queued.
+            let _ = &gate_notify_req;
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(250))
+                .insert_header(
+                    "Content-Disposition",
+                    "attachment; filename=\"Band - First.zip\"",
+                )
+                .set_body_bytes(zip_1.clone())
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/download/album-2002.zip"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "Content-Disposition",
+                    "attachment; filename=\"Band - Second.zip\"",
+                )
+                .set_body_bytes(zip_bytes),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pool = DbPool::open(&dir.path().join("queue.db")).unwrap();
+    let out_dir = dir.path().join("out");
+
+    let k1 = ItemKey::new(ItemType::Album, 2001);
+    let k2 = ItemKey::new(ItemType::Album, 2002);
+    seed_test_release(&pool, 80, k1, "Band", "First", Classification::Free, 1).await;
+    seed_test_release(&pool, 80, k2, "Band", "Second", Classification::Free, 1).await;
+
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(ev_tx, None);
+    let gate = BandcampGate::with_delays(5, 0, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+
+    let mut initial = Settings::default_with_dir(out_dir.clone());
+    initial.max_concurrent_downloads = 1;
+    initial.auto_extract = false;
+    initial.delete_zip_after_extract = false;
+
+    let root_cancel = CancellationToken::new();
+    let mgr = DownloadManager::new(
+        pool.clone(),
+        client,
+        bridge,
+        initial.clone(),
+        root_cancel.clone(),
+    );
+
+    mgr.enqueue_downloads(
+        vec![k1, k2],
+        DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: out_dir.clone(),
+            batch_limit: 150,
+        },
+        false,
+    )
+    .await;
+
+    // Wait until the first job is actively downloading (so the second job is still queued),
+    // then update settings to enable auto_extract + delete_zip_after_extract.
+    let mut updated_sent = false;
+    let mut done_count = 0;
+    while let Some(ev) = ev_rx.recv().await {
+        if let WorkerToUiEvent::JobState { state, .. } = ev {
+            match state {
+                JobState::Downloading if !updated_sent => {
+                    let mut next = initial.clone();
+                    next.auto_extract = true;
+                    next.delete_zip_after_extract = true;
+                    mgr.update_settings(next);
+                    updated_sent = true;
+                    gate_notify.notify_one();
+                }
+                JobState::Done { .. } => {
+                    done_count += 1;
+                    if done_count == 2 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(updated_sent);
+
+    let r1 = pool
+        .reader
+        .call(move |c| releases::get_release(c, k1))
+        .await
+        .unwrap()
+        .unwrap();
+    let r2 = pool
+        .reader
+        .call(move |c| releases::get_release(c, k2))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Job 1 started before update_settings -> kept auto_extract = false (ZIP path).
+    assert_eq!(r1.local_path, Some(out_dir.join("Band - First.zip")));
+    assert!(out_dir.join("Band - First.zip").is_file());
+
+    // Job 2 started after update_settings -> used auto_extract = true & delete_zip_after_extract = true.
+    let r2_path = r2.local_path.expect("job 2 should have local_path");
+    assert!(r2_path.is_dir(), "job 2 should be extracted to a directory");
+    assert!(
+        !out_dir.join("Band - Second.zip").exists(),
+        "job 2 ZIP should be deleted"
+    );
+
+    root_cancel.cancel();
+}
