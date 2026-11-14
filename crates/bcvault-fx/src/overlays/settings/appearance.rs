@@ -62,7 +62,19 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
     }
 
     ui.add_space(4.0);
+    let active_is_user = ctx
+        .themes
+        .get(&ctx.prefs.theme)
+        .is_some_and(|e| matches!(e.source, crate::theme::registry::ThemeSource::User(_)));
     ui.horizontal_wrapped(|ui| {
+        if paint::sharp_button(ui, "New theme").clicked() {
+            ctx.pending_actions.push(FxAction::OpenThemeEditorNew);
+        }
+        let edit_label = if active_is_user { "Edit" } else { "Duplicate" };
+        if paint::sharp_button(ui, edit_label).clicked() {
+            ctx.pending_actions
+                .push(FxAction::OpenThemeEditorFor(ctx.prefs.theme.clone()));
+        }
         if paint::sharp_button(ui, "Open themes folder").clicked() {
             ctx.pending_actions.push(FxAction::OpenThemesFolder);
         }

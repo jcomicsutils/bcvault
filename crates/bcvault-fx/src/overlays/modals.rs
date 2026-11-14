@@ -57,6 +57,8 @@ pub fn show_modals(
         &mut pending_actions,
     );
 
+    crate::overlays::theme_editor::show(ctx, state, fx_tx, &mut pending_actions, now_s);
+
     // 2. Redeem URL Modal
     if let Some((target_key, title, mut url_input)) = state.redeem_modal.clone() {
         let mut close_redeem = esc;

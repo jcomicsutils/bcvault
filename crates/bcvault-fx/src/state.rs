@@ -427,6 +427,7 @@ pub struct FxState {
     pub themes: ThemeRegistry,
     pub themes_dir: Option<std::path::PathBuf>,
     pub theme_preview: Option<FxTheme>,
+    pub theme_editor: Option<crate::overlays::theme_editor::ThemeEditorState>,
     pub active_theme: FxTheme,
     pub motion: Motion,
     pub tex_cache: TextureCache,
@@ -576,6 +577,7 @@ impl FxState {
             themes,
             themes_dir: None,
             theme_preview: None,
+            theme_editor: None,
             active_theme,
             motion: Motion::new(),
             palettes: HashMap::new(),
@@ -697,10 +699,15 @@ impl FxState {
             || (self.show_resolve_missing_window && self.resolve_missing_modal.is_some())
             || (self.show_unavailable_window && self.unavailable_modal.is_some())
             || self.link_folder_modal.is_some()
+            || self.theme_editor.is_some()
             || self.settings_modal_open
     }
 
     pub fn close_top_modal(&mut self) -> bool {
+        if self.theme_editor.take().is_some() {
+            self.theme_preview = None;
+            return true;
+        }
         if self.confirm_remove_artist.take().is_some() {
             return true;
         }
@@ -1493,6 +1500,34 @@ impl FxState {
             FxAction::OpenThemesFolder => {
                 if let Some(dir) = &self.themes_dir {
                     let _ = open::that_detached(dir);
+                }
+            }
+            FxAction::OpenThemeEditorNew => {
+                if let Some(entry) = self.themes.resolve(&self.prefs.theme) {
+                    let existing_ids: Vec<String> =
+                        self.themes.entries().iter().map(|e| e.id.clone()).collect();
+                    let editor = crate::overlays::theme_editor::ThemeEditorState::from_entry(
+                        entry,
+                        true,
+                        &existing_ids,
+                    );
+                    self.theme_preview = Some(editor.file.to_fx_theme());
+                    self.theme_editor = Some(editor);
+                }
+            }
+            FxAction::OpenThemeEditorFor(id) => {
+                if let Some(entry) = self.themes.get(&id) {
+                    let is_builtin =
+                        matches!(entry.source, crate::theme::registry::ThemeSource::Builtin);
+                    let existing_ids: Vec<String> =
+                        self.themes.entries().iter().map(|e| e.id.clone()).collect();
+                    let editor = crate::overlays::theme_editor::ThemeEditorState::from_entry(
+                        entry,
+                        is_builtin,
+                        &existing_ids,
+                    );
+                    self.theme_preview = Some(editor.file.to_fx_theme());
+                    self.theme_editor = Some(editor);
                 }
             }
             FxAction::SetAdaptiveAccent(enabled) => {

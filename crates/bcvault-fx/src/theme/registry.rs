@@ -1,6 +1,8 @@
 use crate::theme::FxTheme;
 use crate::theme::builtin::BUILTIN_THEME_FILES;
-use crate::theme::file::{MAX_THEME_FILE_BYTES, ThemeFile, ThemeHint, parse, parse_bytes};
+use crate::theme::file::{
+    MAX_THEME_FILE_BYTES, ThemeError, ThemeFile, ThemeHint, parse, parse_bytes,
+};
 use std::path::{Path, PathBuf};
 
 pub const MAX_USER_THEMES: usize = 100;
@@ -277,6 +279,43 @@ impl ThemeRegistry {
     pub fn is_builtin_id(id: &str) -> bool {
         BUILTIN_THEME_FILES.iter().any(|(stem, _)| *stem == id)
     }
+
+    pub fn save_user_theme(
+        &mut self,
+        dir: &Path,
+        file: &ThemeFile,
+        existing_path: Option<&Path>,
+    ) -> Result<PathBuf, ThemeError> {
+        file.validate()?;
+        if Self::is_builtin_id(&file.id) {
+            return Err(ThemeError::new(format!(
+                "id: '{}' is reserved for a built-in theme",
+                file.id
+            )));
+        }
+        std::fs::create_dir_all(dir)
+            .map_err(|e| ThemeError::new(format!("failed to create themes directory: {e}")))?;
+
+        let target_path = existing_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dir.join(format!("{}.toml", file.id)));
+        let temp_path = dir.join(format!(".{}.toml.tmp.{}", file.id, std::process::id()));
+        let content = file.to_toml_string();
+
+        if let Err(e) = std::fs::write(&temp_path, content.as_bytes()) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(ThemeError::new(format!(
+                "failed to write temp theme file: {e}"
+            )));
+        }
+        if let Err(e) = std::fs::rename(&temp_path, &target_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(ThemeError::new(format!("failed to save theme file: {e}")));
+        }
+
+        self.load_user_dir(dir);
+        Ok(target_path)
+    }
 }
 
 #[cfg(test)]
@@ -446,5 +485,39 @@ mod tests {
         assert_eq!(reg2.user_entries().count(), 100);
         assert_eq!(issues2.len(), 1);
         assert!(issues2[0].message.contains("100"));
+    }
+
+    #[test]
+    fn save_user_theme_is_atomic_and_preserves_custom_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = ThemeRegistry::builtin_only();
+        let mut file = reg.resolve("carbon").unwrap().file.clone();
+        file.id = "my-custom".to_string();
+        file.name = "My Custom".to_string();
+
+        let saved = reg.save_user_theme(dir.path(), &file, None).unwrap();
+        assert_eq!(saved, dir.path().join("my-custom.toml"));
+        assert!(saved.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty());
+        assert_eq!(reg.get("my-custom").unwrap().name, "My Custom");
+
+        // Differently named file saves in place
+        let alt_path = dir.path().join("custom_filename.toml");
+        file.id = "renamed-id".to_string();
+        file.name = "Renamed File".to_string();
+        std::fs::write(&alt_path, file.to_toml_string()).unwrap();
+        reg.load_user_dir(dir.path());
+        let mut edited = reg.get("renamed-id").unwrap().file.clone();
+        edited.name = "Renamed Edited".to_string();
+        let saved_alt = reg
+            .save_user_theme(dir.path(), &edited, Some(&alt_path))
+            .unwrap();
+        assert_eq!(saved_alt, alt_path);
+        assert_eq!(reg.get("renamed-id").unwrap().name, "Renamed Edited");
     }
 }
