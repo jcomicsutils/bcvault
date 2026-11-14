@@ -27,6 +27,7 @@ pub struct Supervisor {
     dl_manager: DownloadManager,
     thumb_service: ThumbService,
     library_service: LibraryService,
+    current_out_dir: std::path::PathBuf,
     root_cancel: CancellationToken,
     sync_cancel: CancellationToken,
     library_cancel: CancellationToken,
@@ -98,6 +99,8 @@ impl Supervisor {
             .await
             .unwrap_or_default();
 
+        let current_out_dir = initial_settings.out_dir.clone();
+
         bridge.emit(WorkerToUiEvent::Ready {
             artists: initial_artists,
             settings: initial_settings,
@@ -124,6 +127,7 @@ impl Supervisor {
             dl_manager,
             thumb_service,
             library_service,
+            current_out_dir,
             root_cancel,
             sync_cancel,
             library_cancel,
@@ -557,7 +561,12 @@ impl Supervisor {
                 self.library_cancel = self.root_cancel.child_token();
             }
             UiToWorkerCommand::UpdateSettings(mut new_settings) => {
-                new_settings.batch_limit = new_settings.batch_limit.min(new_settings.quota_hard);
+                new_settings.sanitize();
+                if new_settings.out_dir.to_string_lossy().trim().is_empty() {
+                    new_settings.out_dir = self.current_out_dir.clone();
+                } else {
+                    self.current_out_dir = new_settings.out_dir.clone();
+                }
                 self.sync_service
                     .client
                     .gate

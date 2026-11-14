@@ -749,6 +749,14 @@ fn default_review_match_min() -> f32 {
     0.75
 }
 
+pub const BATCH_LIMIT_PRESETS: [u32; 5] = [25, 50, 100, 150, 200];
+pub const QUOTA_SOFT_RANGE: std::ops::RangeInclusive<u32> = 1..=200;
+pub const QUOTA_HARD_RANGE: std::ops::RangeInclusive<u32> = 1..=300;
+pub const PAGE_DELAY_RANGE: std::ops::RangeInclusive<u64> = 500..=5000;
+pub const PAGE_JITTER_RANGE: std::ops::RangeInclusive<u8> = 0..=50;
+pub const MAX_CONCURRENT_RANGE: std::ops::RangeInclusive<u8> = 1..=4;
+pub const MATCH_MIN_RANGE: std::ops::RangeInclusive<f32> = 0.50..=1.00;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub out_dir: PathBuf,
@@ -787,6 +795,13 @@ pub struct Settings {
 }
 
 impl Settings {
+    pub fn default_user_agent() -> String {
+        format!(
+            "bcvault/{} (personal archiving tool)",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+
     pub fn default_with_dir(out_dir: PathBuf) -> Self {
         Self {
             out_dir,
@@ -803,10 +818,7 @@ impl Settings {
             page_jitter_pct: 25,
             max_concurrent_downloads: 2,
             show_thumbnails: false,
-            user_agent: format!(
-                "bcvault/{} (personal archiving tool)",
-                env!("CARGO_PKG_VERSION")
-            ),
+            user_agent: Self::default_user_agent(),
             verify_on_sync: true,
             rescan_linked_on_sync: true,
             on_missing: OnMissing::Ask,
@@ -816,6 +828,62 @@ impl Settings {
             review_match_min: 0.75,
             folder_style: FolderStyle::default(),
         }
+    }
+
+    /// Clamps numeric fields to valid ranges, enforces cross-field invariants,
+    /// snaps `batch_limit` to a preset `<= quota_hard`, replaces a blank
+    /// `user_agent` with the default, and sanitizes `folder_style`.
+    /// Blank `out_dir` is left unchanged (callers preserve the prior path).
+    pub fn sanitize(&mut self) {
+        self.quota_hard = self
+            .quota_hard
+            .clamp(*QUOTA_HARD_RANGE.start(), *QUOTA_HARD_RANGE.end());
+        self.quota_soft = self
+            .quota_soft
+            .clamp(*QUOTA_SOFT_RANGE.start(), *QUOTA_SOFT_RANGE.end())
+            .min(self.quota_hard);
+
+        if let Some(snapped) = BATCH_LIMIT_PRESETS
+            .iter()
+            .copied()
+            .filter(|&p| p <= self.quota_hard)
+            .min_by_key(|&p| (p.abs_diff(self.batch_limit), p))
+        {
+            self.batch_limit = snapped;
+        } else {
+            self.batch_limit = self.batch_limit.clamp(1, self.quota_hard);
+        }
+
+        self.page_delay_ms = self
+            .page_delay_ms
+            .clamp(*PAGE_DELAY_RANGE.start(), *PAGE_DELAY_RANGE.end());
+        self.page_jitter_pct = self
+            .page_jitter_pct
+            .clamp(*PAGE_JITTER_RANGE.start(), *PAGE_JITTER_RANGE.end());
+        self.max_concurrent_downloads = self
+            .max_concurrent_downloads
+            .clamp(*MAX_CONCURRENT_RANGE.start(), *MAX_CONCURRENT_RANGE.end());
+
+        if !self.auto_match_min.is_finite() {
+            self.auto_match_min = default_auto_match_min();
+        }
+        self.auto_match_min = self
+            .auto_match_min
+            .clamp(*MATCH_MIN_RANGE.start(), *MATCH_MIN_RANGE.end());
+
+        if !self.review_match_min.is_finite() {
+            self.review_match_min = default_review_match_min();
+        }
+        self.review_match_min = self
+            .review_match_min
+            .clamp(*MATCH_MIN_RANGE.start(), *MATCH_MIN_RANGE.end())
+            .min(self.auto_match_min);
+
+        if self.user_agent.trim().is_empty() {
+            self.user_agent = Self::default_user_agent();
+        }
+
+        self.folder_style.sanitize();
     }
 }
 
@@ -1284,5 +1352,70 @@ mod tests {
             vec!["{artist} - {title}".to_string()]
         );
         assert!(s.folder_style.noise.is_empty());
+    }
+
+    #[test]
+    fn settings_sanitize_clamps_snaps_and_is_idempotent() {
+        let mut s = Settings {
+            out_dir: PathBuf::from(""),
+            quota_soft: 250,
+            quota_hard: 120,
+            batch_limit: 150,
+            page_delay_ms: 100,
+            page_jitter_pct: 99,
+            max_concurrent_downloads: 12,
+            auto_match_min: 0.40,
+            review_match_min: 0.95,
+            user_agent: "   ".to_string(),
+            ..Settings::default()
+        };
+
+        s.sanitize();
+
+        assert_eq!(s.quota_hard, 120);
+        assert_eq!(s.quota_soft, 120);
+        assert_eq!(s.batch_limit, 100);
+        assert_eq!(s.page_delay_ms, *PAGE_DELAY_RANGE.start());
+        assert_eq!(s.page_jitter_pct, *PAGE_JITTER_RANGE.end());
+        assert_eq!(s.max_concurrent_downloads, *MAX_CONCURRENT_RANGE.end());
+        assert!((s.auto_match_min - 0.50).abs() < 1e-6);
+        assert!((s.review_match_min - 0.50).abs() < 1e-6);
+        assert_eq!(s.user_agent, Settings::default_user_agent());
+        // Blank out_dir is left unchanged by sanitize() itself.
+        assert_eq!(s.out_dir, PathBuf::from(""));
+
+        let once = s.clone();
+        s.sanitize();
+        assert_eq!(s, once);
+
+        let mut defaults = Settings::default();
+        let expected_defaults = defaults.clone();
+        defaults.sanitize();
+        assert_eq!(defaults, expected_defaults);
+    }
+
+    #[test]
+    fn old_saved_settings_json_roundtrips_unchanged_after_sanitize() {
+        let old_json = r#"{
+            "out_dir": "/tmp/music",
+            "format": "Flac",
+            "format_fallback": "Nearest",
+            "layout": "Flat",
+            "auto_extract": true,
+            "delete_zip_after_extract": false,
+            "batch_limit": 150,
+            "quota_soft": 150,
+            "quota_hard": 200,
+            "page_delay_ms": 1500,
+            "page_jitter_pct": 25,
+            "max_concurrent_downloads": 2,
+            "show_thumbnails": false,
+            "user_agent": "bcvault/0.1.0"
+        }"#;
+
+        let parsed: Settings = serde_json::from_str(old_json).expect("deserialize old json");
+        let mut sanitized = parsed.clone();
+        sanitized.sanitize();
+        assert_eq!(sanitized, parsed);
     }
 }

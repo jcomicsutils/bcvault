@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (released v0.1.3; `.agents` audited and synced; ready for next plan)  ·  Branch: main  ·  Updated: 2026-11-11
+Task: none (SETTINGS_TABS step 1/7)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
 
 ## Done
+- none: add Settings::sanitize and shared range/preset constants in types.rs (`SETTINGS_TABS` step 1)
 - none: resolve matcher test types, clippy lints and rustfmt formatting for CI
 - none: release v0.1.3 bump; audit and reconcile all `.agents/` markdown files (`AGENTS.md`, `ROADMAP.md`, `PROGRESS.md`, `Initial Plan.md`, and `PLANS/*`) with codebase, migrations `0001`–`0008`, and full plan catalog
 - none: remove unused `is_all_scope` variable and unused `MatchDecision` imports in worker and UI modals

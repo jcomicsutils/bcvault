@@ -25,8 +25,7 @@ pub fn get_settings(conn: &Connection, default_out_dir: PathBuf) -> Result<Setti
 
 pub fn set_settings(conn: &Connection, settings: &Settings) -> Result<(), DbError> {
     let mut clamped = settings.clone();
-    clamped.batch_limit = clamped.batch_limit.min(clamped.quota_hard);
-    clamped.folder_style.sanitize();
+    clamped.sanitize();
     let json = serde_json::to_string(&clamped)?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
