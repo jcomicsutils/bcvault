@@ -181,6 +181,12 @@ Press `Enter` on any focused release (or double-click a card) to open the Detail
 
 ## 8. Complete Settings Reference
 
+Both `bcvault` and `bcvault-fx` organize settings into six tabs (`Appearance`, `Downloads`, `Network & Quota`, `Library`, `Folders`, and `Advanced`). Tabs with unsaved edits show a `•` marker, `Ctrl+Tab` / `Ctrl+PageDown` (and `Ctrl+Shift+Tab` / `Ctrl+PageUp`) cycle tabs, `Ctrl+S` saves, and `Esc` with unsaved changes prompts to **Save**, **Discard**, or **Keep editing**.
+
+In **Downloads → ZIP files**:
+- **Extract downloaded ZIP archives** (`auto_extract`, default on): Bandcamp album downloads arrive as `.zip` files. When extraction is off, the `.zip` itself is kept as your download.
+- **Delete the ZIP after successful extraction** (`delete_zip_after_extract`, default off): Only the downloaded `.zip` is removed, and only after every file was extracted successfully. Disabled while extraction is off.
+
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | `out_dir` | Platform Music/Downloads `bcvault/` | Global directory where newly downloaded releases are saved. Cannot overlap with any linked artist folder. |

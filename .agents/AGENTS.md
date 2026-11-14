@@ -17,7 +17,7 @@
 | `PLANS/LIBRARY_SYNC/DOWNLOAD-DIR-FIX.md` | Keep the download dir out of artist links; match library albums to releases downloaded elsewhere; amends `LIBRARY_SYNC_PLAN.md` §5. (Done, `Task: none` commits) |
 | `PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md` | Persistent "wrong, don't ask again" rejection for review proposals, interactive conflict resolution, and searchable/slug/URL release picker; amends `LIBRARY_SYNC_PLAN.md` §5, §6, and §10. (Done, `Task: none` commits) |
 | `PLANS/LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md` | Relink and adopt albums moved from the download directory on verify; amends `LIBRARY_SYNC_PLAN.md` §6, `MISSING-FOLDER-FIX.md` §3, and `DOWNLOAD-DIR-FIX.md` §3. (Done, `Task: none` commits) |
-| `PLANS/SETTINGS_TABS/SETTINGS_TABS.md` | Tabbed settings, settings parity between both UIs, `Settings::sanitize`, and ZIP extraction options. Not started (`Task: none` commits). |
+| `PLANS/SETTINGS_TABS/SETTINGS_TABS.md` | Tabbed settings, settings parity between both UIs, `Settings::sanitize`, and ZIP extraction options. (Done, `Task: none` commits) |
 | `PLANS/DOWNLOAD_FLOW/DOWNLOAD_FLOW.md` | Select all, download remaining, idempotent enqueue, and safer bulk downloads. Not started (`Task: none` commits). |
 | `PLANS/ARTIST_GROUPS/ARTIST_GROUPS.md` | Sidebar artist groups (manual and rule-based) and multi-artist release filtering. Not started (`Task: none` commits). |
 | `PLANS/KEYBOARD/KEYBOARD.md` | Complete keyboard operation, shortcut registry, focus regions, and modal focus scopes across both UIs. Not started (`Task: none` commits). |

@@ -18,7 +18,7 @@
 | Review rejection & URL/slug match picker (`PLANS/LIBRARY_SYNC/REVIEW-AND-MATCH-FIX.md`) | Implemented (Steps 1 to 5, migration `0008_rejected_matches.sql`) in `v0.1.3` |
 | Verify download-dir relink & rescan (`PLANS/LIBRARY_SYNC/VERIFY-DOWNLOAD-DIR-FIX.md`) | Implemented (Steps 1 to 3, no migration) in `v0.1.3` |
 | Tooling (T0) | Active: architectural guards (`scripts/guards.sh`), `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
-| Tabbed settings & ZIP options (`PLANS/SETTINGS_TABS/SETTINGS_TABS.md`) | Planned, not started; splits settings modal into 6 tabs, adds `Settings::sanitize`, and exposes ZIP extraction/cleanup controls in FX. |
+| Tabbed settings & ZIP options (`PLANS/SETTINGS_TABS/SETTINGS_TABS.md`) | Implemented (Steps 1 to 7) on `feat/settings-tabs`; 6-tab settings modal, `Settings::sanitize`, ZIP extraction/cleanup parity, and coverage tests. |
 | Bulk selection & download remaining (`PLANS/DOWNLOAD_FLOW/DOWNLOAD_FLOW.md`) | Planned, not started; select all/remaining/invert, idempotent `in_flight` enqueue, `EnqueueSummary`, soft-quota parity in FX, and bulk confirmation. |
 | Artist groups (`PLANS/ARTIST_GROUPS/ARTIST_GROUPS.md`) | Planned, not started; manual and rule-based collapsible sidebar groups (`0009_artist_groups.sql` or next free migration). |
 | Complete keyboard operation (`PLANS/KEYBOARD/KEYBOARD.md`) | Planned, not started; per-UI shortcut registry, `F6` focus regions, spatial wall/table/sidebar/dock navigation, modal focus scope, and `?`/`F1` help overlay. |

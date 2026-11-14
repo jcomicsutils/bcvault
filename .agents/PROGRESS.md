@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (SETTINGS_TABS step 6/7)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
+Task: none (SETTINGS_TABS complete; ready for manual check & merge)  ·  Branch: feat/settings-tabs  ·  Updated: 2026-11-13
 
 ## Done
+- none: document settings tabs and ZIP options (`SETTINGS_TABS` step 7)
 - none: add output folder, Browse button, format, batch limit presets, and coverage test in classic settings (`SETTINGS_TABS` step 6)
 - none: add missing download, ZIP, network, Browse, and coverage test in fx settings (`SETTINGS_TABS` step 5)
 - none: split fx settings modal into 6 tabs with settings_tab pref persistence (`SETTINGS_TABS` step 4)
@@ -116,9 +117,11 @@ Task: none (SETTINGS_TABS step 6/7)  ·  Branch: feat/settings-tabs  ·  Updated
 - [x] REVIEW-AND-MATCH-FIX: Persistent review rejection, conflict resolution, and URL/slug release picker (Steps 1 to 5, migration 0008)
 - [x] VERIFY-DOWNLOAD-DIR-FIX: Auto-relink out_dir releases to linked folders and rescan on verify (Steps 1 to 3)
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
+- [x] SETTINGS_TABS: Tabbed settings, settings parity, and ZIP extraction options (Steps 1 to 7; manual live-site ZIP download check pending user confirmation)
 - Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; current HEAD is `v0.1.3`).
 
 ## Open questions (needs the user)
+- 2026-11-13: When ZIP extraction fails, the job fails, the ZIP stays on disk, and the release is not marked downloaded (failed attempt recorded in history). Should the release instead be marked downloaded with `local_path` at the ZIP and a warning? (Not changed by `SETTINGS_TABS`; blocking? no)
 - 2026-11-08: create `milestone/F*` and `milestone/L*` tags retroactively, or record skipping them? (resolved: `AGENTS.md` rule 13 specifies SemVer version tags exclusively, no `milestone/<ID>` tags)
 
 ## Decisions and deviations

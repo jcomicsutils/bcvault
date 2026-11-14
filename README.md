@@ -21,7 +21,7 @@
 
 | Document | Description |
 | :--- | :--- |
-| **[User Guide](docs/user-guide.md)** | End-to-end manual for `bcvault-fx` (Eye-Candy Edition), `bcvault` (Classic Edition), and the headless CLI, including sync modes, filename patterns, quota rules, and all settings. |
+| **[User Guide](docs/user-guide.md)** | End-to-end manual for `bcvault-fx` (Eye-Candy Edition), `bcvault` (Classic Edition), and the headless CLI, including sync modes, tabbed settings & ZIP options, filename patterns, quota rules, and all settings. |
 | **[Library Sync & Folder Links](docs/library.md)** | Deep dive into N:1 artist folder linking, candidate scanning, exact-first and fuzzy matching, folder style templates, review rejection, URL/slug release matching, and disk verification safeguards. |
 | **[System Architecture](docs/architecture.md)** | Crate boundaries, UI-thread purity invariants, worker supervisor & message protocol, `BandcampGate` rate-limiting, sidecar services, and developer workflow. |
 | **[Database Schema Reference](docs/database.md)** | Complete SQLite schema specification for `bcvault.db` (v8) and `fx.sqlite` (v1), partial indexes, migration history, and batch undo audit log. |
