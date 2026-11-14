@@ -232,8 +232,8 @@ pub fn show(
 
         // Pin visible covers in TextureCache and schedule debounced thumbnail requests
         let mut pinned = HashSet::new();
-        for idx in vis_lo..vis_hi {
-            if let Some(art_id) = state.rows[idx].art_id {
+        for row in &state.rows[vis_lo..vis_hi] {
+            if let Some(art_id) = row.art_id {
                 pinned.insert((art_id, tier));
             }
         }
