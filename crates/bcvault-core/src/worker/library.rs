@@ -3224,7 +3224,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_verify_present_and_missing() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("verify_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("verify_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3241,7 +3242,7 @@ mod tests {
         let key_present = ItemKey::new(ItemType::Album, 101);
         let key_missing = ItemKey::new(ItemType::Album, 102);
 
-        let artist_dir = dir.path().join("Artist 111");
+        let artist_dir = root.join("Artist 111");
         let album_present_dir = artist_dir.join("Album Present");
         fs::create_dir_all(&album_present_dir).unwrap();
         fs::write(album_present_dir.join("01.mp3"), b"audio").unwrap();
@@ -3251,7 +3252,7 @@ mod tests {
 
         let p1 = album_present_dir.clone();
         let p2 = album_missing_dir.clone();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
 
         pool.writer
             .call(move |c| {
@@ -3471,7 +3472,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_verify_mass_missing_guard() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("mass_missing_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("mass_missing_test.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3485,11 +3487,11 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 333;
-        let artist_dir = dir.path().join("Artist 333");
+        let artist_dir = root.join("Artist 333");
         fs::create_dir_all(&artist_dir).unwrap();
 
         let a_dir = artist_dir.clone();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         pool.writer
             .call(move |c| {
                 artists::upsert(
@@ -3666,7 +3668,8 @@ mod tests {
     #[tokio::test]
     async fn test_library_service_verify_relink_two_identical_candidates_asks_instead() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("relink_two_identical.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("relink_two_identical.db");
 
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3682,7 +3685,7 @@ mod tests {
         let band_id = 555;
         let key = ItemKey::new(ItemType::Album, 501);
 
-        let artist_dir = dir.path().join("Artist 555");
+        let artist_dir = root.join("Artist 555");
         let original_path = artist_dir.join("Album");
         // Two identical candidate folders
         let cand1 = artist_dir.join("Album Copy 1");
@@ -3692,7 +3695,7 @@ mod tests {
         fs::create_dir_all(&cand2).unwrap();
         fs::write(cand2.join("01.mp3"), b"audio").unwrap();
 
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         let a_dir = artist_dir.clone();
         let p_old = original_path.clone();
 
@@ -4769,7 +4772,8 @@ mod tests {
     #[tokio::test]
     async fn test_unavailable_folder_regression_three_adopted_releases() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("reg_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("reg_test.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -4780,9 +4784,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 501;
-        let artist_dir = dir.path().join("Artist 501");
+        let artist_dir = root.join("Artist 501");
         fs::create_dir_all(&artist_dir).unwrap();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let a_dir = artist_dir.clone();
@@ -4894,7 +4898,8 @@ mod tests {
     #[tokio::test]
     async fn test_unavailable_folder_auto_mode_never_auto_resolves() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("auto_never_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("auto_never_test.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -4905,9 +4910,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 502;
-        let artist_dir = dir.path().join("Artist 502");
+        let artist_dir = root.join("Artist 502");
         fs::create_dir_all(&artist_dir).unwrap();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let a_dir = artist_dir.clone();
@@ -5003,7 +5008,8 @@ mod tests {
     #[tokio::test]
     async fn test_unavailable_folder_triggers_and_session_ack() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("triggers_ack_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("triggers_ack_test.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -5014,9 +5020,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 503;
-        let artist_dir = dir.path().join("Artist 503");
+        let artist_dir = root.join("Artist 503");
         fs::create_dir_all(&artist_dir).unwrap();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let key = ItemKey::new(ItemType::Album, 5031);
@@ -5195,7 +5201,8 @@ mod tests {
     #[tokio::test]
     async fn test_unavailable_folder_mixed_artist_linked_and_out_dir() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("mixed_artist_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("mixed_artist_test.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -5206,9 +5213,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 504;
-        let artist_dir = dir.path().join("Artist 504");
+        let artist_dir = root.join("Artist 504");
         fs::create_dir_all(&artist_dir).unwrap();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let key_linked = ItemKey::new(ItemType::Album, 5041);
@@ -5337,7 +5344,8 @@ mod tests {
     #[tokio::test]
     async fn test_unavailable_folder_archived_releases_not_listed() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("archived_not_listed.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("archived_not_listed.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -5348,9 +5356,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 505;
-        let artist_dir = dir.path().join("Artist 505");
+        let artist_dir = root.join("Artist 505");
         fs::create_dir_all(&artist_dir).unwrap();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let key_active = ItemKey::new(ItemType::Album, 5051);
@@ -5663,7 +5671,8 @@ mod tests {
     #[tokio::test]
     async fn test_unavailable_folder_mass_missing_ratio_ignores_unknown() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("mass_ratio_test.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("mass_ratio_test.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -5674,9 +5683,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 507;
-        let artist_dir = dir.path().join("Artist 507");
+        let artist_dir = root.join("Artist 507");
         fs::create_dir_all(&artist_dir).unwrap();
-        let out_dir = dir.path().join("Downloads");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let a_dir = artist_dir.clone();
@@ -6168,7 +6177,8 @@ mod tests {
     #[tokio::test]
     async fn test_15_verify_release_path_under_folder_b_while_folder_a_deleted() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test_15.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("test_15.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -6179,9 +6189,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 1500;
-        let folder_a = dir.path().join("FolderA");
-        let folder_b = dir.path().join("FolderB");
-        let out_dir = dir.path().join("Downloads");
+        let folder_a = root.join("FolderA");
+        let folder_b = root.join("FolderB");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&folder_a).unwrap();
         fs::create_dir_all(&folder_b).unwrap();
         fs::create_dir_all(&out_dir).unwrap();
@@ -6315,7 +6325,8 @@ mod tests {
     #[tokio::test]
     async fn test_16_verify_album_moved_from_folder_a_to_folder_b_relinks_silently() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test_16.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("test_16.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -6326,9 +6337,9 @@ mod tests {
         let svc = LibraryService::new(pool.clone(), bridge);
 
         let band_id = 1600;
-        let folder_a = dir.path().join("FolderA");
-        let folder_b = dir.path().join("FolderB");
-        let out_dir = dir.path().join("Downloads");
+        let folder_a = root.join("FolderA");
+        let folder_b = root.join("FolderB");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&folder_a).unwrap();
         fs::create_dir_all(&folder_b).unwrap();
         fs::create_dir_all(&out_dir).unwrap();
@@ -6428,7 +6439,8 @@ mod tests {
     #[tokio::test]
     async fn test_17_verify_missing_album_artist_with_offline_second_folder_never_auto_resolves() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test_17.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("test_17.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -6441,10 +6453,10 @@ mod tests {
         let band_1 = 1701;
         let band_2 = 1702;
 
-        let dir_1a = dir.path().join("Artist1_FolderA");
-        let dir_1b = dir.path().join("Artist1_FolderB");
-        let dir_2 = dir.path().join("Artist2_Folder");
-        let out_dir = dir.path().join("Downloads");
+        let dir_1a = root.join("Artist1_FolderA");
+        let dir_1b = root.join("Artist1_FolderB");
+        let dir_2 = root.join("Artist2_Folder");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&dir_1a).unwrap();
         fs::create_dir_all(&dir_1b).unwrap();
         fs::create_dir_all(&dir_2).unwrap();
@@ -6874,7 +6886,8 @@ mod tests {
     #[tokio::test]
     async fn test_20_worker_repoint_artist_folder_by_id() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test_20.db");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let db_path = root.join("test_20.db");
         {
             let mut conn = rusqlite::Connection::open(&db_path).unwrap();
             migrations::run(&mut conn).unwrap();
@@ -6887,10 +6900,10 @@ mod tests {
         let band_id = 2000;
         let key = ItemKey::new(ItemType::Album, 2001);
 
-        let folder_a_old = dir.path().join("FolderAOld");
-        let folder_a_new = dir.path().join("FolderANew");
-        let folder_b = dir.path().join("FolderB");
-        let out_dir = dir.path().join("Downloads");
+        let folder_a_old = root.join("FolderAOld");
+        let folder_a_new = root.join("FolderANew");
+        let folder_b = root.join("FolderB");
+        let out_dir = root.join("Downloads");
 
         fs::create_dir_all(&folder_a_old).unwrap();
         fs::create_dir_all(&folder_a_new).unwrap();

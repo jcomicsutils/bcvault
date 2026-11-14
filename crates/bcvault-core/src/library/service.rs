@@ -441,9 +441,10 @@ mod tests {
         .unwrap();
 
         let dir = tempdir().unwrap();
-        let folder1 = dir.path().join("Folder1");
-        let folder2 = dir.path().join("Folder2");
-        let out_dir = dir.path().join("Downloads");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let folder1 = root.join("Folder1");
+        let folder2 = root.join("Folder2");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let alb1 = folder1.join("Album One");
@@ -511,9 +512,10 @@ mod tests {
         .unwrap();
 
         let dir = tempdir().unwrap();
-        let folder1 = dir.path().join("Folder1");
-        let folder2 = dir.path().join("Folder2");
-        let out_dir = dir.path().join("Downloads");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let folder1 = root.join("Folder1");
+        let folder2 = root.join("Folder2");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let alb1 = folder1.join("Album One");
@@ -563,9 +565,10 @@ mod tests {
         .unwrap();
 
         let dir = tempdir().unwrap();
-        let folder1 = dir.path().join("Folder1");
-        let folder2 = dir.path().join("Folder2");
-        let out_dir = dir.path().join("Downloads");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let folder1 = root.join("Folder1");
+        let folder2 = root.join("Folder2");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         let orphan1 = folder1.join("Orphan 1");
@@ -741,9 +744,10 @@ mod tests {
         .unwrap();
 
         let dir = tempdir().unwrap();
-        let folder1 = dir.path().join("Folder1");
-        let folder2 = dir.path().join("Folder2");
-        let out_dir = dir.path().join("Downloads");
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let folder1 = root.join("Folder1");
+        let folder2 = root.join("Folder2");
+        let out_dir = root.join("Downloads");
         fs::create_dir_all(&out_dir).unwrap();
 
         fs::create_dir_all(&folder1).unwrap();

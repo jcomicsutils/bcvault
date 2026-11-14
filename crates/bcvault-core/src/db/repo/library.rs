@@ -1622,11 +1622,12 @@ mod tests {
     fn test_folder_name_with_percent_and_underscore_not_matching_sibling() {
         let mut conn = test_db();
         let tmp = tempfile::tempdir().unwrap();
-        let out_dir = tmp.path().join("out");
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let out_dir = root.join("out");
         std::fs::create_dir(&out_dir).unwrap();
 
-        let dir1 = tmp.path().join("100%_pure");
-        let dir2 = tmp.path().join("100%_pure_extra");
+        let dir1 = root.join("100%_pure");
+        let dir2 = root.join("100%_pure_extra");
         std::fs::create_dir(&dir1).unwrap();
         std::fs::create_dir(&dir2).unwrap();
 
