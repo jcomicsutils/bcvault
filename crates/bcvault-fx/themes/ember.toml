@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "ember"
+name = "Ember"
+description = "Warm charcoal with a molten orange accent"
+author = "bcvault"
+dark = true
+scanlines = false
+
+[colors]
+bg0 = "#0F0A07"
+bg1 = "#1A110C"
+bg2 = "#271A12"
+border = "#4A3022"
+border_hi = "#C27A3E"
+text = "#F5E9DF"
+text_dim = "#B59C8A"
+accent = "#FF8A3D"
+accent2 = "#FFC24D"
+ok = "#A3E635"
+warn = "#FBBF24"
+err = "#FF6B6B"

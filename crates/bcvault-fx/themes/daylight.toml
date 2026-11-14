@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "daylight"
+name = "Daylight"
+description = "Cool light theme with a blue accent"
+author = "bcvault"
+dark = false
+scanlines = false
+
+[colors]
+bg0 = "#F7F9FC"
+bg1 = "#EAEFF6"
+bg2 = "#DCE4EF"
+border = "#9BA8BC"
+border_hi = "#3B4A63"
+text = "#14202E"
+text_dim = "#4A5A70"
+accent = "#0B5FD0"
+accent2 = "#0A6F65"
+ok = "#17702F"
+warn = "#9A5B00"
+err = "#C62828"

@@ -155,6 +155,7 @@ impl ThemeFile {
             warn: self.colors.warn,
             err: self.colors.err,
             is_dark: self.dark,
+            scanlines: self.scanlines,
         }
     }
 

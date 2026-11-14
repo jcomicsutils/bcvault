@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "contrast"
+name = "Contrast"
+description = "Maximum-contrast black and white with a yellow accent"
+author = "bcvault"
+dark = true
+scanlines = false
+
+[colors]
+bg0 = "#000000"
+bg1 = "#0A0A0A"
+bg2 = "#1A1A1A"
+border = "#B0B0B0"
+border_hi = "#FFFFFF"
+text = "#FFFFFF"
+text_dim = "#D0D0D0"
+accent = "#FFD60A"
+accent2 = "#00E5FF"
+ok = "#00FF7F"
+warn = "#FFB000"
+err = "#FF5C5C"

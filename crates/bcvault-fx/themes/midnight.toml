@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "midnight"
+name = "Midnight"
+description = "Deep navy with a clear blue accent"
+author = "bcvault"
+dark = true
+scanlines = false
+
+[colors]
+bg0 = "#070B14"
+bg1 = "#0D1424"
+bg2 = "#16203A"
+border = "#2A3A5E"
+border_hi = "#5C7BC0"
+text = "#E6ECFA"
+text_dim = "#98A6C8"
+accent = "#4DA3FF"
+accent2 = "#7CE0D3"
+ok = "#4ADE80"
+warn = "#FBBF24"
+err = "#FB7185"

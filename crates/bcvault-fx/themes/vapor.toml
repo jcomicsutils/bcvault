@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "vapor"
+name = "Vapor"
+description = "Deep violet and neon cyan theme"
+author = "bcvault"
+dark = true
+scanlines = false
+
+[colors]
+bg0 = "#0D0A1A"
+bg1 = "#15102B"
+bg2 = "#1F1840"
+border = "#3B2F73"
+border_hi = "#8C7BFF"
+text = "#F1EAFF"
+text_dim = "#A79CD6"
+accent = "#FF4FD8"
+accent2 = "#3DE3FF"
+ok = "#3DE3FF"
+warn = "#FFC857"
+err = "#FF5C8A"

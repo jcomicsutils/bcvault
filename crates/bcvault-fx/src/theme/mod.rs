@@ -1,4 +1,6 @@
+pub mod builtin;
 pub mod file;
+pub mod registry;
 
 use crate::motion::{Motion, SpringCfg, oklab::clamp_accent_contrast};
 use egui::{
@@ -64,9 +66,12 @@ pub struct FxTheme {
     pub warn: Color32,
     pub err: Color32,
     pub is_dark: bool,
+    pub scanlines: bool,
 }
 
 impl FxTheme {
+    pub const FALLBACK: Self = Self::CARBON;
+
     pub const CARBON: Self = Self {
         bg0: Color32::from_rgb(0x0A, 0x0A, 0x0B),
         bg1: Color32::from_rgb(0x12, 0x13, 0x15),
@@ -81,6 +86,7 @@ impl FxTheme {
         warn: Color32::from_rgb(0xFF, 0xB3, 0x00),
         err: Color32::from_rgb(0xFF, 0x52, 0x52),
         is_dark: true,
+        scanlines: false,
     };
 
     pub const PAPER: Self = Self {
@@ -97,6 +103,7 @@ impl FxTheme {
         warn: Color32::from_rgb(0xB0, 0x60, 0x00),
         err: Color32::from_rgb(0xC5, 0x22, 0x1F),
         is_dark: false,
+        scanlines: false,
     };
 
     pub const TERMINAL: Self = Self {
@@ -113,6 +120,7 @@ impl FxTheme {
         warn: Color32::from_rgb(0xFF, 0xD4, 0x00),
         err: Color32::from_rgb(0xFF, 0x55, 0x55),
         is_dark: true,
+        scanlines: true,
     };
 
     pub const VAPOR: Self = Self {
@@ -129,6 +137,7 @@ impl FxTheme {
         warn: Color32::from_rgb(0xFF, 0xC8, 0x57),
         err: Color32::from_rgb(0xFF, 0x5C, 0x8A),
         is_dark: true,
+        scanlines: false,
     };
 
     pub const fn for_id(id: ThemeId) -> Self {
@@ -164,6 +173,7 @@ impl FxTheme {
             warn: motion.color("th_warn", self.warn, cfg),
             err: motion.color("th_err", self.err, cfg),
             is_dark: self.is_dark,
+            scanlines: self.scanlines,
         }
     }
 }

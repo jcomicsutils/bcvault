@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "terminal"
+name = "Terminal"
+description = "Phosphor green terminal theme"
+author = "bcvault"
+dark = true
+scanlines = true
+
+[colors]
+bg0 = "#050805"
+bg1 = "#0A100A"
+bg2 = "#142014"
+border = "#1F3B1F"
+border_hi = "#39FF14"
+text = "#B6FFB0"
+text_dim = "#6C9E68"
+accent = "#39FF14"
+accent2 = "#FFD400"
+ok = "#39FF14"
+warn = "#FFD400"
+err = "#FF5555"

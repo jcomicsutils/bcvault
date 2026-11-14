@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "sage"
+name = "Sage"
+description = "Soft green-grey light theme with a forest accent"
+author = "bcvault"
+dark = false
+scanlines = false
+
+[colors]
+bg0 = "#F3F6F0"
+bg1 = "#E5ECE0"
+bg2 = "#D5DFCD"
+border = "#8FA284"
+border_hi = "#2F4A2A"
+text = "#172016"
+text_dim = "#4B5D47"
+accent = "#1F6B3A"
+accent2 = "#8A5A00"
+ok = "#17692F"
+warn = "#8F5A00"
+err = "#B3261E"

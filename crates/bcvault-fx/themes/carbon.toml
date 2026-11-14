@@ -1,0 +1,22 @@
+# bcvault theme, format 1. Share this file as is.
+format = 1
+id = "carbon"
+name = "Carbon"
+description = "Dark neutral slate theme"
+author = "bcvault"
+dark = true
+scanlines = false
+
+[colors]
+bg0 = "#0A0A0B"
+bg1 = "#121315"
+bg2 = "#1B1D20"
+border = "#3A3D42"
+border_hi = "#8A8F98"
+text = "#ECECEC"
+text_dim = "#9AA0A6"
+accent = "#00D1B2"
+accent2 = "#3DDC84"
+ok = "#3DDC84"
+warn = "#FFB300"
+err = "#FF5252"
