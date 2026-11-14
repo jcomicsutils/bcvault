@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none  ·  Branch: main  ·  Updated: 2026-11-14
+Task: none (USER_THEMES step 1)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
 
 ## Done
+- none: add theme file format with TOML parsing, validation, hints, and slugify (`USER_THEMES` step 1)
 - none: release v0.2.0 bump (`SETTINGS_TABS` merged)
 - none: prevent fx settings window width bump during tab-switch slide (`SETTINGS_TABS` follow-up)
 - none: animate fx settings tab transitions and fix linked-folders scrollbar width (`SETTINGS_TABS` follow-up)

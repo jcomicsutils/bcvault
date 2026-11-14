@@ -1,3 +1,5 @@
+pub mod file;
+
 use crate::motion::{Motion, SpringCfg, oklab::clamp_accent_contrast};
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke, Style,
