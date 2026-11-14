@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none (USER_THEMES step 7)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
+Task: none (USER_THEMES step 8)  ·  Branch: feat/file-themes  ·  Updated: 2026-11-14
 
 ## Done
+- none: document file-based themes, sharing, and the 10 built-in themes in docs/themes.md and README.md (`USER_THEMES` step 8)
 - none: add import, export, copy as text, and confirmed delete for user themes (`USER_THEMES` step 7)
 - none: add theme editor modal with live preview, validation, hints, and atomic save (`USER_THEMES` step 6)
 - none: add wrapped theme swatch picker, Built-in/Yours sections, Reload, Open folder, and issues list (`USER_THEMES` step 5)
