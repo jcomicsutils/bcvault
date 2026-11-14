@@ -34,6 +34,7 @@ pub struct Prefs {
     pub view: ViewMode,
     pub card_size_idx: usize,
     pub tex_budget_mb: u32,
+    pub settings_tab: crate::overlays::settings::SettingsTab,
 }
 
 impl Default for Prefs {
@@ -50,6 +51,7 @@ impl Default for Prefs {
             view: ViewMode::Wall,
             card_size_idx: 1,
             tex_budget_mb: 192,
+            settings_tab: crate::overlays::settings::SettingsTab::Downloads,
         }
     }
 }
@@ -248,6 +250,9 @@ pub fn get_prefs(conn: &Connection) -> Result<Prefs, DbError> {
                 if let Ok(mb) = v.parse::<u32>() {
                     prefs.tex_budget_mb = mb.clamp(64, 1024);
                 }
+            }
+            "settings_tab" => {
+                prefs.settings_tab = crate::overlays::settings::SettingsTab::parse(&v);
             }
             _ => {}
         }

@@ -496,6 +496,10 @@ pub struct FxState {
     pub save_view_modal: Option<String>,
     pub settings_modal_open: bool,
     pub settings_draft: Option<Settings>,
+    pub settings_confirm_discard: bool,
+    pub settings_focus_first: bool,
+    pub settings_focus_keep_editing: bool,
+    pub settings_folders_filter: String,
     pub filename_pattern_input: String,
     pub confirm_remove_artist: Option<(i64, String)>,
     pub rename_artist_modal: Option<(i64, String, String)>,
@@ -606,6 +610,10 @@ impl FxState {
             save_view_modal: None,
             settings_modal_open: false,
             settings_draft: None,
+            settings_confirm_discard: false,
+            settings_focus_first: false,
+            settings_focus_keep_editing: false,
+            settings_folders_filter: String::new(),
             filename_pattern_input: String::new(),
             confirm_remove_artist: None,
             rename_artist_modal: None,
@@ -692,11 +700,37 @@ impl FxState {
             return true;
         }
         if self.settings_modal_open {
-            self.settings_modal_open = false;
-            self.settings_draft = None;
+            if let Some(ref draft) = self.settings_draft {
+                match crate::overlays::settings::handle_settings_esc(
+                    draft,
+                    &self.settings,
+                    &mut self.settings_confirm_discard,
+                ) {
+                    crate::overlays::settings::SettingsEscOutcome::Close => {
+                        self.settings_modal_open = false;
+                        self.settings_draft = None;
+                    }
+                    crate::overlays::settings::SettingsEscOutcome::ShowConfirm => {
+                        self.settings_focus_keep_editing = true;
+                    }
+                    crate::overlays::settings::SettingsEscOutcome::KeepEditing => {}
+                }
+            } else {
+                self.settings_modal_open = false;
+                self.settings_confirm_discard = false;
+            }
             return true;
         }
         false
+    }
+
+    pub fn open_settings_modal(&mut self) {
+        self.settings_draft = Some(self.settings.clone());
+        self.filename_pattern_input = self.settings.filename_pattern.clone();
+        self.settings_confirm_discard = false;
+        self.settings_focus_first = true;
+        self.settings_focus_keep_editing = false;
+        self.settings_modal_open = true;
     }
 
     pub fn current_view_state(&self) -> ViewState {

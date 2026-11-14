@@ -150,9 +150,7 @@ pub fn show(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if paint::sharp_button(ui, "Settings").clicked() {
-                state.settings_draft = Some(state.settings.clone());
-                state.filename_pattern_input = state.settings.filename_pattern.clone();
-                state.settings_modal_open = true;
+                state.open_settings_modal();
             }
             if paint::sharp_button(ui, "Link Folder...").clicked() {
                 pending_actions.push(FxAction::OpenLinkFolderModal(state.query.base.band_id));

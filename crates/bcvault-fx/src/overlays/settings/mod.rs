@@ -1,0 +1,468 @@
+pub mod advanced;
+pub mod appearance;
+pub mod downloads;
+pub mod folders;
+pub mod library;
+pub mod network;
+
+use crate::{
+    actions::FxAction,
+    db::Prefs,
+    paint,
+    services::{messages::FxCommand, thumbs::TextureCache},
+    state::FxState,
+    theme::FxTheme,
+};
+use bcvault_core::{
+    types::{ArtistFolder, ArtistView, Settings},
+    worker::messages::UiToWorkerCommand,
+};
+use egui::{Color32, CornerRadius, Key, RichText, Stroke};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::sync::mpsc::UnboundedSender;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SettingsTab {
+    Appearance,
+    #[default]
+    Downloads,
+    Network,
+    Library,
+    Folders,
+    Advanced,
+}
+
+impl SettingsTab {
+    pub const ALL: &[Self] = &[
+        Self::Appearance,
+        Self::Downloads,
+        Self::Network,
+        Self::Library,
+        Self::Folders,
+        Self::Advanced,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "Appearance",
+            Self::Downloads => "Downloads",
+            Self::Network => "Network & Quota",
+            Self::Library => "Library",
+            Self::Folders => "Folders",
+            Self::Advanced => "Advanced",
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Appearance => "appearance",
+            Self::Downloads => "downloads",
+            Self::Network => "network",
+            Self::Library => "library",
+            Self::Folders => "folders",
+            Self::Advanced => "advanced",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "appearance" => Self::Appearance,
+            "downloads" => Self::Downloads,
+            "network" => Self::Network,
+            "library" => Self::Library,
+            "folders" => Self::Folders,
+            "advanced" => Self::Advanced,
+            _ => Self::Downloads,
+        }
+    }
+
+    pub const fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Appearance => &[],
+            Self::Downloads => &[
+                "out_dir",
+                "layout",
+                "filename_pattern",
+                "format",
+                "batch_limit",
+            ],
+            Self::Network => &["quota_soft", "quota_hard"],
+            Self::Library => &[
+                "verify_on_sync",
+                "rescan_linked_on_sync",
+                "auto_relink",
+                "on_missing",
+                "deleted_policy",
+                "auto_match_min",
+                "review_match_min",
+            ],
+            Self::Folders => &["folder_style"],
+            Self::Advanced => &[],
+        }
+    }
+
+    pub fn cycle(self, delta: isize) -> Self {
+        let len = Self::ALL.len() as isize;
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0) as isize;
+        let next = (idx + delta).rem_euclid(len) as usize;
+        Self::ALL[next]
+    }
+}
+
+pub struct TabCtx<'a> {
+    pub draft: &'a mut Settings,
+    pub filename_pattern_input: &'a mut String,
+    pub prefs: &'a mut Prefs,
+    pub tex_cache: &'a mut TextureCache,
+    pub cover_cache_bytes: u64,
+    pub theme: FxTheme,
+    pub artists: &'a [ArtistView],
+    pub folders: &'a HashMap<i64, Vec<ArtistFolder>>,
+    pub folder_filter: &'a mut String,
+    pub core_tx: &'a UnboundedSender<UiToWorkerCommand>,
+    pub fx_tx: &'a UnboundedSender<FxCommand>,
+    pub rt_handle: &'a tokio::runtime::Handle,
+    pub pending_actions: &'a mut Vec<FxAction>,
+    pub focus_first: bool,
+}
+
+pub fn is_tab_dirty(tab: SettingsTab, draft: &Settings, saved: &Settings) -> bool {
+    let fields = tab.fields();
+    if fields.is_empty() {
+        return false;
+    }
+    let Ok(draft_val) = serde_json::to_value(draft) else {
+        return false;
+    };
+    let Ok(saved_val) = serde_json::to_value(saved) else {
+        return false;
+    };
+    fields
+        .iter()
+        .any(|key| draft_val.get(*key) != saved_val.get(*key))
+}
+
+pub fn is_any_dirty(draft: &Settings, saved: &Settings) -> bool {
+    SettingsTab::ALL
+        .iter()
+        .any(|&tab| is_tab_dirty(tab, draft, saved))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsEscOutcome {
+    Close,
+    ShowConfirm,
+    KeepEditing,
+}
+
+pub fn handle_settings_esc(
+    draft: &Settings,
+    saved: &Settings,
+    confirm_open: &mut bool,
+) -> SettingsEscOutcome {
+    if !is_any_dirty(draft, saved) {
+        *confirm_open = false;
+        SettingsEscOutcome::Close
+    } else if *confirm_open {
+        *confirm_open = false;
+        SettingsEscOutcome::KeepEditing
+    } else {
+        *confirm_open = true;
+        SettingsEscOutcome::ShowConfirm
+    }
+}
+
+pub fn save_draft(
+    draft: &mut Settings,
+    saved: &Settings,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+) {
+    if draft.out_dir.to_string_lossy().trim().is_empty() {
+        draft.out_dir = saved.out_dir.clone();
+    }
+    draft.sanitize();
+    let _ = core_tx.send(UiToWorkerCommand::UpdateSettings(draft.clone()));
+}
+
+fn switch_tab(state: &mut FxState, fx_tx: &UnboundedSender<FxCommand>, tab: SettingsTab) {
+    if state.prefs.settings_tab != tab {
+        state.prefs.settings_tab = tab;
+        state.settings_focus_first = true;
+        let _ = fx_tx.send(FxCommand::SetPref {
+            key: "settings_tab".to_string(),
+            value: tab.as_str().to_string(),
+        });
+    }
+}
+
+pub fn show_settings_modal(
+    ctx: &egui::Context,
+    state: &mut FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+    fx_tx: &UnboundedSender<FxCommand>,
+    rt_handle: &tokio::runtime::Handle,
+    pending_actions: &mut Vec<FxAction>,
+) {
+    if !state.settings_modal_open {
+        return;
+    }
+
+    let Some(mut draft) = state.settings_draft.take() else {
+        state.settings_modal_open = false;
+        return;
+    };
+
+    let th = state.active_theme;
+    let mut keep_open = true;
+    let mut trigger_save = false;
+
+    let tab_delta = ctx.input(|i| {
+        let ctrl = i.modifiers.command || i.modifiers.ctrl;
+        if ctrl && (i.key_pressed(Key::PageDown) || (i.key_pressed(Key::Tab) && !i.modifiers.shift))
+        {
+            1
+        } else if ctrl
+            && (i.key_pressed(Key::PageUp) || (i.key_pressed(Key::Tab) && i.modifiers.shift))
+        {
+            -1
+        } else {
+            0
+        }
+    });
+    if tab_delta != 0 {
+        let next = state.prefs.settings_tab.cycle(tab_delta);
+        switch_tab(state, fx_tx, next);
+    }
+
+    let ctrl_s = ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(Key::S));
+    if ctrl_s {
+        trigger_save = true;
+    }
+
+    let screen = ctx.content_rect();
+    let max_body_h = (screen.height() * 0.80 - 130.0).max(220.0);
+
+    egui::Window::new("bcvault-fx Settings")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(680.0)
+        .show(ctx, |ui| {
+            ui.set_min_width(680.0);
+            ui.set_max_width(680.0);
+
+            ui.horizontal_wrapped(|ui| {
+                let mut tab_resps = Vec::with_capacity(SettingsTab::ALL.len());
+                for &tab in SettingsTab::ALL {
+                    let selected = state.prefs.settings_tab == tab;
+                    let dirty = is_tab_dirty(tab, &draft, &state.settings);
+                    let label = if dirty {
+                        format!("{} •", tab.label())
+                    } else {
+                        tab.label().to_string()
+                    };
+                    let btn = egui::Button::new(
+                        RichText::new(label)
+                            .color(if selected { th.text } else { th.text_dim })
+                            .strong(),
+                    )
+                    .fill(if selected { th.bg2 } else { th.bg1 })
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        if selected { th.accent } else { th.border },
+                    ))
+                    .corner_radius(CornerRadius::ZERO);
+
+                    let resp = ui.add(btn);
+                    if resp.clicked() && !selected {
+                        switch_tab(state, fx_tx, tab);
+                    }
+                    tab_resps.push((tab, resp));
+                }
+
+                for (idx, (_, resp)) in tab_resps.iter().enumerate() {
+                    if resp.has_focus() {
+                        if ui.input(|i| i.key_pressed(Key::ArrowRight)) {
+                            let next = (idx + 1) % tab_resps.len();
+                            tab_resps[next].1.request_focus();
+                            let t = tab_resps[next].0;
+                            if state.prefs.settings_tab != t {
+                                state.prefs.settings_tab = t;
+                                let _ = fx_tx.send(FxCommand::SetPref {
+                                    key: "settings_tab".to_string(),
+                                    value: t.as_str().to_string(),
+                                });
+                            }
+                        } else if ui.input(|i| i.key_pressed(Key::ArrowLeft)) {
+                            let prev = (idx + tab_resps.len() - 1) % tab_resps.len();
+                            tab_resps[prev].1.request_focus();
+                            let t = tab_resps[prev].0;
+                            if state.prefs.settings_tab != t {
+                                state.prefs.settings_tab = t;
+                                let _ = fx_tx.send(FxCommand::SetPref {
+                                    key: "settings_tab".to_string(),
+                                    value: t.as_str().to_string(),
+                                });
+                            }
+                        }
+                        break;
+                    }
+                }
+            });
+
+            ui.separator();
+
+            let focus_first = std::mem::take(&mut state.settings_focus_first);
+            let active_tab = state.prefs.settings_tab;
+            egui::ScrollArea::vertical()
+                .id_salt("fx_settings_tab_scroll")
+                .max_height(max_body_h)
+                .show(ui, |ui| {
+                    let mut tab_ctx = TabCtx {
+                        draft: &mut draft,
+                        filename_pattern_input: &mut state.filename_pattern_input,
+                        prefs: &mut state.prefs,
+                        tex_cache: &mut state.tex_cache,
+                        cover_cache_bytes: state.cover_cache_bytes,
+                        theme: th,
+                        artists: &state.artists,
+                        folders: &state.folders,
+                        folder_filter: &mut state.settings_folders_filter,
+                        core_tx,
+                        fx_tx,
+                        rt_handle,
+                        pending_actions,
+                        focus_first,
+                    };
+                    match active_tab {
+                        SettingsTab::Appearance => appearance::show(ui, &mut tab_ctx),
+                        SettingsTab::Downloads => downloads::show(ui, &mut tab_ctx),
+                        SettingsTab::Network => network::show(ui, &mut tab_ctx),
+                        SettingsTab::Library => library::show(ui, &mut tab_ctx),
+                        SettingsTab::Folders => folders::show(ui, &mut tab_ctx),
+                        SettingsTab::Advanced => advanced::show(ui, &mut tab_ctx),
+                    }
+                });
+
+            ui.separator();
+
+            if state.settings_confirm_discard {
+                let focus_keep = std::mem::take(&mut state.settings_focus_keep_editing);
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(56, 36, 20))
+                    .stroke(Stroke::new(1.0_f32, th.warn))
+                    .corner_radius(CornerRadius::ZERO)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Unsaved changes:").color(th.warn).strong());
+                            if paint::sharp_button(ui, "Save").clicked() {
+                                trigger_save = true;
+                            }
+                            if paint::sharp_button(ui, "Discard").clicked() {
+                                state.settings_confirm_discard = false;
+                                keep_open = false;
+                            }
+                            let keep_btn = paint::sharp_button(ui, "Keep editing");
+                            if focus_keep {
+                                keep_btn.request_focus();
+                            }
+                            if keep_btn.clicked() {
+                                state.settings_confirm_discard = false;
+                            }
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+
+            ui.horizontal(|ui| {
+                if paint::sharp_button(ui, "Save").clicked() {
+                    trigger_save = true;
+                }
+                if paint::sharp_button(ui, "Cancel").clicked() {
+                    state.settings_confirm_discard = false;
+                    keep_open = false;
+                }
+            });
+        });
+
+    if trigger_save {
+        save_draft(&mut draft, &state.settings, core_tx);
+        state.settings_confirm_discard = false;
+        keep_open = false;
+    }
+
+    if keep_open {
+        state.settings_draft = Some(draft);
+    } else {
+        state.settings_modal_open = false;
+        state.settings_draft = None;
+        state.settings_confirm_discard = false;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn settings_tab_parse_and_cycle_roundtrip() {
+        for &tab in SettingsTab::ALL {
+            assert_eq!(SettingsTab::parse(tab.as_str()), tab);
+        }
+        assert_eq!(SettingsTab::parse("unknown_tab"), SettingsTab::Downloads);
+        assert_eq!(SettingsTab::Downloads.cycle(1), SettingsTab::Network);
+        assert_eq!(SettingsTab::Downloads.cycle(-1), SettingsTab::Appearance);
+    }
+
+    #[test]
+    fn dirty_marker_and_esc_state_machine() {
+        let saved = Settings::default();
+        let mut draft = saved.clone();
+        assert!(!is_any_dirty(&draft, &saved));
+
+        draft.batch_limit = 50;
+        assert!(is_tab_dirty(SettingsTab::Downloads, &draft, &saved));
+        assert!(!is_tab_dirty(SettingsTab::Network, &draft, &saved));
+        assert!(is_any_dirty(&draft, &saved));
+
+        let mut confirm = false;
+        assert_eq!(
+            handle_settings_esc(&saved, &saved, &mut confirm),
+            SettingsEscOutcome::Close
+        );
+        assert_eq!(
+            handle_settings_esc(&draft, &saved, &mut confirm),
+            SettingsEscOutcome::ShowConfirm
+        );
+        assert!(confirm);
+        assert_eq!(
+            handle_settings_esc(&draft, &saved, &mut confirm),
+            SettingsEscOutcome::KeepEditing
+        );
+        assert!(!confirm);
+    }
+
+    #[test]
+    fn save_draft_sanitizes_and_sends_update_settings() {
+        let saved = Settings::default();
+        let mut draft = Settings {
+            quota_soft: 250,
+            quota_hard: 120,
+            batch_limit: 150,
+            ..saved.clone()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        save_draft(&mut draft, &saved, &tx);
+        match rx.try_recv() {
+            Ok(UiToWorkerCommand::UpdateSettings(sent)) => {
+                assert_eq!(sent.quota_soft, 120);
+                assert_eq!(sent.batch_limit, 100);
+            }
+            other => panic!("expected UpdateSettings, got {other:?}"),
+        }
+    }
+}
