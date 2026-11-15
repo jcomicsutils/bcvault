@@ -48,6 +48,19 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
     // Reserve footer height (~72px) for Sync controls
     let list_height = (ui.available_height() - 78.0).max(80.0);
 
+    if let Some((ref pending_name, ref band_ids)) = state.pending_group_pins
+        && let Some(g) = state
+            .groups
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(pending_name))
+    {
+        let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+            band_ids: band_ids.clone(),
+            target: PinTarget::Group(g.id),
+        });
+        state.pending_group_pins = None;
+    }
+
     state.ensure_sidebar_rows(chrono::Utc::now().timestamp());
     let rows = state.sidebar_rows.clone();
     let total_stats = aggregate_all_stats(state);
@@ -75,8 +88,16 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             state.last_clicked_artist = None;
                             state.mark_query_immediate();
                         }
-                        if !state.groups.is_empty() {
-                            resp.context_menu(|ui| {
+                        resp.context_menu(|ui| {
+                            if sharp_button(ui, "New group...").clicked() {
+                                state.group_error = None;
+                                state.group_editor_modal = Some(
+                                    crate::ui::groups::GroupEditorState::new_manual(Vec::new()),
+                                );
+                                ui.close();
+                            }
+                            if !state.groups.is_empty() {
+                                ui.separator();
                                 if sharp_button(ui, "Collapse all groups").clicked() {
                                     for g in &state.groups {
                                         if !g.collapsed {
@@ -107,8 +128,8 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                                     state.sidebar_dirty = true;
                                     ui.close();
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
                     SidebarRow::GroupHeader {
                         id,
@@ -702,6 +723,23 @@ fn show_group_context_menu(
     group_name: &str,
     member_ids: &[i64],
 ) {
+    if sharp_button(ui, "Rename...").clicked() {
+        if let Some(g) = state.groups.iter().find(|g| g.id == group_id) {
+            state.group_error = None;
+            state.group_editor_modal = Some(crate::ui::groups::GroupEditorState::from_group(g));
+        }
+        ui.close();
+    }
+    if sharp_button(ui, "Edit rule...").clicked() {
+        if let Some(g) = state.groups.iter().find(|g| g.id == group_id) {
+            state.group_error = None;
+            let mut ed = crate::ui::groups::GroupEditorState::from_group(g);
+            ed.is_automatic = true;
+            state.group_editor_modal = Some(ed);
+        }
+        ui.close();
+    }
+    ui.separator();
     if sharp_button(ui, "Sync group").clicked() {
         let _ = cmd_tx.send(UiToWorkerCommand::Sync {
             scope: SyncScope::Selected(member_ids.to_vec()),
@@ -755,7 +793,7 @@ fn show_group_context_menu(
 
 fn show_move_to_group_submenu(
     ui: &mut Ui,
-    state: &UiState,
+    state: &mut UiState,
     cmd_tx: &UnboundedSender<UiToWorkerCommand>,
     band_id: i64,
 ) {
@@ -787,9 +825,17 @@ fn show_move_to_group_submenu(
         }
         if sharp_button(ui, "Automatic (remove manual placement)").clicked() {
             let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-                band_ids: target_ids,
+                band_ids: target_ids.clone(),
                 target: PinTarget::Auto,
             });
+            ui.close();
+        }
+        ui.separator();
+        if sharp_button(ui, "New group from selection...").clicked() {
+            state.group_error = None;
+            state.group_editor_modal = Some(crate::ui::groups::GroupEditorState::new_manual(
+                target_ids.clone(),
+            ));
             ui.close();
         }
     });

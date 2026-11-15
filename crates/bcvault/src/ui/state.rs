@@ -545,6 +545,8 @@ pub struct UiState {
     pub sidebar_recompute_count: u64,
     pub group_error: Option<String>,
     pub confirm_delete_group: Option<(i64, String, usize)>,
+    pub group_editor_modal: Option<crate::ui::groups::GroupEditorState>,
+    pub pending_group_pins: Option<(String, Vec<i64>)>,
 
     pub rows: Vec<CachedRow>,
     pub index: HashMap<ItemKey, usize>,
@@ -634,6 +636,8 @@ impl UiState {
             sidebar_recompute_count: 0,
             group_error: None,
             confirm_delete_group: None,
+            group_editor_modal: None,
+            pending_group_pins: None,
 
             rows: Vec::new(),
             index: HashMap::new(),

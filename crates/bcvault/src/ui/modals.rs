@@ -36,6 +36,7 @@ pub fn show(
         || state.settings_draft.is_some()
         || state.confirm_remove_artist.is_some()
         || state.confirm_delete_group.is_some()
+        || state.group_editor_modal.is_some()
         || state.rename_artist_modal.is_some()
         || state.link_folder_modal.is_some()
         || state.reconcile_report_modal.is_some();
@@ -76,6 +77,9 @@ pub fn show(
     }
     if state.confirm_delete_group.is_some() {
         show_confirm_delete_group_modal(ctx, state, cmd_tx, esc);
+    }
+    if state.group_editor_modal.is_some() {
+        crate::ui::groups::show_group_editor_modal(ctx, state, cmd_tx, esc);
     }
     if state.rename_artist_modal.is_some() {
         show_rename_artist_modal(ctx, state, cmd_tx, esc);

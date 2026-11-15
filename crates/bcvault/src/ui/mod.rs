@@ -1,4 +1,5 @@
 pub mod bottom_dock;
+pub mod groups;
 pub mod modals;
 pub mod release_table;
 pub mod settings;
