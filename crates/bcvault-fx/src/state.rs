@@ -418,6 +418,17 @@ pub fn folder_display_label(folder: &ArtistFolder, all_folders: &[ArtistFolder])
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct FxQuotaWarningEntry {
+    pub band_id: i64,
+    pub used_30d: u32,
+    pub requested: u32,
+    pub soft: u32,
+    pub hard: u32,
+    pub items: Vec<ItemKey>,
+    pub opts: DownloadOpts,
+}
+
 pub struct FxState {
     pub booted: bool,
     pub schema_error: Option<String>,
@@ -544,6 +555,10 @@ pub struct FxState {
     pub last_event_backlog: usize,
     pub window_focused: bool,
     pub shader_disabled_reason: Option<String>,
+
+    // Quota warnings
+    pub quota_warnings: Vec<FxQuotaWarningEntry>,
+    pub quota_focus_init: bool,
 }
 
 impl Default for FxState {
@@ -644,6 +659,8 @@ impl FxState {
             sync_mode: SyncMode::Incremental,
             active_syncs: HashMap::new(),
             redeem_modal: None,
+            quota_warnings: Vec::new(),
+            quota_focus_init: false,
             save_view_modal: None,
             settings_modal_open: false,
             settings_draft: None,
@@ -705,6 +722,7 @@ impl FxState {
             || self.rename_artist_modal.is_some()
             || self.save_view_modal.is_some()
             || self.redeem_modal.is_some()
+            || !self.quota_warnings.is_empty()
             || self.reconcile_report_modal.is_some()
             || (self.show_resolve_missing_window && self.resolve_missing_modal.is_some())
             || (self.show_unavailable_window && self.unavailable_modal.is_some())
@@ -716,6 +734,11 @@ impl FxState {
     pub fn close_top_modal(&mut self) -> bool {
         if self.theme_editor.take().is_some() {
             self.theme_preview = None;
+            return true;
+        }
+        if !self.quota_warnings.is_empty() {
+            self.quota_warnings.clear();
+            self.quota_focus_init = false;
             return true;
         }
         if self.confirm_remove_artist.take().is_some() {
@@ -785,6 +808,40 @@ impl FxState {
             scroll_y: self.scroll_y,
             focus: self.focused_key,
         }
+    }
+
+    pub fn push_quota_warning(&mut self, entry: FxQuotaWarningEntry) {
+        if self.quota_warnings.is_empty() {
+            self.quota_focus_init = true;
+        }
+        if let Some(existing) = self
+            .quota_warnings
+            .iter_mut()
+            .find(|e| e.band_id == entry.band_id)
+        {
+            *existing = entry;
+        } else {
+            self.quota_warnings.push(entry);
+        }
+    }
+
+    pub fn confirm_quota_warnings(&mut self, core_tx: &UnboundedSender<UiToWorkerCommand>) {
+        if let Some(first) = self.quota_warnings.first() {
+            let opts = first.opts.clone();
+            let all_items: Vec<_> = self
+                .quota_warnings
+                .iter()
+                .flat_map(|w| w.items.iter().copied())
+                .collect();
+            let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
+                items: all_items,
+                opts,
+                ack_soft_quota: true,
+                mode: bcvault_core::types::EnqueueMode::New,
+            });
+        }
+        self.quota_warnings.clear();
+        self.quota_focus_init = false;
     }
 
     pub fn push_toast(&mut self, kind: ToastKind, message: impl Into<String>, now_s: f64) {
@@ -978,9 +1035,55 @@ impl FxState {
             WorkerToUiEvent::ReleasesLoaded { .. }
             | WorkerToUiEvent::ThumbReady { .. }
             | WorkerToUiEvent::QuotaStatus { .. }
-            | WorkerToUiEvent::QuotaWarning { .. }
-            | WorkerToUiEvent::EnqueueSummary(_)
             | WorkerToUiEvent::LibraryProgress { .. } => {}
+            WorkerToUiEvent::QuotaWarning {
+                band_id,
+                used_30d,
+                requested,
+                soft,
+                hard,
+                items,
+                opts,
+            } => {
+                self.push_quota_warning(FxQuotaWarningEntry {
+                    band_id,
+                    used_30d,
+                    requested,
+                    soft,
+                    hard,
+                    items,
+                    opts,
+                });
+            }
+            WorkerToUiEvent::EnqueueSummary(summary) => {
+                let msg = summary.format_summary();
+                let kind = if summary.deferred.is_empty() {
+                    ToastKind::Info
+                } else {
+                    ToastKind::Warn
+                };
+                self.push_toast(kind, msg.clone(), now_s);
+                for d in &summary.deferred {
+                    let cause = match d.cause {
+                        bcvault_core::worker::messages::DeferCause::BatchLimit => "batch limit",
+                        bcvault_core::worker::messages::DeferCause::HardCap => "hard cap",
+                        bcvault_core::worker::messages::DeferCause::Blocked30Min => "30-min block",
+                    };
+                    self.logs.push_back(LogEntry {
+                        ts: 0,
+                        level: bcvault_core::types::LogLevel::Warn,
+                        scope: "quota",
+                        message: format!(
+                            "Deferred {} release(s) for artist {} ({cause})",
+                            d.count, d.band_id
+                        ),
+                        item: None,
+                    });
+                    if self.logs.len() > 2000 {
+                        self.logs.pop_front();
+                    }
+                }
+            }
             WorkerToUiEvent::ReconcileReport { report } => {
                 self.reconcile_report_modal = Some(FxReconcileReportModalState::new(report));
             }
@@ -1397,7 +1500,7 @@ impl FxState {
                     let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
                         items: keys,
                         opts,
-                        ack_soft_quota: true,
+                        ack_soft_quota: false,
                         mode: bcvault_core::types::EnqueueMode::New,
                     });
                 }
@@ -1411,7 +1514,7 @@ impl FxState {
                 let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
                     items: vec![key],
                     opts,
-                    ack_soft_quota: true,
+                    ack_soft_quota: false,
                     mode: bcvault_core::types::EnqueueMode::New,
                 });
             }
@@ -2323,5 +2426,89 @@ mod tests {
 
         state.theme_preview = None;
         assert_eq!(state.resolved_theme(), base);
+    }
+
+    #[test]
+    fn test_14_fx_quota_warnings_dedup_continue_and_cancel() {
+        use bcvault_core::types::{AudioFormat, EnqueueMode, ItemType};
+
+        let mut state = FxState::new();
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: std::path::PathBuf::from("/tmp/out"),
+            batch_limit: 50,
+        };
+
+        state.apply_core_event(
+            WorkerToUiEvent::QuotaWarning {
+                band_id: 1,
+                used_30d: 145,
+                requested: 10,
+                soft: 150,
+                hard: 200,
+                items: vec![ItemKey::new(ItemType::Album, 11)],
+                opts: opts.clone(),
+            },
+            &fx_tx,
+            0.0,
+        );
+        state.apply_core_event(
+            WorkerToUiEvent::QuotaWarning {
+                band_id: 2,
+                used_30d: 148,
+                requested: 5,
+                soft: 150,
+                hard: 200,
+                items: vec![ItemKey::new(ItemType::Album, 22)],
+                opts: opts.clone(),
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert_eq!(state.quota_warnings.len(), 2);
+        assert!(state.has_open_modal());
+
+        state.confirm_quota_warnings(&core_tx);
+        assert!(state.quota_warnings.is_empty());
+        assert!(!state.has_open_modal());
+        match core_rx.try_recv() {
+            Ok(UiToWorkerCommand::EnqueueDownloads {
+                items,
+                ack_soft_quota,
+                mode,
+                ..
+            }) => {
+                assert!(ack_soft_quota);
+                assert_eq!(mode, EnqueueMode::New);
+                assert_eq!(
+                    items,
+                    vec![
+                        ItemKey::new(ItemType::Album, 11),
+                        ItemKey::new(ItemType::Album, 22)
+                    ]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // Cancel via close_top_modal clears warnings without sending
+        state.apply_core_event(
+            WorkerToUiEvent::QuotaWarning {
+                band_id: 3,
+                used_30d: 149,
+                requested: 2,
+                soft: 150,
+                hard: 200,
+                items: vec![ItemKey::new(ItemType::Album, 33)],
+                opts,
+            },
+            &fx_tx,
+            0.0,
+        );
+        assert!(state.close_top_modal());
+        assert!(state.quota_warnings.is_empty());
+        assert!(core_rx.try_recv().is_err());
     }
 }

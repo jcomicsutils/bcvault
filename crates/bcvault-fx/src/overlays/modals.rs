@@ -188,6 +188,81 @@ pub fn show_modals(
         }
     }
 
+    if !state.quota_warnings.is_empty() {
+        let mut close = esc;
+        let mut confirm = false;
+        let focus_cancel = std::mem::take(&mut state.quota_focus_init);
+        let total_items: u32 = state.quota_warnings.iter().map(|w| w.requested).sum();
+
+        egui::Window::new("Download Quota Warning")
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .max_size([520.0, 420.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(420.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Soft 30-day download limit exceeded ({total_items} release(s) across {} artist(s)):",
+                        state.quota_warnings.len()
+                    ))
+                    .strong()
+                    .color(th.warn),
+                );
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for w in &state.quota_warnings {
+                            let name = state
+                                .artists
+                                .iter()
+                                .find(|a| a.band_id == w.band_id)
+                                .map(|a| a.display_name().to_string())
+                                .unwrap_or_else(|| format!("Artist {}", w.band_id));
+                            ui.label(format!(
+                                "• {name}: {} of {} soft limit ({} requested, {} hard cap)",
+                                w.used_30d, w.soft, w.requested, w.hard
+                            ));
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Note: Bandcamp's monthly free-download allowance is shared across all fans.",
+                    )
+                    .color(th.text_dim),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("Continue").corner_radius(CornerRadius::ZERO))
+                        .clicked()
+                    {
+                        confirm = true;
+                        close = true;
+                    }
+                    let cancel_resp = ui.add(
+                        egui::Button::new("Cancel").corner_radius(CornerRadius::ZERO),
+                    );
+                    if focus_cancel {
+                        cancel_resp.request_focus();
+                    }
+                    if cancel_resp.clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if confirm {
+            state.confirm_quota_warnings(core_tx);
+        } else if close {
+            state.quota_warnings.clear();
+            state.quota_focus_init = false;
+        }
+    }
+
     // 3. Save View Modal
     if let Some(mut name_input) = state.save_view_modal.clone() {
         let mut close_sv = esc;

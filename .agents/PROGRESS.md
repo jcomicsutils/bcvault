@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: show the quota warning dialog and enqueue summaries in fx (`DOWNLOAD_FLOW.md` step 6)
 - none: add bulk selection, quota list dialog and download remaining in classic (`DOWNLOAD_FLOW.md` step 5)
 - none: queue remaining releases for artists or the library (`DOWNLOAD_FLOW.md` step 4)
 - none: report an enqueue summary with quota deferrals (`DOWNLOAD_FLOW.md` step 3)
