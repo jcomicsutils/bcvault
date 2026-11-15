@@ -162,7 +162,7 @@ pub fn show(
     ui.separator();
 
     let list_height = (ui.available_height() - 78.0).max(80.0);
-    state.ensure_sidebar_rows(chrono::Utc::now().timestamp());
+    state.ensure_sidebar_rows_at(chrono::Utc::now().timestamp(), now_s);
     let rows = state.sidebar_rows.clone();
 
     let mut total_stats = ArtistStats::default();
@@ -183,7 +183,14 @@ pub fn show(
         .max_height(list_height)
         .auto_shrink([false, false])
         .show_rows(ui, 28.0, total_rows, |ui, row_range| {
+            let content_x = ui.cursor().min.x;
+            let content_w = ui.available_width();
+            let content_origin_y = ui.cursor().min.y - (row_range.start as f32 * 28.0);
+            paint_sidebar_ghosts(ui, state, content_origin_y, content_x, content_w, now_s);
+
             for row_idx in row_range {
+                let row_key = crate::state::SidebarRowKey::from_row(&rows[row_idx]);
+                let (draw_offset, row_alpha) = row_flip_and_alpha(state, row_key, row_idx);
                 match &rows[row_idx] {
                     bcvault_core::groups::SidebarRow::AllArtists => {
                         let is_selected = state.selected_artists.is_empty()
@@ -198,6 +205,8 @@ pub fn show(
                             is_selected,
                             None,
                             now_s,
+                            draw_offset,
+                            row_alpha,
                         );
                         if resp.clicked() {
                             pending_actions.push(FxAction::SelectArtist(None));
@@ -232,8 +241,18 @@ pub fn show(
                     } => {
                         let member_ids = state.group_member_ids(*id);
                         let (dl, elig) = sum_fx_member_stats(state, &member_ids);
-                        let resp =
-                            draw_fx_group_header_row(ui, state, name, *count, *collapsed, dl, elig);
+                        let resp = draw_fx_group_header_row(
+                            ui,
+                            state,
+                            row_key,
+                            name,
+                            *count,
+                            *collapsed,
+                            dl,
+                            elig,
+                            draw_offset,
+                            row_alpha,
+                        );
                         if matches!(
                             state.active_grouping,
                             bcvault_core::groups::ActiveGrouping::CustomSet(_)
@@ -277,11 +296,14 @@ pub fn show(
                         let resp = draw_fx_group_header_row(
                             ui,
                             state,
+                            row_key,
                             "Ungrouped",
                             *count,
                             *collapsed,
                             dl,
                             elig,
+                            draw_offset,
+                            row_alpha,
                         );
                         if matches!(
                             state.active_grouping,
@@ -356,6 +378,8 @@ pub fn show(
                             is_selected,
                             sync_frac,
                             now_s,
+                            draw_offset,
+                            row_alpha,
                         );
                         if resp.drag_started() {
                             let payload: Vec<i64> =
@@ -633,6 +657,112 @@ pub fn show(
     }
 }
 
+fn row_flip_and_alpha(
+    state: &mut FxState,
+    key: crate::state::SidebarRowKey,
+    row_idx: usize,
+) -> (Vec2, f32) {
+    let target_rel = Vec2::new(0.0, row_idx as f32 * 28.0);
+    let offset = if state.sidebar_flip_active.contains(&key) {
+        let anim_rel = state
+            .motion
+            .vec2(("sb_flip", key), target_rel, SpringCfg::SMOOTH);
+        let d = anim_rel - target_rel;
+        if d.length_sq() < 0.16 {
+            state.sidebar_flip_active.remove(&key);
+            Vec2::ZERO
+        } else {
+            d
+        }
+    } else {
+        Vec2::ZERO
+    };
+    let alpha = if state.sidebar_enter_active.contains(&key) {
+        let a = state
+            .motion
+            .val(("sb_enter", key), 1.0, SpringCfg::SMOOTH)
+            .clamp(0.0, 1.0);
+        if (1.0 - a).abs() < 0.02 {
+            state.sidebar_enter_active.remove(&key);
+            1.0
+        } else {
+            a
+        }
+    } else {
+        1.0
+    };
+    (offset, alpha)
+}
+
+fn paint_sidebar_ghosts(
+    ui: &Ui,
+    state: &mut FxState,
+    content_origin_y: f32,
+    content_x: f32,
+    content_w: f32,
+    now_s: f64,
+) {
+    state
+        .sidebar_ghosts
+        .retain(|g| now_s >= g.created_s && now_s - g.created_s < 0.16);
+    if state.sidebar_ghosts.is_empty() || state.motion.is_instant() {
+        return;
+    }
+    ui.ctx().request_repaint();
+    let th = state.active_theme;
+    let clip = ui.clip_rect();
+    let painter = ui.painter();
+    for g in &state.sidebar_ghosts {
+        let t = ((now_s - g.created_s) / 0.16).clamp(0.0, 1.0) as f32;
+        let alpha = (1.0 - t) * 0.65;
+        let shift = if g.is_header {
+            Vec2::new(-12.0 * t, 0.0)
+        } else {
+            Vec2::new(0.0, -8.0 * t)
+        };
+        let r = Rect::from_min_size(
+            Pos2::new(content_x, content_origin_y + g.y_rel) + shift,
+            Vec2::new(content_w, 26.0),
+        );
+        if !clip.intersects(r) {
+            continue;
+        }
+        let bg = if g.is_header { th.bg0 } else { th.bg1 };
+        paint::rect(
+            painter,
+            r,
+            bg.gamma_multiply(alpha),
+            Stroke::new(1.0_f32, th.border.gamma_multiply(alpha)),
+        );
+        if let Some(bid) = g.band_id {
+            let mos_rect = Rect::from_min_size(
+                Pos2::new(r.min.x + 6.0, r.center().y - 8.0),
+                Vec2::splat(16.0),
+            );
+            paint::geometric_placeholder(
+                painter,
+                mos_rect,
+                bid,
+                th.bg0.gamma_multiply(alpha),
+                th.accent.gamma_multiply(alpha),
+                th.accent2.gamma_multiply(alpha),
+            );
+        }
+        let text_x = if g.band_id.is_some() {
+            r.min.x + 28.0
+        } else {
+            r.min.x + 12.0
+        };
+        painter.text(
+            Pos2::new(text_x, r.center().y),
+            egui::Align2::LEFT_CENTER,
+            &g.label,
+            FontId::proportional(12.0),
+            th.text.gamma_multiply(alpha),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_artist_row(
     ui: &mut Ui,
@@ -643,6 +773,8 @@ fn draw_artist_row(
     selected: bool,
     sync_frac: Option<f32>,
     now_s: f64,
+    draw_offset: Vec2,
+    row_alpha: f32,
 ) -> egui::Response {
     let th = state.active_theme;
     let desired = Vec2::new(ui.available_width(), 26.0);
@@ -661,41 +793,69 @@ fn draw_artist_row(
         &empty_folders
     };
 
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let bg = if selected || resp.hovered() {
+    let draw_rect = rect.translate(draw_offset);
+    if ui.is_rect_visible(rect) || ui.is_rect_visible(draw_rect) {
+        let target_bg = if selected || resp.hovered() {
             th.bg2
         } else {
             th.bg1
         };
-        paint::rect(painter, rect, bg, Stroke::new(1.0_f32, th.border));
+        let bg = state
+            .motion
+            .color(("art_bg", band_id), target_bg, SpringCfg::SNAP)
+            .gamma_multiply(row_alpha);
+        let sel_frac = state.motion.val(
+            ("art_sel", band_id),
+            if selected { 1.0 } else { 0.0 },
+            SpringCfg::SNAP,
+        );
 
-        if selected {
-            let bar = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + 3.0, rect.max.y));
-            paint::rect_filled(painter, bar, th.accent);
+        let painter = ui.painter();
+        paint::rect(
+            painter,
+            draw_rect,
+            bg,
+            Stroke::new(1.0_f32, th.border.gamma_multiply(row_alpha)),
+        );
+
+        if sel_frac > 0.01 {
+            let half_h = (draw_rect.height() * 0.5) * sel_frac;
+            let cy = draw_rect.center().y;
+            let bar = Rect::from_min_max(
+                Pos2::new(draw_rect.min.x, cy - half_h),
+                Pos2::new(draw_rect.min.x + 3.0, cy + half_h),
+            );
+            paint::rect_filled(painter, bar, th.accent.gamma_multiply(row_alpha));
         }
 
         // 2x2 miniature mosaic square on the left
         let mos_rect = Rect::from_min_size(
-            Pos2::new(rect.min.x + 6.0, rect.center().y - 8.0),
+            Pos2::new(draw_rect.min.x + 6.0, draw_rect.center().y - 8.0),
             Vec2::splat(16.0),
         );
-        paint::geometric_placeholder(painter, mos_rect, band_id, th.bg0, th.accent, th.accent2);
+        paint::geometric_placeholder(
+            painter,
+            mos_rect,
+            band_id,
+            th.bg0.gamma_multiply(row_alpha),
+            th.accent.gamma_multiply(row_alpha),
+            th.accent2.gamma_multiply(row_alpha),
+        );
 
         if let Some(frac) = sync_frac {
             let prog_h = 2.0;
-            let fill_w = (rect.width() * frac).min(rect.width());
+            let fill_w = (draw_rect.width() * frac).min(draw_rect.width());
             let fill_r = Rect::from_min_max(
-                Pos2::new(rect.min.x, rect.max.y - prog_h),
-                Pos2::new(rect.min.x + fill_w, rect.max.y),
+                Pos2::new(draw_rect.min.x, draw_rect.max.y - prog_h),
+                Pos2::new(draw_rect.min.x + fill_w, draw_rect.max.y),
             );
-            paint::rect_filled(painter, fill_r, th.accent);
-            let sweep_x = rect.min.x + ((now_s as f32 * 1.4).rem_euclid(1.0) * fill_w);
+            paint::rect_filled(painter, fill_r, th.accent.gamma_multiply(row_alpha));
+            let sweep_x = draw_rect.min.x + ((now_s as f32 * 1.4).rem_euclid(1.0) * fill_w);
             let sweep_r = Rect::from_min_max(
-                Pos2::new(sweep_x, rect.max.y - prog_h),
-                Pos2::new((sweep_x + 18.0).min(rect.max.x), rect.max.y),
+                Pos2::new(sweep_x, draw_rect.max.y - prog_h),
+                Pos2::new((sweep_x + 18.0).min(draw_rect.max.x), draw_rect.max.y),
             );
-            paint::rect_filled(painter, sweep_r, th.accent2);
+            paint::rect_filled(painter, sweep_r, th.accent2.gamma_multiply(row_alpha));
             ui.ctx().request_repaint();
         }
 
@@ -735,19 +895,20 @@ fn draw_artist_row(
         };
 
         let inner = Rect::from_min_max(
-            Pos2::new(mos_rect.max.x + 6.0, rect.min.y + 2.0),
-            Pos2::new(rect.max.x - 6.0, rect.max.y - 2.0),
+            Pos2::new(mos_rect.max.x + 6.0, draw_rect.min.y + 2.0),
+            Pos2::new(draw_rect.max.x - 6.0, draw_rect.max.y - 2.0),
         );
 
+        let badge_color = th.text_dim.gamma_multiply(row_alpha);
         let badge_galley =
             ui.painter()
-                .layout_no_wrap(badge_str, FontId::monospace(11.0), th.text_dim);
+                .layout_no_wrap(badge_str, FontId::monospace(11.0), badge_color);
         let badge_w = badge_galley.size().x;
         let badge_pos = Pos2::new(
             inner.max.x - badge_w,
             inner.center().y - badge_galley.size().y * 0.5,
         );
-        ui.painter().galley(badge_pos, badge_galley, th.text_dim);
+        ui.painter().galley(badge_pos, badge_galley, badge_color);
 
         let name_rect = Rect::from_min_max(
             inner.min,
@@ -763,7 +924,8 @@ fn draw_artist_row(
                 FolderState::Ok => th.accent,
                 FolderState::Missing => th.err,
                 FolderState::Unreadable => th.warn,
-            };
+            }
+            .gamma_multiply(row_alpha);
             let (glyph_rect, glyph_resp) =
                 child.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
             let tip = if artist_folders.len() == 1 {
@@ -815,7 +977,12 @@ fn draw_artist_row(
             };
             glyph_resp.on_hover_text(tip);
             let p = child.painter();
-            paint::icons::paint_icon(p, glyph_rect, icon_kind, th.text_dim);
+            paint::icons::paint_icon(
+                p,
+                glyph_rect,
+                icon_kind,
+                th.text_dim.gamma_multiply(row_alpha),
+            );
             let dot = Rect::from_min_max(
                 Pos2::new(glyph_rect.max.x - 4.0, glyph_rect.max.y - 4.0),
                 glyph_rect.max,
@@ -831,10 +998,18 @@ fn draw_artist_row(
             );
             glyph_resp.on_hover_text(tip);
             let p = child.painter();
-            paint::icons::paint_icon(p, glyph_rect, paint::icons::IconKind::Archive, th.text_dim);
+            paint::icons::paint_icon(
+                p,
+                glyph_rect,
+                paint::icons::IconKind::Archive,
+                th.text_dim.gamma_multiply(row_alpha),
+            );
             child.add_space(3.0);
         }
-        child.add(egui::Label::new(RichText::new(name).color(th.text)).truncate());
+        child.add(
+            egui::Label::new(RichText::new(name).color(th.text.gamma_multiply(row_alpha)))
+                .truncate(),
+        );
     }
 
     let folder_tooltip = if artist_folders.is_empty() {
@@ -887,53 +1062,97 @@ fn sum_fx_member_stats(state: &FxState, member_ids: &[i64]) -> (u32, u32) {
     (dl, elig)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_fx_group_header_row(
     ui: &mut egui::Ui,
-    state: &FxState,
+    state: &mut FxState,
+    key: crate::state::SidebarRowKey,
     name: &str,
     count: usize,
     collapsed: bool,
     dl: u32,
     elig: u32,
+    draw_offset: Vec2,
+    row_alpha: f32,
 ) -> egui::Response {
-    let th = &state.active_theme;
+    let th = state.active_theme;
     let desired = Vec2::new(ui.available_width(), 26.0);
     let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let bg = if resp.hovered() { th.bg2 } else { th.bg0 };
+    let draw_rect = rect.translate(draw_offset);
+    if ui.is_rect_visible(rect) || ui.is_rect_visible(draw_rect) {
+        let target_bg = if resp.hovered() { th.bg2 } else { th.bg0 };
+        let bg = state
+            .motion
+            .color(("grp_bg", key), target_bg, SpringCfg::SNAP)
+            .gamma_multiply(row_alpha);
+        let open_t = state.motion.val(
+            ("grp_open", key),
+            if collapsed { 0.0 } else { 1.0 },
+            SpringCfg::SNAP,
+        );
+        let cnt_tween = state
+            .motion
+            .val(("grp_cnt", key), count as f32, SpringCfg::SMOOTH)
+            .round() as usize;
+        let dl_tween = state
+            .motion
+            .val(("grp_dl", key), dl as f32, SpringCfg::SMOOTH)
+            .round() as u32;
+        let elig_tween = state
+            .motion
+            .val(("grp_elig", key), elig as f32, SpringCfg::SMOOTH)
+            .round() as u32;
+
         paint::rect(
             ui.painter(),
-            rect,
+            draw_rect,
             bg,
-            egui::Stroke::new(1.0_f32, th.border),
+            egui::Stroke::new(1.0_f32, th.border.gamma_multiply(row_alpha)),
         );
-        let inner = rect.shrink2(Vec2::new(8.0, 2.0));
+        let inner = draw_rect.shrink2(Vec2::new(8.0, 2.0));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        let arrow = if collapsed { ">" } else { "v" };
-        child.label(
-            RichText::new(arrow)
-                .monospace()
-                .size(11.0)
-                .color(th.text_dim),
+        let (chev_rect, _) = child.allocate_exact_size(Vec2::new(10.0, 12.0), Sense::hover());
+        let angle = open_t * std::f32::consts::FRAC_PI_2;
+        let (sin_a, cos_a) = angle.sin_cos();
+        let center = chev_rect.center();
+        let rot = |p: Vec2| {
+            Pos2::new(
+                center.x + p.x * cos_a - p.y * sin_a,
+                center.y + p.x * sin_a + p.y * cos_a,
+            )
+        };
+        let p0 = rot(Vec2::new(-2.0, -4.0));
+        let p1 = rot(Vec2::new(2.5, 0.0));
+        let p2 = rot(Vec2::new(-2.0, 4.0));
+        let chev_stroke = Stroke::new(1.5_f32, th.text_dim.gamma_multiply(row_alpha));
+        child.painter().line_segment([p0, p1], chev_stroke);
+        child.painter().line_segment([p1, p2], chev_stroke);
+
+        child.add_space(4.0);
+        child.add(
+            egui::Label::new(
+                RichText::new(name)
+                    .strong()
+                    .color(th.text.gamma_multiply(row_alpha)),
+            )
+            .truncate(),
         );
         child.add_space(4.0);
-        child.add(egui::Label::new(RichText::new(name).strong().color(th.text)).truncate());
-        child.add_space(4.0);
         child.label(
-            RichText::new(format!("({count})"))
+            RichText::new(format!("({cnt_tween})"))
                 .size(11.0)
-                .color(th.text_dim),
+                .color(th.text_dim.gamma_multiply(row_alpha)),
         );
         child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                RichText::new(format!("{dl}/{elig}"))
+                RichText::new(format!("{dl_tween}/{elig_tween}"))
                     .monospace()
                     .size(11.0)
-                    .color(th.text_dim),
+                    .color(th.text_dim.gamma_multiply(row_alpha)),
             );
         });
     }
@@ -1274,5 +1493,96 @@ mod tests {
                 central_rect.min.x
             );
         }
+    }
+
+    #[test]
+    fn sidebar_grouping_switch_and_move_triggers_flip_and_settles() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, &FxTheme::paper_for_tests());
+        let mut state = FxState::new();
+        state.artists = vec![
+            ArtistView {
+                band_id: 1,
+                slug: "alpha".to_string(),
+                name: "Alpha".to_string(),
+                custom_name: None,
+                url: "https://alpha.bandcamp.com".to_string(),
+                last_synced_at: None,
+                stats: ArtistStats::default(),
+            },
+            ArtistView {
+                band_id: 2,
+                slug: "beta".to_string(),
+                name: "Beta".to_string(),
+                custom_name: None,
+                url: "https://beta.bandcamp.com".to_string(),
+                last_synced_at: None,
+                stats: ArtistStats::default(),
+            },
+        ];
+
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let run_frame = |state: &mut FxState, now_s: f64| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 860.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                state.motion.begin_frame_dt(1.0 / 60.0);
+                egui::SidePanel::left("fx_sidebar_anim_test")
+                    .default_width(280.0)
+                    .show(ctx, |ui| {
+                        show(ui, state, &core_tx, &fx_tx, now_s);
+                    });
+                state.motion.end_frame(ctx);
+            });
+        };
+
+        // Frame 0: initial population (no grouping)
+        run_frame(&mut state, 0.0);
+        assert!(state.sidebar_anim_initialized);
+
+        // Switch to FirstLetter built-in grouping -> seeds FLIP & entrance springs
+        state.active_grouping = bcvault_core::groups::ActiveGrouping::Builtin(
+            bcvault_core::groups::BuiltinGrouping::FirstLetter,
+        );
+        state.sidebar_dirty = true;
+        run_frame(&mut state, 0.016);
+        assert!(
+            !state.sidebar_flip_active.is_empty(),
+            "expected FLIP springs after switching grouping"
+        );
+        assert!(
+            !state.sidebar_enter_active.is_empty(),
+            "expected entrance springs for new group headers"
+        );
+        assert!(
+            state.motion.active_springs() > 0,
+            "expected active springs during sidebar transition"
+        );
+
+        // Advance enough frames for all springs and ghosts to settle cleanly
+        for i in 2..120 {
+            run_frame(&mut state, i as f64 * 0.016);
+        }
+        assert!(
+            state.sidebar_flip_active.is_empty(),
+            "FLIP active set should clear once settled"
+        );
+        assert!(
+            state.sidebar_enter_active.is_empty(),
+            "entrance active set should clear once settled"
+        );
+        assert!(
+            state.sidebar_ghosts.is_empty(),
+            "ghosts should expire after 0.16s"
+        );
+        assert_eq!(
+            state.motion.active_springs(),
+            0,
+            "motion should have 0 active springs at rest"
+        );
     }
 }

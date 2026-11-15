@@ -252,6 +252,18 @@ impl Motion {
         }
     }
 
+    pub fn set_val(&mut self, id: impl Hash, value: f32) {
+        let key = Id::new(id);
+        let frame = self.frame;
+        self.entries.insert(
+            key,
+            Entry {
+                kind: EntryKind::Scalar(Spring::new(value)),
+                last_touched_frame: frame,
+            },
+        );
+    }
+
     pub fn vec2(&mut self, id: impl Hash, target: Vec2, cfg: SpringCfg) -> Vec2 {
         let key = Id::new(id);
         let instant = self.is_instant();

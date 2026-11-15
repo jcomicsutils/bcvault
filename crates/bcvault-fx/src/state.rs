@@ -20,7 +20,7 @@ use bcvault_core::{
 };
 use egui::{Rect, Vec2};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -86,6 +86,35 @@ impl FxResolveMissingModalState {
             repoint_selected_band_id,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SidebarRowKey {
+    AllArtists,
+    GroupHeader(i64),
+    UngroupedHeader,
+    Artist(i64),
+}
+
+impl SidebarRowKey {
+    pub fn from_row(row: &bcvault_core::groups::SidebarRow) -> Self {
+        match row {
+            bcvault_core::groups::SidebarRow::AllArtists => Self::AllArtists,
+            bcvault_core::groups::SidebarRow::GroupHeader { id, .. } => Self::GroupHeader(*id),
+            bcvault_core::groups::SidebarRow::UngroupedHeader { .. } => Self::UngroupedHeader,
+            bcvault_core::groups::SidebarRow::Artist { band_id } => Self::Artist(*band_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SidebarGhost {
+    pub key: SidebarRowKey,
+    pub label: String,
+    pub is_header: bool,
+    pub band_id: Option<i64>,
+    pub y_rel: f32,
+    pub created_s: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -572,6 +601,10 @@ pub struct FxState {
     pub last_clicked_artist: Option<i64>,
     pub group_assignment: bcvault_core::groups::Assignment,
     pub sidebar_rows: Vec<bcvault_core::groups::SidebarRow>,
+    pub sidebar_flip_active: HashSet<SidebarRowKey>,
+    pub sidebar_enter_active: HashSet<SidebarRowKey>,
+    pub sidebar_ghosts: Vec<SidebarGhost>,
+    pub sidebar_anim_initialized: bool,
     pub ungrouped_collapsed: bool,
     pub sidebar_dirty: bool,
     pub sidebar_last_filter: String,
@@ -749,6 +782,10 @@ impl FxState {
             last_clicked_artist: None,
             group_assignment: bcvault_core::groups::Assignment::default(),
             sidebar_rows: vec![bcvault_core::groups::SidebarRow::AllArtists],
+            sidebar_flip_active: HashSet::new(),
+            sidebar_enter_active: HashSet::new(),
+            sidebar_ghosts: Vec::new(),
+            sidebar_anim_initialized: false,
             ungrouped_collapsed: false,
             sidebar_dirty: true,
             sidebar_last_filter: String::new(),
@@ -965,6 +1002,10 @@ impl FxState {
     }
 
     pub fn ensure_sidebar_rows(&mut self, now_ts: bcvault_core::types::Ts) {
+        self.ensure_sidebar_rows_at(now_ts, 0.0);
+    }
+
+    pub fn ensure_sidebar_rows_at(&mut self, now_ts: bcvault_core::types::Ts, now_s: f64) {
         let filter_changed = self.artist_filter != self.sidebar_last_filter;
         let age_refresh = matches!(
             self.active_grouping,
@@ -975,6 +1016,7 @@ impl FxState {
         if !self.sidebar_dirty && !filter_changed && !age_refresh {
             return;
         }
+        let prev_rows = std::mem::take(&mut self.sidebar_rows);
         match self.active_grouping {
             bcvault_core::groups::ActiveGrouping::None => {
                 self.builtin_groups.clear();
@@ -1011,7 +1053,7 @@ impl FxState {
             bcvault_core::groups::ActiveGrouping::CustomSet(_) => &self.groups,
             bcvault_core::groups::ActiveGrouping::None => &[],
         };
-        self.sidebar_rows = bcvault_core::groups::build_sidebar_rows(
+        let new_rows = bcvault_core::groups::build_sidebar_rows(
             &self.group_assignment,
             active_groups,
             &artists_by_id,
@@ -1019,6 +1061,94 @@ impl FxState {
             &self.artist_filter,
             self.ungrouped_collapsed,
         );
+
+        let should_animate = self.sidebar_anim_initialized && !self.motion.is_instant();
+        if should_animate {
+            const ROW_H: f32 = 28.0;
+            let mut old_pos: HashMap<SidebarRowKey, usize> =
+                HashMap::with_capacity(prev_rows.len());
+            for (idx, row) in prev_rows.iter().enumerate() {
+                old_pos.insert(SidebarRowKey::from_row(row), idx);
+            }
+            let mut new_keys: HashSet<SidebarRowKey> = HashSet::with_capacity(new_rows.len());
+            let mut enter_idx = 0usize;
+
+            for (new_idx, row) in new_rows.iter().enumerate() {
+                let key = SidebarRowKey::from_row(row);
+                new_keys.insert(key);
+                let target_y = new_idx as f32 * ROW_H;
+                if let Some(&old_idx) = old_pos.get(&key) {
+                    if old_idx != new_idx {
+                        if !self.sidebar_flip_active.contains(&key) {
+                            let old_y = old_idx as f32 * ROW_H;
+                            let dy = (old_y - target_y).clamp(-320.0, 320.0);
+                            self.motion
+                                .set_vec2(("sb_flip", key), egui::Vec2::new(0.0, target_y + dy));
+                        }
+                        self.sidebar_flip_active.insert(key);
+                    }
+                } else {
+                    let stagger_x = ((enter_idx.min(10) as f32) * 1.5) + 12.0;
+                    let start = match key {
+                        SidebarRowKey::GroupHeader(_) | SidebarRowKey::UngroupedHeader => {
+                            egui::Vec2::new(-stagger_x - 6.0, (target_y - 6.0).max(0.0))
+                        }
+                        _ => egui::Vec2::new(-stagger_x, (target_y - 14.0).max(0.0)),
+                    };
+                    self.motion.set_vec2(("sb_flip", key), start);
+                    self.motion.set_val(("sb_enter", key), 0.0);
+                    self.sidebar_flip_active.insert(key);
+                    self.sidebar_enter_active.insert(key);
+                    enter_idx += 1;
+                }
+            }
+
+            self.sidebar_ghosts.clear();
+            for (old_idx, row) in prev_rows.iter().enumerate() {
+                if self.sidebar_ghosts.len() >= 32 {
+                    break;
+                }
+                let key = SidebarRowKey::from_row(row);
+                if !new_keys.contains(&key) {
+                    let (label, is_header, band_id) = match row {
+                        bcvault_core::groups::SidebarRow::AllArtists => {
+                            ("All artists".to_string(), false, Some(0))
+                        }
+                        bcvault_core::groups::SidebarRow::GroupHeader { name, .. } => {
+                            (name.clone(), true, None)
+                        }
+                        bcvault_core::groups::SidebarRow::UngroupedHeader { .. } => {
+                            ("Ungrouped".to_string(), true, None)
+                        }
+                        bcvault_core::groups::SidebarRow::Artist { band_id } => {
+                            let name = artists_by_id
+                                .get(band_id)
+                                .and_then(|&i| self.artists.get(i))
+                                .map(|a| a.display_name().to_string())
+                                .unwrap_or_default();
+                            (name, false, Some(*band_id))
+                        }
+                    };
+                    self.sidebar_ghosts.push(SidebarGhost {
+                        key,
+                        label,
+                        is_header,
+                        band_id,
+                        y_rel: old_idx as f32 * ROW_H,
+                        created_s: now_s,
+                    });
+                }
+            }
+        } else {
+            self.sidebar_flip_active.clear();
+            self.sidebar_enter_active.clear();
+            self.sidebar_ghosts.clear();
+        }
+
+        if !self.artists.is_empty() {
+            self.sidebar_anim_initialized = true;
+        }
+        self.sidebar_rows = new_rows;
         self.sidebar_last_filter = self.artist_filter.clone();
         self.sidebar_last_recompute_ts = now_ts;
         self.sidebar_dirty = false;

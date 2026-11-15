@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/artist-groups  ·  Updated: 2026-11-15
 
 ## Done
+- none: add FX sidebar FLIP transitions, staggered group/artist entrance animations, exit ghosts, rotating collapse chevrons, tweened group badges, and smooth selection/hover color interpolation (`feat/artist-groups`)
 - none: rework artist groups with non-destructive group sets, 7 built-in automatic groupings, multi-artist selection in fx, and searchable member checklist in group editor (`feat/artist-groups` rework; updated `0009_artist_groups.sql` before merge, updated `ARCHIVE.md` for future `ByGenre` grouping)
 - none: document groups and rules (`ARTIST_GROUPS.md` step 10)
 - none: drag artists onto group headers (`ARTIST_GROUPS.md` step 9)
