@@ -307,6 +307,16 @@ impl Supervisor {
                         .await;
                 });
             }
+            UiToWorkerCommand::EnqueueRemaining {
+                scope,
+                opts,
+                ack_soft_quota,
+            } => {
+                let mgr = self.dl_manager.clone();
+                tokio::spawn(async move {
+                    mgr.enqueue_remaining(scope, opts, ack_soft_quota).await;
+                });
+            }
             UiToWorkerCommand::RedeemUrl { target, url, opts } => {
                 let mgr = self.dl_manager.clone();
                 tokio::spawn(async move {

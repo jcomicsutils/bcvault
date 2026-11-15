@@ -1211,3 +1211,113 @@ async fn update_settings_while_job_queued_applies_to_next_job_to_start() {
 
     root_cancel.cancel();
 }
+
+#[tokio::test]
+async fn test_12_download_remaining_artist_skips_already_downloaded_end_to_end() {
+    let server = MockServer::start().await;
+    let dl_url_2 = format!("{}/download/t2.flac", server.uri());
+    let dl_url_3 = format!("{}/download/t3.flac", server.uri());
+
+    Mock::given(method("POST"))
+        .and(path(BUY_FOR_NOTHING_PATH))
+        .respond_with(move |req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let id = body["item_id"].as_str().unwrap();
+            let u = if id == "1202" { &dl_url_2 } else { &dl_url_3 };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "downloads": { "flac": { "url": u } }
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/download/t2.flac"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"track-2-audio".to_vec()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/download/t3.flac"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"track-3-audio".to_vec()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/img/a0000000777_10.jpg"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pool = DbPool::open(&dir.path().join("rem.db")).unwrap();
+    let out_dir = dir.path().join("out");
+
+    let k1 = ItemKey::new(ItemType::Track, 1201);
+    let k2 = ItemKey::new(ItemType::Track, 1202);
+    let k3 = ItemKey::new(ItemType::Track, 1203);
+    seed_test_release(&pool, 30, k1, "Artist30", "One", Classification::Free, 1).await;
+    seed_test_release(&pool, 30, k2, "Artist30", "Two", Classification::Free, 1).await;
+    seed_test_release(&pool, 30, k3, "Artist30", "Three", Classification::Free, 1).await;
+    pool.writer
+        .call(move |c| releases::set_downloaded_manual(c, k1, true))
+        .await
+        .unwrap();
+
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+    let bridge = UiBridge::new(ev_tx, None);
+    let gate = BandcampGate::with_delays(5, 0, 5, 5, 2, None);
+    let client = BandcampClient::new(gate, "bcvault-test")
+        .unwrap()
+        .with_base_urls(server.uri(), server.uri());
+    let settings = Settings::default_with_dir(out_dir.clone());
+    let root_cancel = CancellationToken::new();
+    let mgr = DownloadManager::new(pool.clone(), client, bridge, settings, root_cancel.clone());
+
+    mgr.enqueue_remaining(
+        bcvault_core::types::RemainingScope::Artists(vec![30]),
+        DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: out_dir.clone(),
+            batch_limit: 150,
+        },
+        false,
+    )
+    .await;
+
+    let mut done_keys = Vec::new();
+    while let Some(ev) = ev_rx.recv().await {
+        if let WorkerToUiEvent::JobState {
+            state: JobState::Done { .. },
+            ..
+        } = ev
+        {
+            done_keys.push(());
+            if done_keys.len() == 2 {
+                break;
+            }
+        }
+    }
+
+    assert!(!out_dir.join("Artist30 - One").exists());
+    assert!(
+        out_dir
+            .join("Artist30 - Two")
+            .join("Artist30 - Two.flac")
+            .exists()
+    );
+    assert!(
+        out_dir
+            .join("Artist30 - Three")
+            .join("Artist30 - Three.flac")
+            .exists()
+    );
+
+    let used = pool
+        .reader
+        .call(|c| history::quota_used_30d(c, 30))
+        .await
+        .unwrap();
+    assert_eq!(used, 2);
+
+    root_cancel.cancel();
+}

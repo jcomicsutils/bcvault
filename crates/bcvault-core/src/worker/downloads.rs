@@ -15,8 +15,8 @@ use crate::{
     error::{BcError, DbError, DownloadError},
     types::{
         AudioFormat, Classification, DownloadOpts, DownloadSource, EnqueueMode, HistoryStatus,
-        ItemKey, ItemType, JobError, JobId, JobState, JobView, LogLevel, OutputLayout, ReleaseRow,
-        Settings,
+        ItemKey, ItemType, JobError, JobId, JobState, JobView, LogLevel, OutputLayout,
+        ReleaseFilter, ReleaseQuery, ReleaseRow, RemainingScope, Settings, SortDir, SortKey,
     },
     worker::{
         bridge::UiBridge,
@@ -439,6 +439,47 @@ impl DownloadManager {
         }
 
         self.bridge.emit(WorkerToUiEvent::EnqueueSummary(summary));
+    }
+
+    pub async fn enqueue_remaining(
+        &self,
+        scope: RemainingScope,
+        opts: DownloadOpts,
+        ack_soft_quota: bool,
+    ) {
+        let keys_res = self
+            .pool
+            .reader
+            .call(move |c| {
+                let band_ids = match scope {
+                    RemainingScope::Artists(ids) => ids,
+                    RemainingScope::Library => artists::list_views(c)?
+                        .into_iter()
+                        .map(|a| a.band_id)
+                        .collect(),
+                };
+                let mut keys = Vec::new();
+                for band_id in band_ids {
+                    let q = ReleaseQuery {
+                        band_id: Some(band_id),
+                        filter: ReleaseFilter::NotDownloaded,
+                        search: String::new(),
+                        sort: SortKey::Released,
+                        dir: SortDir::Desc,
+                    };
+                    for r in releases::query_releases(c, &q)? {
+                        if r.is_download_candidate() {
+                            keys.push(r.key);
+                        }
+                    }
+                }
+                Ok::<_, DbError>(keys)
+            })
+            .await;
+
+        let Ok(keys) = keys_res else { return };
+        self.enqueue_downloads(keys, opts, ack_soft_quota, EnqueueMode::New)
+            .await;
     }
 
     pub async fn enqueue_redeem(&self, target: ItemKey, url: String, opts: DownloadOpts) {
@@ -1584,6 +1625,146 @@ mod tests {
         assert_eq!(summary2.queued, 10);
         assert_eq!(summary2.awaiting_ack, 0);
         assert_eq!(mgr.in_flight_len(), 10);
+
+        mgr.cancel_all();
+        cancel.cancel();
+    }
+
+    async fn seed_release_with(
+        pool: &DbPool,
+        band_id: i64,
+        id: i64,
+        classification: Classification,
+        is_preorder: bool,
+        downloaded: bool,
+    ) -> ItemKey {
+        let key = ItemKey {
+            kind: ItemType::Album,
+            id,
+        };
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: &format!("a-{band_id}"),
+                        name: &format!("Artist {band_id}"),
+                        url: &format!("https://a-{band_id}.bandcamp.com"),
+                        cover_url: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key,
+                        band_id,
+                        title: &format!("Album {id}"),
+                        artist_name: &format!("Artist {band_id}"),
+                        url: &format!("https://a-{band_id}.bandcamp.com/album/a-{id}"),
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                releases::update_metadata(
+                    c,
+                    &ReleaseMetadata {
+                        key,
+                        classification,
+                        pricing_json: None,
+                        is_preorder,
+                        track_count: Some(3),
+                        published_at: None,
+                        modified_at: None,
+                        art_id: None,
+                    },
+                )?;
+                if downloaded {
+                    releases::set_downloaded_manual(c, key, true)?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+        key
+    }
+
+    #[tokio::test]
+    async fn test_10_enqueue_remaining_artists_filters_to_candidates() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        let k_free_new =
+            seed_release_with(&pool, 1, 801, Classification::Free, false, false).await;
+        let _k_free_dl = seed_release_with(&pool, 1, 802, Classification::Free, false, true).await;
+        let _k_paid = seed_release_with(&pool, 1, 803, Classification::Paid, false, false).await;
+        let _k_pre = seed_release_with(&pool, 1, 804, Classification::Free, true, false).await;
+        let _k_email =
+            seed_release_with(&pool, 1, 805, Classification::EmailRequired, false, false).await;
+        let _other_artist =
+            seed_release_with(&pool, 2, 806, Classification::Free, false, false).await;
+
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+        mgr.enqueue_remaining(RemainingScope::Artists(vec![1]), opts, false)
+            .await;
+
+        let evs = drain_events(&mut rx);
+        let queued: Vec<ItemKey> = evs
+            .iter()
+            .filter_map(|e| match e {
+                WorkerToUiEvent::JobQueued(j) => Some(j.key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queued, vec![k_free_new]);
+
+        mgr.cancel_all();
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_11_enqueue_remaining_library_twice_skips_in_flight() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        let _k1 = seed_release_with(&pool, 1, 901, Classification::Free, false, false).await;
+        let _k2 = seed_release_with(&pool, 2, 902, Classification::Nyp, false, false).await;
+        let _k3 = seed_release_with(&pool, 3, 903, Classification::Free, false, false).await;
+        let _k4 = seed_release_with(&pool, 3, 904, Classification::Free, false, true).await;
+
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+
+        mgr.enqueue_remaining(RemainingScope::Library, opts.clone(), false)
+            .await;
+        let evs1 = drain_events(&mut rx);
+        let s1 = evs1
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(s1.queued, 3);
+        assert_eq!(mgr.in_flight_len(), 3);
+
+        mgr.enqueue_remaining(RemainingScope::Library, opts, false)
+            .await;
+        let evs2 = drain_events(&mut rx);
+        let s2 = evs2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(s2.queued, 0);
+        assert_eq!(s2.skipped_in_flight, 3);
 
         mgr.cancel_all();
         cancel.cancel();

@@ -1,7 +1,7 @@
 use crate::types::{
     ArtistStats, ArtistView, DownloadOpts, EnqueueMode, ItemKey, JobId, JobState, JobView,
-    LogEntry, RateLimitStatus, ReleaseQuery, ReleaseRow, Settings, SyncMode, SyncProgress,
-    SyncScope,
+    LogEntry, RateLimitStatus, ReleaseQuery, ReleaseRow, RemainingScope, Settings, SyncMode,
+    SyncProgress, SyncScope,
 };
 use std::path::PathBuf;
 
@@ -38,6 +38,11 @@ pub enum UiToWorkerCommand {
         opts: DownloadOpts,
         ack_soft_quota: bool,
         mode: EnqueueMode,
+    },
+    EnqueueRemaining {
+        scope: RemainingScope,
+        opts: DownloadOpts,
+        ack_soft_quota: bool,
     },
     RedeemUrl {
         target: ItemKey,

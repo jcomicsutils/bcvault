@@ -905,6 +905,12 @@ impl Default for Settings {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemainingScope {
+    Artists(Vec<i64>),
+    Library,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum EnqueueMode {
     #[default]
