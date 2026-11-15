@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: style marked invisible characters with distinct monospace warning color and background via `display_layout_job`
 - none: add layered Unicode fallback fonts across both UIs and `Settings::mark_invisible_chars` (`Mark non-space invisible characters`)
 - none: move wall selection checkbox to top-right, move status badges (UPDATE/MISSING/ARCHIVED/DOWNLOADED) below classification badge, and replace toolbar scope glyph with `Scope` label
 - none: document selection and download remaining (`DOWNLOAD_FLOW.md` step 9)

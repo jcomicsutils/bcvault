@@ -157,15 +157,29 @@ pub fn show(
 
                 let mark_inv = state.settings.mark_invisible_chars;
                 row_ui.col(|ui| {
-                    let artist_disp =
-                        bcvault_core::text::format_display_text(&w.rel.artist_name, mark_inv);
-                    draw_highlighted_text(
-                        ui,
-                        artist_disp.as_ref(),
-                        &search_lower,
-                        th.text,
-                        th.accent,
-                    );
+                    if mark_inv
+                        && search_lower.is_empty()
+                        && bcvault_core::text::has_invisible_chars(&w.rel.artist_name)
+                    {
+                        let job = paint::display_layout_job(
+                            &w.rel.artist_name,
+                            true,
+                            FontId::proportional(12.5),
+                            th.text,
+                            th.warn,
+                        );
+                        ui.add(egui::Label::new(job).truncate().sense(Sense::click()));
+                    } else {
+                        let artist_disp =
+                            bcvault_core::text::format_display_text(&w.rel.artist_name, mark_inv);
+                        draw_highlighted_text(
+                            ui,
+                            artist_disp.as_ref(),
+                            &search_lower,
+                            th.text,
+                            th.accent,
+                        );
+                    }
                 });
 
                 row_ui.col(|ui| {
@@ -181,15 +195,29 @@ pub fn show(
                         );
                         ui.ctx().request_repaint();
                     }
-                    let title_disp =
-                        bcvault_core::text::format_display_text(&w.rel.title, mark_inv);
-                    let resp = draw_highlighted_text(
-                        ui,
-                        title_disp.as_ref(),
-                        &search_lower,
-                        th.text,
-                        th.accent,
-                    );
+                    let resp = if mark_inv
+                        && search_lower.is_empty()
+                        && bcvault_core::text::has_invisible_chars(&w.rel.title)
+                    {
+                        let job = paint::display_layout_job(
+                            &w.rel.title,
+                            true,
+                            FontId::proportional(12.5),
+                            th.text,
+                            th.warn,
+                        );
+                        ui.add(egui::Label::new(job).truncate().sense(Sense::click()))
+                    } else {
+                        let title_disp =
+                            bcvault_core::text::format_display_text(&w.rel.title, mark_inv);
+                        draw_highlighted_text(
+                            ui,
+                            title_disp.as_ref(),
+                            &search_lower,
+                            th.text,
+                            th.accent,
+                        )
+                    };
                     if resp.clicked() {
                         pending_actions.push(FxAction::OpenDrawer(key));
                     }

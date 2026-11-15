@@ -88,17 +88,32 @@ pub fn show(
                     }
 
                     let info_x = draw_rect.min.x + 8.0 + 4.0 * (tile_s + 4.0) + 12.0;
-                    let name_disp = bcvault_core::text::format_display_text(
-                        artist.display_name(),
-                        state.settings.mark_invisible_chars,
-                    );
-                    ui.painter().text(
-                        Pos2::new(info_x, draw_rect.min.y + 14.0),
-                        egui::Align2::LEFT_TOP,
-                        name_disp.as_ref(),
-                        FontId::proportional(17.0),
-                        th.text,
-                    );
+                    let raw_name = artist.display_name();
+                    if state.settings.mark_invisible_chars
+                        && bcvault_core::text::has_invisible_chars(raw_name)
+                    {
+                        let job = paint::display_layout_job(
+                            raw_name,
+                            true,
+                            FontId::proportional(17.0),
+                            th.text,
+                            th.warn,
+                        );
+                        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                        ui.painter().galley(
+                            Pos2::new(info_x, draw_rect.min.y + 14.0),
+                            galley,
+                            th.text,
+                        );
+                    } else {
+                        ui.painter().text(
+                            Pos2::new(info_x, draw_rect.min.y + 14.0),
+                            egui::Align2::LEFT_TOP,
+                            raw_name,
+                            FontId::proportional(17.0),
+                            th.text,
+                        );
+                    }
                     let sync_str = artist
                         .last_synced_at
                         .and_then(|ts| Utc.timestamp_opt(ts, 0).single())

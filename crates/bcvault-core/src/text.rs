@@ -50,11 +50,57 @@ fn invisible_marker(c: char) -> Option<Cow<'static, str>> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplaySegment<'a> {
+    pub text: Cow<'a, str>,
+    pub is_marker: bool,
+}
+
+/// Returns `true` if `text` contains any non-space invisible character.
+pub fn has_invisible_chars(text: &str) -> bool {
+    text.chars().any(|c| invisible_marker(c).is_some())
+}
+
+/// Splits `text` into normal text runs and marked invisible-character segments.
+pub fn display_segments(text: &str, mark_invisible: bool) -> Vec<DisplaySegment<'_>> {
+    if !mark_invisible || !has_invisible_chars(text) {
+        return vec![DisplaySegment {
+            text: Cow::Borrowed(text),
+            is_marker: false,
+        }];
+    }
+
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (idx, c) in text.char_indices() {
+        if let Some(marker) = invisible_marker(c) {
+            if idx > start {
+                out.push(DisplaySegment {
+                    text: Cow::Borrowed(&text[start..idx]),
+                    is_marker: false,
+                });
+            }
+            out.push(DisplaySegment {
+                text: marker,
+                is_marker: true,
+            });
+            start = idx + c.len_utf8();
+        }
+    }
+    if start < text.len() {
+        out.push(DisplaySegment {
+            text: Cow::Borrowed(&text[start..]),
+            is_marker: false,
+        });
+    }
+    out
+}
+
 /// Replaces non-space invisible, zero-width, control, and non-ASCII whitespace
 /// characters with readable ASCII markers when `mark_invisible` is enabled.
 /// Returns `Cow::Borrowed(text)` with zero allocation otherwise.
 pub fn format_display_text(text: &str, mark_invisible: bool) -> Cow<'_, str> {
-    if !mark_invisible || !text.chars().any(|c| invisible_marker(c).is_some()) {
+    if !mark_invisible || !has_invisible_chars(text) {
         return Cow::Borrowed(text);
     }
 

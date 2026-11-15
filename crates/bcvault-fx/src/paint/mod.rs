@@ -202,6 +202,36 @@ pub fn sharp_small_button(ui: &mut Ui, label: impl Into<egui::WidgetText>) -> eg
     )
 }
 
+pub fn display_layout_job(
+    text: &str,
+    mark_invisible: bool,
+    font: egui::FontId,
+    text_col: Color32,
+    marker_col: Color32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let marker_font = egui::FontId::monospace((font.size - 1.0).max(9.0));
+    let marker_bg = marker_col.gamma_multiply(0.18);
+    for seg in bcvault_core::text::display_segments(text, mark_invisible) {
+        let fmt = if seg.is_marker {
+            egui::TextFormat {
+                font_id: marker_font.clone(),
+                color: marker_col,
+                background: marker_bg,
+                ..Default::default()
+            }
+        } else {
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: text_col,
+                ..Default::default()
+            }
+        };
+        job.append(&seg.text, 0.0, fmt);
+    }
+    job
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -41,6 +41,35 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+pub fn display_layout_job(
+    text: &str,
+    mark_invisible: bool,
+    font: egui::FontId,
+    text_col: egui::Color32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let marker_font = egui::FontId::monospace((font.size - 1.0).max(9.0));
+    let marker_bg = pal::WARN.gamma_multiply(0.18);
+    for seg in bcvault_core::text::display_segments(text, mark_invisible) {
+        let fmt = if seg.is_marker {
+            egui::TextFormat {
+                font_id: marker_font.clone(),
+                color: pal::WARN,
+                background: marker_bg,
+                ..Default::default()
+            }
+        } else {
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: text_col,
+                ..Default::default()
+            }
+        };
+        job.append(&seg.text, 0.0, fmt);
+    }
+    job
+}
+
 fn sharpen(style: &mut Style) {
     let v = &mut style.visuals;
     v.window_corner_radius = CornerRadius::ZERO;

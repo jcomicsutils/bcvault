@@ -577,23 +577,48 @@ pub fn show(
             );
             let clipped = painter.with_clip_rect(text_rect);
             let mark_inv = state.settings.mark_invisible_chars;
-            let title_disp = bcvault_core::text::format_display_text(&row.rel.title, mark_inv);
-            let artist_disp =
-                bcvault_core::text::format_display_text(&row.rel.artist_name, mark_inv);
-            clipped.text(
-                text_rect.left_top(),
-                egui::Align2::LEFT_TOP,
-                title_disp.as_ref(),
-                FontId::proportional(12.5),
-                th.text,
-            );
-            clipped.text(
-                Pos2::new(text_rect.min.x, text_rect.min.y + 20.0),
-                egui::Align2::LEFT_TOP,
-                artist_disp.as_ref(),
-                FontId::proportional(11.0),
-                th.text_dim,
-            );
+            if mark_inv && bcvault_core::text::has_invisible_chars(&row.rel.title) {
+                let job = paint::display_layout_job(
+                    &row.rel.title,
+                    true,
+                    FontId::proportional(12.5),
+                    th.text,
+                    th.warn,
+                );
+                let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                clipped.galley(text_rect.left_top(), galley, th.text);
+            } else {
+                clipped.text(
+                    text_rect.left_top(),
+                    egui::Align2::LEFT_TOP,
+                    &row.rel.title,
+                    FontId::proportional(12.5),
+                    th.text,
+                );
+            }
+            if mark_inv && bcvault_core::text::has_invisible_chars(&row.rel.artist_name) {
+                let job = paint::display_layout_job(
+                    &row.rel.artist_name,
+                    true,
+                    FontId::proportional(11.0),
+                    th.text_dim,
+                    th.warn,
+                );
+                let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                clipped.galley(
+                    Pos2::new(text_rect.min.x, text_rect.min.y + 20.0),
+                    galley,
+                    th.text_dim,
+                );
+            } else {
+                clipped.text(
+                    Pos2::new(text_rect.min.x, text_rect.min.y + 20.0),
+                    egui::Align2::LEFT_TOP,
+                    &row.rel.artist_name,
+                    FontId::proportional(11.0),
+                    th.text_dim,
+                );
+            }
 
             if is_focused {
                 let focus_pos =

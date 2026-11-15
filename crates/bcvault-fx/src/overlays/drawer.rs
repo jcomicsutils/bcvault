@@ -116,29 +116,43 @@ pub fn show_drawer(
 
                                 ui.add_space(6.0);
                                 let mark_inv = state.settings.mark_invisible_chars;
-                                ui.label(
-                                    RichText::new(
-                                        bcvault_core::text::format_display_text(
-                                            &row.rel.title,
-                                            mark_inv,
-                                        )
-                                        .as_ref(),
-                                    )
-                                    .size(17.0)
-                                    .strong()
-                                    .color(th.text),
-                                );
-                                ui.label(
-                                    RichText::new(
-                                        bcvault_core::text::format_display_text(
-                                            &row.rel.artist_name,
-                                            mark_inv,
-                                        )
-                                        .as_ref(),
-                                    )
-                                    .size(13.5)
-                                    .color(th.text_dim),
-                                );
+                                if mark_inv
+                                    && bcvault_core::text::has_invisible_chars(&row.rel.title)
+                                {
+                                    let job = paint::display_layout_job(
+                                        &row.rel.title,
+                                        true,
+                                        egui::FontId::proportional(17.0),
+                                        th.text,
+                                        th.warn,
+                                    );
+                                    ui.label(job);
+                                } else {
+                                    ui.label(
+                                        RichText::new(&row.rel.title)
+                                            .size(17.0)
+                                            .strong()
+                                            .color(th.text),
+                                    );
+                                }
+                                if mark_inv
+                                    && bcvault_core::text::has_invisible_chars(&row.rel.artist_name)
+                                {
+                                    let job = paint::display_layout_job(
+                                        &row.rel.artist_name,
+                                        true,
+                                        egui::FontId::proportional(13.5),
+                                        th.text_dim,
+                                        th.warn,
+                                    );
+                                    ui.label(job);
+                                } else {
+                                    ui.label(
+                                        RichText::new(&row.rel.artist_name)
+                                            .size(13.5)
+                                            .color(th.text_dim),
+                                    );
+                                }
 
                                 ui.horizontal(|ui| {
                                     let b_col = class_color(row.rel.classification, &th);

@@ -174,11 +174,18 @@ pub fn show(
                 // Column 2: Artist
                 let mark_inv = state.settings.mark_invisible_chars;
                 row.col(|ui| {
-                    let artist_disp = bcvault_core::text::format_display_text(
-                        cached.artist_arc.as_ref(),
-                        mark_inv,
-                    );
-                    ui.add(egui::Label::new(artist_disp.as_ref()).truncate());
+                    let raw = cached.artist_arc.as_ref();
+                    if mark_inv && bcvault_core::text::has_invisible_chars(raw) {
+                        let job = super::theme::display_layout_job(
+                            raw,
+                            true,
+                            egui::FontId::proportional(12.5),
+                            super::theme::pal::TEXT,
+                        );
+                        ui.add(egui::Label::new(job).truncate());
+                    } else {
+                        ui.add(egui::Label::new(raw).truncate());
+                    }
                 });
 
                 // Column 3: Title (+ optional thumbnail + badges)
@@ -186,8 +193,17 @@ pub fn show(
                     if state.settings.show_thumbnails {
                         state.thumbs.draw_thumb(ui, key);
                     }
-                    let title_disp = bcvault_core::text::format_display_text(&r.title, mark_inv);
-                    ui.add(egui::Label::new(title_disp.as_ref()).truncate());
+                    if mark_inv && bcvault_core::text::has_invisible_chars(&r.title) {
+                        let job = super::theme::display_layout_job(
+                            &r.title,
+                            true,
+                            egui::FontId::proportional(12.5),
+                            super::theme::pal::TEXT,
+                        );
+                        ui.add(egui::Label::new(job).truncate());
+                    } else {
+                        ui.add(egui::Label::new(&r.title).truncate());
+                    }
                     if r.downloaded {
                         if r.local_status == Some(LocalStatus::Archived) {
                             badge(ui, "ARCHIVED", pal::TEXT_DIM, pal::BORDER_HI);
