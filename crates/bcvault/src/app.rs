@@ -59,21 +59,30 @@ impl App {
         }
 
         let any_modal = self.state.redeem_modal.is_some()
-            || self.state.quota_modal.is_some()
+            || !self.state.quota_warnings.is_empty()
+            || self.state.bulk_confirm_modal.is_some()
             || self.state.settings_draft.is_some()
             || self.state.confirm_remove_artist.is_some();
 
         if !any_modal && !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                self.state.select_all_downloadable();
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.state.selected.is_empty() {
+                self.state.clear_selection();
+            }
+
             if ctx.input(|i| i.key_pressed(egui::Key::Space))
                 && let Some(idx) = self.state.last_clicked_row
                 && let Some(cr) = self.state.rows.get(idx)
-                && !cr.row.is_preorder
-                && cr.row.classification.auto_downloadable()
+                && cr.row.is_downloadable()
             {
                 let key = cr.row.key;
                 if !self.state.selected.remove(&key) {
                     self.state.selected.insert(key);
                 }
+                self.state.mark_selection_dirty();
             }
 
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !self.state.selected.is_empty() {

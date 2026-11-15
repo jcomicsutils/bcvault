@@ -1,6 +1,10 @@
 use crate::{
-    types::{AudioFormat, DownloadOpts, ReleaseFilter},
-    ui::{state::UiState, theme::pal, widgets::sharp_button},
+    types::{AudioFormat, DownloadOpts, EnqueueMode, ReleaseFilter},
+    ui::{
+        state::{ClassicRemainingTarget, UiState},
+        theme::pal,
+        widgets::sharp_button,
+    },
     worker::messages::UiToWorkerCommand,
 };
 use egui::{CornerRadius, RichText, Ui};
@@ -128,7 +132,8 @@ pub fn show(
 
         ui.separator();
 
-        let sel_count = state.selected.len();
+        let stats = state.selection_stats();
+        let sel_count = stats.selected;
         if ui
             .add_enabled(
                 sel_count > 0,
@@ -147,40 +152,81 @@ pub fn show(
                 items,
                 opts,
                 ack_soft_quota: false,
-                mode: bcvault_core::types::EnqueueMode::New,
+                mode: EnqueueMode::New,
             });
         }
 
-        let eligible_keys: Vec<_> = state
-            .rows
-            .iter()
-            .filter(|cr| {
-                !cr.row.downloaded
-                    && !cr.row.is_preorder
-                    && cr.row.classification.auto_downloadable()
-            })
-            .map(|cr| cr.row.key)
-            .collect();
-
         if ui
             .add_enabled(
-                !eligible_keys.is_empty(),
-                egui::Button::new(format!("Download All Eligible ({})", eligible_keys.len()))
+                stats.remaining_in_view > 0,
+                egui::Button::new(format!("Select remaining ({})", stats.remaining_in_view))
                     .corner_radius(CornerRadius::ZERO),
             )
             .clicked()
         {
-            let opts = DownloadOpts {
-                format: state.settings.format,
-                out_dir: state.settings.out_dir.clone(),
-                batch_limit: state.settings.batch_limit,
-            };
-            let _ = cmd_tx.send(UiToWorkerCommand::EnqueueDownloads {
-                items: eligible_keys,
-                opts,
-                ack_soft_quota: false,
-                mode: bcvault_core::types::EnqueueMode::New,
+            state.select_remaining();
+        }
+
+        if ui
+            .add_enabled(
+                sel_count > 0,
+                egui::Button::new("Clear").corner_radius(CornerRadius::ZERO),
+            )
+            .clicked()
+        {
+            state.clear_selection();
+        }
+
+        let rem_view = stats.remaining_in_view;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            if ui
+                .add_enabled(
+                    rem_view > 0,
+                    egui::Button::new(format!("Download remaining ({rem_view})"))
+                        .corner_radius(CornerRadius::ZERO),
+                )
+                .clicked()
+            {
+                state.trigger_download_remaining(ClassicRemainingTarget::View, cmd_tx);
+            }
+            let has_artist = !state.selected_artists.is_empty() || state.active_band_id().is_some();
+            let has_any_artist = !state.artists.is_empty();
+            ui.menu_button("▾", |ui| {
+                if ui
+                    .add_enabled(rem_view > 0, egui::Button::new("In this view"))
+                    .clicked()
+                {
+                    state.trigger_download_remaining(ClassicRemainingTarget::View, cmd_tx);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(has_artist, egui::Button::new("Selected artists"))
+                    .clicked()
+                {
+                    state.trigger_download_remaining(
+                        ClassicRemainingTarget::SelectedArtists,
+                        cmd_tx,
+                    );
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(has_any_artist, egui::Button::new("All artists..."))
+                    .clicked()
+                {
+                    state.trigger_download_remaining(ClassicRemainingTarget::AllArtists, cmd_tx);
+                    ui.close();
+                }
             });
+        });
+
+        if let Some((ref msg, is_warn, expires_at)) = state.enqueue_status {
+            if std::time::Instant::now() < expires_at {
+                let color = if is_warn { pal::WARN } else { pal::TEXT_DIM };
+                ui.label(RichText::new(msg).size(11.5).color(color));
+            } else {
+                state.enqueue_status = None;
+            }
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

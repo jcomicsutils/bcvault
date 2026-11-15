@@ -1,13 +1,17 @@
 use crate::{
     library::service::ReconcileReport,
     types::{
-        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, FolderState, ItemKey, JobId,
-        JobState, JobView, LogEntry, LogLevel, MissingItem, RateLimitStatus, ReleaseFilter,
-        ReleaseQuery, ReleaseRow, Settings, SortDir, SortKey, SyncMode, SyncProgress,
-        UnavailableFolder, UnavailableRoot,
+        ArtistFolder, ArtistView, DeletedPolicy, DownloadOpts, EnqueueMode, FolderState, ItemKey,
+        JobId, JobState, JobView, LogEntry, LogLevel, MissingItem, RateLimitStatus, ReleaseFilter,
+        ReleaseQuery, ReleaseRow, RemainingScope, Settings, SortDir, SortKey, SyncMode,
+        SyncProgress, UnavailableFolder, UnavailableRoot,
     },
     ui::{thumbs::ThumbCache, widgets::format_date},
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
+};
+use bcvault_core::{
+    selection::{self, SelectScope, SelectionStats},
+    worker::quota::{preview_bulk, should_confirm_bulk},
 };
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -66,7 +70,7 @@ pub struct RedeemModalState {
 }
 
 #[derive(Clone, Debug)]
-pub struct QuotaWarningModalState {
+pub struct QuotaWarningEntry {
     pub band_id: i64,
     pub used_30d: u32,
     pub requested: u32,
@@ -74,6 +78,40 @@ pub struct QuotaWarningModalState {
     pub hard: u32,
     pub items: Vec<ItemKey>,
     pub opts: DownloadOpts,
+}
+
+#[derive(Clone, Debug)]
+pub enum BulkAction {
+    View(Vec<ItemKey>),
+    Remaining(RemainingScope),
+}
+
+#[derive(Clone, Debug)]
+pub struct BulkConfirmRow {
+    pub band_id: i64,
+    pub artist_name: String,
+    pub new_releases: u32,
+    pub will_queue: u32,
+    pub deferred: u32,
+    pub cause_note: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct BulkConfirmModalState {
+    pub title: String,
+    pub rows: Vec<BulkConfirmRow>,
+    pub total_new: u32,
+    pub total_queue: u32,
+    pub total_deferred: u32,
+    pub action: BulkAction,
+    pub focus_init: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassicRemainingTarget {
+    View,
+    SelectedArtists,
+    AllArtists,
 }
 
 #[derive(Clone, Debug)]
@@ -506,8 +544,11 @@ pub struct UiState {
     pub query_dirty_at: Option<Instant>,
     pub query_immediate: bool,
 
-    pub selected: HashSet<ItemKey>,
+    pub selected: BTreeSet<ItemKey>,
     pub last_clicked_row: Option<usize>,
+    pub selection_stats: SelectionStats,
+    pub selection_stats_dirty: bool,
+    pub enqueue_status: Option<(String, bool, Instant)>,
 
     pub jobs: Vec<JobView>,
     pub job_index: HashMap<JobId, usize>,
@@ -531,7 +572,9 @@ pub struct UiState {
     pub paths: Option<crate::paths::AppPaths>,
     pub folders: HashMap<i64, Vec<ArtistFolder>>,
     pub redeem_modal: Option<RedeemModalState>,
-    pub quota_modal: Option<QuotaWarningModalState>,
+    pub quota_warnings: Vec<QuotaWarningEntry>,
+    pub quota_focus_init: bool,
+    pub bulk_confirm_modal: Option<BulkConfirmModalState>,
     pub confirm_remove_artist: Option<(i64, String)>,
     pub rename_artist_modal: Option<RenameArtistModalState>,
     pub link_folder_modal: Option<LinkFolderModalState>,
@@ -578,8 +621,11 @@ impl UiState {
             query_dirty_at: None,
             query_immediate: true,
 
-            selected: HashSet::new(),
+            selected: BTreeSet::new(),
             last_clicked_row: None,
+            selection_stats: SelectionStats::default(),
+            selection_stats_dirty: false,
+            enqueue_status: None,
 
             jobs: Vec::new(),
             job_index: HashMap::new(),
@@ -603,7 +649,9 @@ impl UiState {
             paths: None,
             folders: HashMap::new(),
             redeem_modal: None,
-            quota_modal: None,
+            quota_warnings: Vec::new(),
+            quota_focus_init: false,
+            bulk_confirm_modal: None,
             confirm_remove_artist: None,
             rename_artist_modal: None,
             link_folder_modal: None,
@@ -627,6 +675,234 @@ impl UiState {
         self.settings_confirm_discard = false;
         self.settings_focus_first = true;
         self.settings_focus_keep_editing = false;
+    }
+
+    pub fn selection_stats(&mut self) -> SelectionStats {
+        if self.selection_stats_dirty {
+            self.selection_stats =
+                selection::compute_stats(self.rows.iter().map(|cr| &cr.row), &self.selected);
+            self.selection_stats_dirty = false;
+        }
+        self.selection_stats
+    }
+
+    pub fn mark_selection_dirty(&mut self) {
+        self.selection_stats_dirty = true;
+    }
+
+    pub fn select_all_downloadable(&mut self) {
+        self.selected = selection::select(
+            self.rows.iter().map(|cr| &cr.row),
+            SelectScope::Downloadable,
+        );
+        self.selection_stats_dirty = true;
+    }
+
+    pub fn select_remaining(&mut self) {
+        self.selected =
+            selection::select(self.rows.iter().map(|cr| &cr.row), SelectScope::Remaining);
+        self.selection_stats_dirty = true;
+    }
+
+    pub fn invert_selection(&mut self) {
+        self.selected = selection::invert(
+            self.rows.iter().map(|cr| &cr.row),
+            &self.selected,
+            SelectScope::Downloadable,
+        );
+        self.selection_stats_dirty = true;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.selection_stats_dirty = true;
+    }
+
+    pub fn push_quota_warning(&mut self, entry: QuotaWarningEntry) {
+        if self.quota_warnings.is_empty() {
+            self.quota_focus_init = true;
+        }
+        if let Some(existing) = self
+            .quota_warnings
+            .iter_mut()
+            .find(|e| e.band_id == entry.band_id)
+        {
+            *existing = entry;
+        } else {
+            self.quota_warnings.push(entry);
+        }
+    }
+
+    pub fn trigger_download_remaining(
+        &mut self,
+        target: ClassicRemainingTarget,
+        cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    ) {
+        let opts = DownloadOpts {
+            format: self.settings.format,
+            out_dir: self.settings.out_dir.clone(),
+            batch_limit: self.settings.batch_limit,
+        };
+        let (title, is_library_or_multi, per_artist, action) = match target {
+            ClassicRemainingTarget::View => {
+                let mut counts: HashMap<i64, u32> = HashMap::new();
+                let mut order: Vec<i64> = Vec::new();
+                let mut keys: Vec<ItemKey> = Vec::new();
+                for cr in &self.rows {
+                    if cr.row.is_download_candidate() {
+                        keys.push(cr.row.key);
+                        if !counts.contains_key(&cr.row.band_id) {
+                            order.push(cr.row.band_id);
+                        }
+                        *counts.entry(cr.row.band_id).or_insert(0) += 1;
+                    }
+                }
+                if keys.is_empty() {
+                    return;
+                }
+                let per_artist: Vec<(i64, u32, u32)> = order
+                    .into_iter()
+                    .map(|bid| {
+                        let req = counts.get(&bid).copied().unwrap_or(0);
+                        let used = self
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == bid)
+                            .map(|a| a.stats.quota_used_30d)
+                            .unwrap_or(0);
+                        (bid, req, used)
+                    })
+                    .collect();
+                (
+                    "Download Remaining in View".to_string(),
+                    per_artist.len() > 1,
+                    per_artist,
+                    BulkAction::View(keys),
+                )
+            }
+            ClassicRemainingTarget::SelectedArtists => {
+                let ids: Vec<i64> = if !self.selected_artists.is_empty() {
+                    self.selected_artists.iter().copied().collect()
+                } else if let Some(bid) = self.active_band_id() {
+                    vec![bid]
+                } else {
+                    return;
+                };
+                let per_artist: Vec<(i64, u32, u32)> = ids
+                    .iter()
+                    .filter_map(|&bid| {
+                        self.artists.iter().find(|a| a.band_id == bid).map(|a| {
+                            let rem = a.stats.eligible.saturating_sub(a.stats.eligible_downloaded);
+                            (bid, rem, a.stats.quota_used_30d)
+                        })
+                    })
+                    .filter(|&(_, rem, _)| rem > 0)
+                    .collect();
+                if per_artist.is_empty() {
+                    return;
+                }
+                (
+                    "Download Remaining for Selected Artists".to_string(),
+                    ids.len() > 1,
+                    per_artist,
+                    BulkAction::Remaining(RemainingScope::Artists(ids)),
+                )
+            }
+            ClassicRemainingTarget::AllArtists => {
+                let per_artist: Vec<(i64, u32, u32)> = self
+                    .artists
+                    .iter()
+                    .filter_map(|a| {
+                        let rem = a.stats.eligible.saturating_sub(a.stats.eligible_downloaded);
+                        if rem > 0 {
+                            Some((a.band_id, rem, a.stats.quota_used_30d))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if per_artist.is_empty() {
+                    return;
+                }
+                (
+                    "Download Remaining for All Artists".to_string(),
+                    true,
+                    per_artist,
+                    BulkAction::Remaining(RemainingScope::Library),
+                )
+            }
+        };
+
+        let preview = preview_bulk(
+            &per_artist,
+            self.settings.batch_limit,
+            self.settings.quota_soft,
+            self.settings.quota_hard,
+            false,
+        );
+
+        if should_confirm_bulk(is_library_or_multi, &preview) {
+            let mut rows = Vec::with_capacity(preview.len());
+            let mut total_new = 0u32;
+            let mut total_queue = 0u32;
+            let mut total_deferred = 0u32;
+            for p in preview {
+                let artist_name = self
+                    .artists
+                    .iter()
+                    .find(|a| a.band_id == p.band_id)
+                    .map(|a| a.display_name().to_string())
+                    .unwrap_or_else(|| format!("Artist {}", p.band_id));
+                let cause_note = if p.blocked {
+                    "Hard cap reached"
+                } else if p.deferred > 0 {
+                    if p.used_30d + p.allowed >= self.settings.quota_hard {
+                        "Hard cap"
+                    } else {
+                        "Batch limit"
+                    }
+                } else if p.will_warn {
+                    "Soft limit"
+                } else {
+                    ""
+                };
+                total_new += p.requested;
+                total_queue += p.allowed;
+                total_deferred += p.deferred;
+                rows.push(BulkConfirmRow {
+                    band_id: p.band_id,
+                    artist_name,
+                    new_releases: p.requested,
+                    will_queue: p.allowed,
+                    deferred: p.deferred,
+                    cause_note,
+                });
+            }
+            self.bulk_confirm_modal = Some(BulkConfirmModalState {
+                title,
+                rows,
+                total_new,
+                total_queue,
+                total_deferred,
+                action,
+                focus_init: true,
+            });
+        } else {
+            let cmd = match action {
+                BulkAction::View(items) => UiToWorkerCommand::EnqueueDownloads {
+                    items,
+                    opts,
+                    ack_soft_quota: false,
+                    mode: EnqueueMode::New,
+                },
+                BulkAction::Remaining(scope) => UiToWorkerCommand::EnqueueRemaining {
+                    scope,
+                    opts,
+                    ack_soft_quota: false,
+                },
+            };
+            let _ = cmd_tx.send(cmd);
+        }
     }
 
     pub fn active_band_id(&self) -> Option<i64> {
@@ -754,12 +1030,14 @@ impl UiState {
                 // Keep selection restricted to existing keys or clear stale ones
                 self.selected.retain(|k| self.index.contains_key(k));
                 self.last_clicked_row = None;
+                self.selection_stats_dirty = true;
             }
             WorkerToUiEvent::ReleaseUpdated(row) => {
                 let key = row.key;
-                if !row.classification.auto_downloadable() || row.is_preorder {
+                if !row.is_downloadable() {
                     self.selected.remove(&key);
                 }
+                self.selection_stats_dirty = true;
                 if let Some(&idx) = self.index.get(&key) {
                     if let Some(slot) = self.rows.get_mut(idx) {
                         *slot = CachedRow::from_row(*row, &mut self.artist_interner);
@@ -848,7 +1126,7 @@ impl UiState {
                 items,
                 opts,
             } => {
-                self.quota_modal = Some(QuotaWarningModalState {
+                self.push_quota_warning(QuotaWarningEntry {
                     band_id,
                     used_30d,
                     requested,
@@ -858,7 +1136,27 @@ impl UiState {
                     opts,
                 });
             }
-            WorkerToUiEvent::EnqueueSummary(_) => {}
+            WorkerToUiEvent::EnqueueSummary(summary) => {
+                let text = summary.format_summary();
+                let has_deferred = !summary.deferred.is_empty();
+                self.enqueue_status = Some((
+                    text.clone(),
+                    has_deferred,
+                    Instant::now() + Duration::from_secs(10),
+                ));
+                let level = if has_deferred {
+                    LogLevel::Warn
+                } else {
+                    LogLevel::Info
+                };
+                self.push_log(LogEntry {
+                    ts: 0,
+                    level,
+                    scope: "download",
+                    message: text,
+                    item: None,
+                });
+            }
             WorkerToUiEvent::RateLimit(status) => {
                 self.rate_limit = status;
             }
@@ -1532,5 +1830,153 @@ mod tests {
             format: None,
             folder_mtime: None,
         }));
+    }
+
+    fn make_classic_row(
+        id: i64,
+        band_id: i64,
+        classification: bcvault_core::types::Classification,
+        downloaded: bool,
+    ) -> ReleaseRow {
+        ReleaseRow {
+            key: ItemKey::new(ItemType::Album, id),
+            band_id,
+            title: format!("Release {id}"),
+            artist_name: format!("Artist {band_id}"),
+            url: format!("https://a{band_id}.bandcamp.com/album/r{id}"),
+            cover_url: None,
+            art_id: None,
+            classification,
+            is_preorder: false,
+            track_count: Some(3),
+            published_at: None,
+            modified_at: None,
+            downloaded,
+            downloaded_at: None,
+            downloaded_format: None,
+            local_path: None,
+            local_status: None,
+            origin: None,
+            missing_ack_at: None,
+            has_remote_update: false,
+            remote_update_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_15_classic_selection_and_quota_warning_dedup() {
+        use bcvault_core::types::{AudioFormat, Classification};
+
+        let mut st = UiState::new();
+        let rows = vec![
+            make_classic_row(1, 10, Classification::Free, false),
+            make_classic_row(2, 10, Classification::Nyp, true),
+            make_classic_row(3, 10, Classification::Paid, false),
+        ];
+        st.apply_event(WorkerToUiEvent::ReleasesLoaded {
+            request_id: 0,
+            rows,
+        });
+
+        st.select_all_downloadable();
+        assert_eq!(st.selected.len(), 2);
+        assert_eq!(st.selection_stats().selected_downloadable, 2);
+        assert_eq!(st.selection_stats().remaining_in_view, 1);
+
+        st.select_remaining();
+        assert_eq!(st.selected.len(), 1);
+        assert!(st.selected.contains(&ItemKey::new(ItemType::Album, 1)));
+
+        st.clear_selection();
+        assert!(st.selected.is_empty());
+
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: std::path::PathBuf::from("/tmp/out"),
+            batch_limit: 50,
+        };
+        st.apply_event(WorkerToUiEvent::QuotaWarning {
+            band_id: 10,
+            used_30d: 145,
+            requested: 10,
+            soft: 150,
+            hard: 200,
+            items: vec![ItemKey::new(ItemType::Album, 1)],
+            opts: opts.clone(),
+        });
+        st.apply_event(WorkerToUiEvent::QuotaWarning {
+            band_id: 20,
+            used_30d: 148,
+            requested: 5,
+            soft: 150,
+            hard: 200,
+            items: vec![ItemKey::new(ItemType::Album, 2)],
+            opts: opts.clone(),
+        });
+        // Duplicate band_id 10 replaces previous entry for band 10
+        st.apply_event(WorkerToUiEvent::QuotaWarning {
+            band_id: 10,
+            used_30d: 146,
+            requested: 10,
+            soft: 150,
+            hard: 200,
+            items: vec![ItemKey::new(ItemType::Album, 1)],
+            opts,
+        });
+        assert_eq!(st.quota_warnings.len(), 2);
+        assert_eq!(st.quota_warnings[0].used_30d, 146);
+    }
+
+    #[test]
+    fn test_16_classic_bulk_confirmation_thresholds() {
+        use bcvault_core::types::{ArtistStats, Classification};
+
+        let mut st = UiState::new();
+        st.artists.push(ArtistView {
+            band_id: 10,
+            slug: "a10".into(),
+            name: "Artist 10".into(),
+            custom_name: None,
+            url: "https://a10.bandcamp.com".into(),
+            last_synced_at: None,
+            stats: ArtistStats {
+                eligible: 25,
+                eligible_downloaded: 0,
+                ..ArtistStats::default()
+            },
+        });
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // 24 items, no deferral -> direct run
+        let rows24: Vec<ReleaseRow> = (1..=24)
+            .map(|i| make_classic_row(i, 10, Classification::Free, false))
+            .collect();
+        st.apply_event(WorkerToUiEvent::ReleasesLoaded {
+            request_id: 0,
+            rows: rows24,
+        });
+        st.trigger_download_remaining(ClassicRemainingTarget::View, &tx);
+        assert!(st.bulk_confirm_modal.is_none());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(UiToWorkerCommand::EnqueueDownloads { .. })
+        ));
+
+        // 25 items -> confirmation modal
+        let rows25: Vec<ReleaseRow> = (1..=25)
+            .map(|i| make_classic_row(i, 10, Classification::Free, false))
+            .collect();
+        st.apply_event(WorkerToUiEvent::ReleasesLoaded {
+            request_id: 0,
+            rows: rows25,
+        });
+        st.trigger_download_remaining(ClassicRemainingTarget::View, &tx);
+        assert!(st.bulk_confirm_modal.is_some());
+        st.bulk_confirm_modal = None;
+
+        // Library scope -> always confirmation modal
+        st.trigger_download_remaining(ClassicRemainingTarget::AllArtists, &tx);
+        assert!(st.bulk_confirm_modal.is_some());
     }
 }

@@ -1693,8 +1693,7 @@ mod tests {
     async fn test_10_enqueue_remaining_artists_filters_to_candidates() {
         let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
         mgr.pause();
-        let k_free_new =
-            seed_release_with(&pool, 1, 801, Classification::Free, false, false).await;
+        let k_free_new = seed_release_with(&pool, 1, 801, Classification::Free, false, false).await;
         let _k_free_dl = seed_release_with(&pool, 1, 802, Classification::Free, false, true).await;
         let _k_paid = seed_release_with(&pool, 1, 803, Classification::Paid, false, false).await;
         let _k_pre = seed_release_with(&pool, 1, 804, Classification::Free, true, false).await;

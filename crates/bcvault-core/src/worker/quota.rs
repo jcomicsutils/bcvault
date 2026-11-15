@@ -96,6 +96,19 @@ pub fn preview_bulk(
         .collect()
 }
 
+pub fn should_confirm_bulk(is_library_or_multi_artist: bool, preview: &[BulkPreviewRow]) -> bool {
+    if is_library_or_multi_artist {
+        return true;
+    }
+    let total_requested: u32 = preview.iter().map(|r| r.requested).sum();
+    if total_requested >= BULK_CONFIRM_MIN {
+        return true;
+    }
+    preview
+        .iter()
+        .any(|r| r.deferred > 0 || r.will_warn || r.blocked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

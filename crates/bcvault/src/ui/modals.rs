@@ -1,11 +1,11 @@
 use crate::{
     bandcamp::redeem::validate_redeem_url,
     types::{
-        DeletedPolicy, DownloadOpts, FolderState, MissingAction, MissingDecision, OnMissing,
-        RememberChoice, UnavailableAction, UnavailableDecision, UnavailableRoot,
+        DeletedPolicy, DownloadOpts, EnqueueMode, FolderState, MissingAction, MissingDecision,
+        OnMissing, RememberChoice, UnavailableAction, UnavailableDecision, UnavailableRoot,
     },
     ui::{
-        state::{LocalAction, MissingItemChoice, ReportTab, UiState},
+        state::{BulkAction, LocalAction, MissingItemChoice, ReportTab, UiState},
         theme::pal,
         widgets::{paint_folder_status_dot, sharp_button, sharp_rect, sharp_small_button},
     },
@@ -31,7 +31,8 @@ pub fn show(
     }
 
     let any_modal = state.redeem_modal.is_some()
-        || state.quota_modal.is_some()
+        || !state.quota_warnings.is_empty()
+        || state.bulk_confirm_modal.is_some()
         || state.settings_draft.is_some()
         || state.confirm_remove_artist.is_some()
         || state.rename_artist_modal.is_some()
@@ -60,8 +61,11 @@ pub fn show(
     if state.redeem_modal.is_some() {
         show_redeem_modal(ctx, state, cmd_tx, esc);
     }
-    if state.quota_modal.is_some() {
+    if !state.quota_warnings.is_empty() {
         show_quota_modal(ctx, state, cmd_tx, esc);
+    }
+    if state.bulk_confirm_modal.is_some() {
+        show_bulk_confirm_modal(ctx, state, cmd_tx, esc);
     }
     if state.settings_draft.is_some() {
         crate::ui::settings::show_settings_modal(ctx, state, cmd_tx, rt_handle, esc);
@@ -152,30 +156,55 @@ fn show_quota_modal(
     cmd_tx: &UnboundedSender<UiToWorkerCommand>,
     esc: bool,
 ) {
-    let Some(modal) = state.quota_modal.take() else {
+    if state.quota_warnings.is_empty() {
         return;
-    };
-    let mut keep_open = !esc;
+    }
+    if esc {
+        state.quota_warnings.clear();
+        state.quota_focus_init = false;
+        return;
+    }
 
-    egui::Window::new("Artist Download Quota Warning")
+    let mut close = false;
+    let mut continue_clicked = false;
+    let focus_cancel = std::mem::take(&mut state.quota_focus_init);
+    let total_items: u32 = state.quota_warnings.iter().map(|w| w.requested).sum();
+
+    egui::Window::new("Download Quota Warning")
         .order(Order::Foreground)
         .collapsible(false)
         .resizable(false)
+        .max_size([520.0, 420.0])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(380.0);
+            ui.set_min_width(420.0);
             ui.label(
                 RichText::new(format!(
-                    "Download {} more release(s) for this artist?",
-                    modal.requested
+                    "Soft 30-day download limit exceeded ({} release(s) across {} artist(s)):",
+                    total_items,
+                    state.quota_warnings.len()
                 ))
                 .strong()
                 .color(pal::WARN),
             );
-            ui.label(format!(
-                "Your downloads (30d): {} used / {} soft warning / {} hard cap",
-                modal.used_30d, modal.soft, modal.hard
-            ));
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    for w in &state.quota_warnings {
+                        let name = state
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == w.band_id)
+                            .map(|a| a.display_name().to_string())
+                            .unwrap_or_else(|| format!("Artist {}", w.band_id));
+                        ui.label(format!(
+                            "• {name}: {} of {} soft limit ({} requested, {} hard cap)",
+                            w.used_30d, w.soft, w.requested, w.hard
+                        ));
+                    }
+                });
+            ui.add_space(4.0);
             ui.label(
                 RichText::new(
                     "Note: Bandcamp's monthly free-download allowance is shared across all fans.",
@@ -184,23 +213,166 @@ fn show_quota_modal(
             );
             ui.separator();
             ui.horizontal(|ui| {
-                if sharp_button(ui, "Proceed").clicked() {
-                    let _ = cmd_tx.send(UiToWorkerCommand::EnqueueDownloads {
-                        items: modal.items.clone(),
-                        opts: modal.opts.clone(),
-                        ack_soft_quota: true,
-                        mode: bcvault_core::types::EnqueueMode::New,
+                if sharp_button(ui, "Continue").clicked() {
+                    continue_clicked = true;
+                    close = true;
+                }
+                let cancel_resp = sharp_button(ui, "Cancel");
+                if focus_cancel {
+                    cancel_resp.request_focus();
+                }
+                if cancel_resp.clicked() {
+                    close = true;
+                }
+            });
+        });
+
+    if continue_clicked && let Some(first) = state.quota_warnings.first() {
+        let opts = first.opts.clone();
+        let all_items: Vec<_> = state
+            .quota_warnings
+            .iter()
+            .flat_map(|w| w.items.iter().copied())
+            .collect();
+        let _ = cmd_tx.send(UiToWorkerCommand::EnqueueDownloads {
+            items: all_items,
+            opts,
+            ack_soft_quota: true,
+            mode: EnqueueMode::New,
+        });
+    }
+    if close {
+        state.quota_warnings.clear();
+        state.quota_focus_init = false;
+    }
+}
+
+fn show_bulk_confirm_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    esc: bool,
+) {
+    let Some(mut modal) = state.bulk_confirm_modal.take() else {
+        return;
+    };
+    if esc {
+        return;
+    }
+
+    let mut keep_open = true;
+    let mut confirm = false;
+    let focus_cancel = std::mem::take(&mut modal.focus_init);
+
+    egui::Window::new(&modal.title)
+        .order(Order::Foreground)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([560.0, 380.0])
+        .max_size([720.0, 520.0])
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            let row_count = modal.rows.len();
+            egui_extras::TableBuilder::new(ui)
+                .striped(true)
+                .max_scroll_height(240.0)
+                .column(egui_extras::Column::remainder().at_least(160.0))
+                .column(egui_extras::Column::exact(80.0))
+                .column(egui_extras::Column::exact(80.0))
+                .column(egui_extras::Column::exact(150.0))
+                .header(22.0, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Artist");
                     });
+                    header.col(|ui| {
+                        ui.strong("Remaining");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Will queue");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Deferred");
+                    });
+                })
+                .body(|body| {
+                    body.rows(20.0, row_count, |mut row| {
+                        let r = &modal.rows[row.index()];
+                        row.col(|ui| {
+                            ui.label(&r.artist_name);
+                        });
+                        row.col(|ui| {
+                            ui.label(r.new_releases.to_string());
+                        });
+                        row.col(|ui| {
+                            ui.label(r.will_queue.to_string());
+                        });
+                        row.col(|ui| {
+                            if r.deferred > 0 {
+                                ui.label(
+                                    RichText::new(format!("{} ({})", r.deferred, r.cause_note))
+                                        .color(pal::WARN),
+                                );
+                            } else if !r.cause_note.is_empty() {
+                                ui.label(RichText::new(r.cause_note).color(pal::WARN));
+                            } else {
+                                ui.label("0");
+                            }
+                        });
+                    });
+                });
+
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "Totals: {} remaining · {} will queue · {} deferred",
+                    modal.total_new, modal.total_queue, modal.total_deferred
+                ))
+                .strong(),
+            );
+            ui.label(
+                RichText::new(
+                    "Deferred releases stay remaining; press Download remaining again later.",
+                )
+                .color(pal::TEXT_DIM),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if sharp_button(ui, &format!("Queue {}", modal.total_queue)).clicked() {
+                    confirm = true;
                     keep_open = false;
                 }
-                if sharp_button(ui, "Cancel").clicked() {
+                let cancel_resp = sharp_button(ui, "Cancel");
+                if focus_cancel {
+                    cancel_resp.request_focus();
+                }
+                if cancel_resp.clicked() {
                     keep_open = false;
                 }
             });
         });
 
-    if keep_open {
-        state.quota_modal = Some(modal);
+    if confirm {
+        let opts = DownloadOpts {
+            format: state.settings.format,
+            out_dir: state.settings.out_dir.clone(),
+            batch_limit: state.settings.batch_limit,
+        };
+        let cmd = match modal.action {
+            BulkAction::View(items) => UiToWorkerCommand::EnqueueDownloads {
+                items,
+                opts,
+                ack_soft_quota: false,
+                mode: EnqueueMode::New,
+            },
+            BulkAction::Remaining(scope) => UiToWorkerCommand::EnqueueRemaining {
+                scope,
+                opts,
+                ack_soft_quota: false,
+            },
+        };
+        let _ = cmd_tx.send(cmd);
+    } else if keep_open {
+        state.bulk_confirm_modal = Some(modal);
     }
 }
 

@@ -32,7 +32,7 @@ pub fn show(
     let eligible_visible_keys: Vec<_> = state
         .rows
         .iter()
-        .filter(|cr| !cr.row.is_preorder && cr.row.classification.auto_downloadable())
+        .filter(|cr| cr.row.is_downloadable())
         .map(|cr| cr.row.key)
         .collect();
 
@@ -127,7 +127,7 @@ pub fn show(
                 let mut checked = is_selected;
                 let mut check_changed = false;
                 row.col(|ui| {
-                    let can_select = !r.is_preorder && r.classification.auto_downloadable();
+                    let can_select = r.is_downloadable();
                     if ui
                         .add_enabled(can_select, egui::Checkbox::without_text(&mut checked))
                         .clicked()
@@ -416,19 +416,20 @@ pub fn show(
                         };
                         for idx in lo..=hi {
                             if let Some(cr) = state.rows.get(idx)
-                                && !cr.row.is_preorder
-                                && cr.row.classification.auto_downloadable()
+                                && cr.row.is_downloadable()
                             {
                                 state.selected.insert(cr.row.key);
                             }
                         }
-                    } else if !r.is_preorder && r.classification.auto_downloadable() {
+                        state.mark_selection_dirty();
+                    } else if r.is_downloadable() {
                         if is_selected {
                             state.selected.remove(&key);
                         } else {
                             state.selected.insert(key);
                         }
                         state.last_clicked_row = Some(row_idx);
+                        state.mark_selection_dirty();
                     }
                 }
             });
@@ -444,6 +445,7 @@ pub fn show(
                 state.selected.insert(k);
             }
         }
+        state.mark_selection_dirty();
     }
 
     if let Some(clicked_key) = sort_clicked {

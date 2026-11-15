@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: add bulk selection, quota list dialog and download remaining in classic (`DOWNLOAD_FLOW.md` step 5)
 - none: queue remaining releases for artists or the library (`DOWNLOAD_FLOW.md` step 4)
 - none: report an enqueue summary with quota deferrals (`DOWNLOAD_FLOW.md` step 3)
 - none: skip downloaded and in-flight releases when enqueueing (`DOWNLOAD_FLOW.md` step 2)
