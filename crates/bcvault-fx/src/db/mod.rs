@@ -568,6 +568,13 @@ pub fn build_wall_query_sql(query: &FxQuery) -> (String, Vec<Value>) {
         values.push(Value::Integer(band_id));
     }
 
+    if !query.base.band_ids.is_empty() {
+        where_parts.push("r.band_id IN (SELECT value FROM json_each(?))");
+        values.push(Value::Text(
+            bcvault_core::db::repo::releases::band_ids_json(&query.base.band_ids),
+        ));
+    }
+
     if let Some(smart) = query.smart {
         match smart {
             SmartView::RecentlyAdded => {}
@@ -749,6 +756,13 @@ pub fn query_facets(conn: &Connection, query: &FxQuery) -> Result<Facets, DbErro
     if let Some(band_id) = query.base.band_id {
         where_parts.push("band_id = ?");
         values.push(Value::Integer(band_id));
+    }
+
+    if !query.base.band_ids.is_empty() {
+        where_parts.push("band_id IN (SELECT value FROM json_each(?))");
+        values.push(Value::Text(
+            bcvault_core::db::repo::releases::band_ids_json(&query.base.band_ids),
+        ));
     }
 
     let trimmed = query.base.search.trim();

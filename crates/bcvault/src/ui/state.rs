@@ -1094,8 +1094,16 @@ impl UiState {
             self.query_immediate = false;
             self.query_dirty_at = None;
             self.latest_request_id = self.latest_request_id.wrapping_add(1);
+            let (band_id, band_ids) = if self.selected_artists.len() == 1 {
+                (self.selected_artists.iter().next().copied(), Vec::new())
+            } else if self.selected_artists.len() > 1 {
+                (None, self.selected_artists.iter().copied().collect())
+            } else {
+                (None, Vec::new())
+            };
             let query = ReleaseQuery {
-                band_id: self.active_band_id(),
+                band_id,
+                band_ids,
                 filter: self.filter,
                 search: self.search.clone(),
                 sort: self.sort,

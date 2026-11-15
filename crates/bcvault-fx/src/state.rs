@@ -1822,9 +1822,10 @@ impl FxState {
                 self.issue_wall_and_facets_query(fx_tx);
             }
             FxAction::SelectArtist(band_id) => {
-                if self.query.base.band_id != band_id {
+                if self.query.base.band_id != band_id || !self.query.base.band_ids.is_empty() {
                     self.nav.push(self.current_view_state());
                     self.query.base.band_id = band_id;
+                    self.query.base.band_ids.clear();
                     if let Some(bid) = band_id {
                         let _ = fx_tx.send(FxCommand::TouchRecent {
                             kind: "artist".to_string(),
@@ -2264,10 +2265,18 @@ impl FxState {
             }
             FxAction::ViewGroup(id) => {
                 let members = self.group_member_ids(id);
-                if let Some(&first) = members.first() {
-                    self.query.base.band_id = Some(first);
-                    self.issue_wall_and_facets_query(fx_tx);
+                self.nav.push(self.current_view_state());
+                if members.is_empty() {
+                    self.query.base.band_id = Some(-1);
+                    self.query.base.band_ids.clear();
+                } else if members.len() == 1 {
+                    self.query.base.band_id = Some(members[0]);
+                    self.query.base.band_ids.clear();
+                } else {
+                    self.query.base.band_id = None;
+                    self.query.base.band_ids = members;
                 }
+                self.issue_wall_and_facets_query(fx_tx);
             }
         }
     }

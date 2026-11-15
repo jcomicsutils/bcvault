@@ -462,6 +462,7 @@ impl DownloadManager {
                 for band_id in band_ids {
                     let q = ReleaseQuery {
                         band_id: Some(band_id),
+                        band_ids: Vec::new(),
                         filter: ReleaseFilter::NotDownloaded,
                         search: String::new(),
                         sort: SortKey::Released,

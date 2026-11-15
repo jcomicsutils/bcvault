@@ -387,6 +387,7 @@ async fn explain_query_plan_and_100k_seed_performance() {
         .call(|c| {
             let (rel_sql, _) = releases::build_query_sql(&ReleaseQuery {
                 band_id: Some(1),
+                band_ids: Vec::new(),
                 filter: ReleaseFilter::All,
                 search: String::new(),
                 sort: SortKey::Released,
@@ -477,6 +478,7 @@ async fn explain_query_plan_and_100k_seed_performance() {
                 c,
                 &ReleaseQuery {
                     band_id: Some(1),
+                    band_ids: Vec::new(),
                     filter: ReleaseFilter::All,
                     search: String::new(),
                     sort: SortKey::Released,

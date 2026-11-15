@@ -600,6 +600,10 @@ pub const fn order_by_clause(sort: SortKey, dir: SortDir) -> &'static str {
     }
 }
 
+pub fn band_ids_json(ids: &[i64]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string())
+}
+
 pub fn build_query_sql(query: &ReleaseQuery) -> (String, Vec<Value>) {
     let mut where_parts: Vec<&'static str> = Vec::new();
     let mut values: Vec<Value> = Vec::new();
@@ -607,6 +611,10 @@ pub fn build_query_sql(query: &ReleaseQuery) -> (String, Vec<Value>) {
     if let Some(band_id) = query.band_id {
         where_parts.push("r.band_id = ?");
         values.push(Value::Integer(band_id));
+    }
+    if !query.band_ids.is_empty() {
+        where_parts.push("r.band_id IN (SELECT value FROM json_each(?))");
+        values.push(Value::Text(band_ids_json(&query.band_ids)));
     }
 
     match query.filter {
@@ -982,5 +990,88 @@ mod tests {
         set_unavailable_manual(&mut conn, &[k2], false).unwrap();
         let r2_restored = get_release(&conn, k2).unwrap().unwrap();
         assert_eq!(r2_restored.classification, Classification::Free);
+    }
+
+    #[test]
+    fn test_13_query_releases_band_ids() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations::run(&mut conn).unwrap();
+
+        for (bid, name, subdomain) in [
+            (1_i64, "Artist 1", "a1"),
+            (2_i64, "Artist 2", "a2"),
+            (3_i64, "Artist 3", "a3"),
+        ] {
+            conn.execute(
+                "INSERT INTO artists (band_id, slug, name, url) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    bid,
+                    subdomain,
+                    name,
+                    format!("https://{subdomain}.bandcamp.com")
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url, classification, downloaded)
+                 VALUES ('album', ?1, ?2, ?3, ?4, ?5, 'free', 0)",
+                params![
+                    bid * 10,
+                    bid,
+                    format!("Alb {bid}"),
+                    name,
+                    format!("https://{subdomain}.bandcamp.com/album/{bid}")
+                ],
+            )
+            .unwrap();
+        }
+
+        // band_ids alone
+        let q_multi = ReleaseQuery {
+            band_ids: vec![1, 2],
+            ..Default::default()
+        };
+        let rows = query_releases(&conn, &q_multi).unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.band_id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+
+        // band_ids combined with band_id (intersection)
+        let q_both_match = ReleaseQuery {
+            band_id: Some(1),
+            band_ids: vec![1, 2],
+            ..Default::default()
+        };
+        let rows = query_releases(&conn, &q_both_match).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].band_id, 1);
+
+        let q_both_disjoint = ReleaseQuery {
+            band_id: Some(3),
+            band_ids: vec![1, 2],
+            ..Default::default()
+        };
+        assert!(query_releases(&conn, &q_both_disjoint).unwrap().is_empty());
+
+        // Empty band_ids returns all releases
+        let q_empty = ReleaseQuery::default();
+        assert_eq!(query_releases(&conn, &q_empty).unwrap().len(), 3);
+
+        // 5,000 ids in band_ids (exceeds SQLite 999 bind limit if expanded as ?, ?, ...)
+        let many_ids: Vec<i64> = (1..=5000).collect();
+        let q_many = ReleaseQuery {
+            band_ids: many_ids,
+            ..Default::default()
+        };
+        let rows = query_releases(&conn, &q_many).unwrap();
+        assert_eq!(rows.len(), 3);
+
+        // Saved-view JSON without band_ids deserializes cleanly
+        let legacy_json =
+            r#"{"band_id":1,"filter":"All","search":"","sort":"Released","dir":"Desc"}"#;
+        let parsed: ReleaseQuery = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.band_id, Some(1));
+        assert!(parsed.band_ids.is_empty());
     }
 }

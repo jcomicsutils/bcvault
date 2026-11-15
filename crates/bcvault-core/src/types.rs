@@ -635,6 +635,8 @@ impl ReleaseRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseQuery {
     pub band_id: Option<i64>,
+    #[serde(default)]
+    pub band_ids: Vec<i64>,
     pub filter: ReleaseFilter,
     pub search: String,
     pub sort: SortKey,
@@ -645,6 +647,7 @@ impl Default for ReleaseQuery {
     fn default() -> Self {
         Self {
             band_id: None,
+            band_ids: Vec::new(),
             filter: ReleaseFilter::All,
             search: String::new(),
             sort: SortKey::Released,
