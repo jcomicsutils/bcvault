@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
+Task: none  ·  Branch: main  ·  Updated: 2026-11-15
 
 ## Done
+- none: release v0.4.0 (`DOWNLOAD_FLOW`, layered Unicode fallback fonts, and invisible char markers)
 - none: style marked invisible characters with distinct monospace warning color and background via `display_layout_job`
 - none: add layered Unicode fallback fonts across both UIs and `Settings::mark_invisible_chars` (`Mark non-space invisible characters`)
 - none: move wall selection checkbox to top-right, move status badges (UPDATE/MISSING/ARCHIVED/DOWNLOADED) below classification badge, and replace toolbar scope glyph with `Scope` label
@@ -149,7 +150,7 @@ Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 - [x] SETTINGS_TABS: Tabbed settings, settings parity, and ZIP extraction options (Steps 1 to 7)
 - [x] USER_THEMES: File-based TOML themes for `bcvault-fx` with 13 built-ins (including Catppuccin Mocha, Macchiato, Frappé, and Latte), theme picker, live editor, import/export/drop/delete, and `docs/themes.md` (Steps 1 to 9)
 - [x] DOWNLOAD_FLOW: Select all, download remaining, idempotent enqueue, and quota parity across both UIs (Steps 1 to 9)
-- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; `v0.2.0` covers `SETTINGS_TABS`—tabbed settings, settings parity, ZIP extraction options, tab-switch animations, and fixed-width linked-folders scrollbar; `v0.3.0` covers `USER_THEMES`—file-based TOML themes, 13 built-in themes including Catppuccin Mocha/Macchiato/Frappé/Latte, swatch picker, live editor, import/export/drop/delete, and `docs/themes.md`; current HEAD is `v0.3.0`).
+- Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; `v0.2.0` covers `SETTINGS_TABS`—tabbed settings, settings parity, ZIP extraction options, tab-switch animations, and fixed-width linked-folders scrollbar; `v0.3.0` covers `USER_THEMES`—file-based TOML themes, 13 built-in themes including Catppuccin Mocha/Macchiato/Frappé/Latte, swatch picker, live editor, import/export/drop/delete, and `docs/themes.md`; `v0.4.0` covers `DOWNLOAD_FLOW`—select all, download remaining, idempotent enqueue, quota parity across both UIs, layered Unicode fallback fonts, and `Settings::mark_invisible_chars`; current HEAD is `v0.4.0`).
 
 ## Open questions (needs the user)
 - 2026-11-13: When ZIP extraction fails, the job fails, the ZIP stays on disk, and the release is not marked downloaded (failed attempt recorded in history). Should the release instead be marked downloaded with `local_path` at the ZIP and a warning? (Not changed by `SETTINGS_TABS`; blocking? no)
