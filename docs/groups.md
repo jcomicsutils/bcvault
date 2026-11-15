@@ -1,46 +1,30 @@
-# Artist Groups
+# Artist Groups & Grouping Sets
 
-`bcvault` and `bcvault-fx` support collapsible sidebar artist groups backed by `bcvault.db` (schema v9: `artist_groups` and `artist_group_pins`). Groups can be populated manually, automatically via live rules, or with a combination of both.
-
----
-
-## Placement Precedence
-
-Every artist appears in at most one sidebar section, evaluated in strict order:
-
-1. **Manual group pin** (`artist_group_pins` with a `group_id`) — always places the artist in that group, overriding any rules.
-2. **Manual Ungrouped pin** (`artist_group_pins` with `group_id = NULL`) — keeps the artist in **Ungrouped**, even if a rule would otherwise match it.
-3. **First matching rule** — groups are evaluated in their `sort_order` (then `id`); the first group whose `GroupRule` matches the artist claims it.
-4. **Ungrouped** — fallback when no pin or rule matches.
-
-Removing an artist automatically removes any manual pin for that artist (`ON DELETE CASCADE`).
+`bcvault` and `bcvault-fx` support non-destructive sidebar **Grouping Sets** and **Built-in Automatic Groupings** backed by `bcvault.db` (schema v9: `artist_group_sets`, `artist_groups`, and `artist_group_pins`).
 
 ---
 
-## Rule Conditions & Presets
+## Sidebar Grouping Switcher
 
-Each group can optionally carry a `GroupRule` with:
-- **Match mode**: `All` (every condition must match) or `Any` (at least one condition must match).
-- **Conditions** (each supports a `Not` / `negate` toggle):
-  - **Name contains** / **Name starts with**: accent- and case-insensitive substring/prefix match against the artist's display name.
-  - **URL contains**: case-insensitive substring match against the artist's Bandcamp URL.
-  - **Download state**: `NoneDownloaded`, `HasRemaining` (eligible releases left to download), or `AllDownloaded`.
-  - **Library state**: `Unlinked` (no linked folders), `Linked` (at least one linked folder), `HasIssues` (missing, unavailable, or pending review), or `Clean` (linked with no issues).
-  - **At least N releases**: matches artists with `total >= min`.
+Use the **Grouping** dropdown at the top of the sidebar to switch non-destructively at any time between:
 
-The Group Editor also includes one-click presets:
-- **Needs Attention** — artists with library issues (`LibraryState::HasIssues`).
-- **Remaining Free** — artists with eligible releases not yet downloaded (`DownloadState::HasRemaining`).
-- **Unlinked Artists** — artists without linked local folders (`LibraryState::Unlinked`).
+- **No Grouping** — flat artist list with no group headers.
+- **Built-in (Automatic)** — zero-setup dynamic groupings computed on the fly:
+  - **First Letter (A–Z)** — collapsible `A`–`Z` and `#` buckets (accent-folded).
+  - **Download Status** — `Remaining Free`, `All Downloaded`, `Nothing Downloaded`.
+  - **Library Status** — `Needs Attention` (missing files or folder errors), `Linked & Clean`, `Unlinked`.
+  - **Pricing Makeup** — `100% Free / NYP`, `Email-Gated`, `Mixed (Free + Paid)`, `Paid Only`, `Empty / Unsynced`.
+  - **Discography Size** — `Large (20+ releases)`, `Medium (5–19 releases)`, `Small (1–4 releases)`, `Empty (0 releases)`.
+  - **Sync Freshness** — `Never Synced`, `Recent (<= 7 days)`, `7–30 Days Ago`, `Stale (> 30 days)`.
+  - **Archive Status** — `Fully Archived`, `Partially Archived`, `Active on Disk`, `Nothing Downloaded`.
+- **Custom Group Sets** — user-created named sets (for example, a `"Workflow"` set with `"Finished"`, `"Planned"`, and `"Waiting for Free Downloads"`). Switching to a built-in mode or another Group Set never modifies or deletes your saved groups or artist placements.
 
 ---
 
-## Using Groups in the UI
+## Multi-Artist Selection & Group Actions
 
-- **Create / Edit**: Use **+ Group** in the sidebar (or `New artist group` / `Edit artist group` in the `bcvault-fx` command palette). The Group Editor shows a live preview of which artists match the current rule and notes any manually pinned artists.
-- **Move artists**: Right-click an artist row to **Move to group…**, **Move to Ungrouped**, or **Clear manual placement** (returning rule control). You can also drag-and-drop an artist row directly onto any group header or the **Ungrouped** header.
-- **Group actions**: Right-click any group header (or **Ungrouped**) to:
-  - **Sync group** (syncs all current members)
-  - **Download remaining** (queues remaining eligible releases for all members, subject to quota warnings)
-  - **View group releases** (filters the release list/wall to all members via `ReleaseQuery.band_ids`; in Classic you can also multi-select artists in a group)
-  - **Edit group** / **Delete group** (deleting a group removes its pins and returns rule-matched artists to the remaining groups or Ungrouped)
+In both `bcvault-fx` and `bcvault` (Classic):
+
+- **Multi-select artists**: Use `Ctrl+Click` (or `Cmd+Click`) to toggle individual artists, and `Shift+Click` to select a range of visible artists.
+- **Move artists**: Drag selected artist row(s) onto any group header or **Ungrouped**, right-click to use **Move to group**, or use the searchable artist checklist inside **+Grp** / **Edit group & members...**.
+- **Group actions**: Right-click any built-in or custom group header to **Sync group**, **Download remaining for group**, **Select artists in group**, or **View releases of group** (filters the release list/wall to all members via `ReleaseQuery.band_ids`). Custom group headers also support **Edit group & members...**, **Move up** / **Move down**, and **Delete group...**.

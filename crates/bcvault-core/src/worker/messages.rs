@@ -1,4 +1,4 @@
-use crate::groups::{ArtistGroup, GroupRule, PinTarget};
+use crate::groups::{ActiveGrouping, ArtistGroup, ArtistGroupSet, PinTarget};
 use crate::types::{
     ArtistStats, ArtistView, DownloadOpts, EnqueueMode, ItemKey, JobId, JobState, JobView,
     LogEntry, RateLimitStatus, ReleaseQuery, ReleaseRow, RemainingScope, Settings, SyncMode,
@@ -124,19 +124,34 @@ pub enum UiToWorkerCommand {
     },
     CancelLibrary,
     // artist groups
-    CreateArtistGroup {
+    SetActiveGrouping {
+        grouping: ActiveGrouping,
+    },
+    CreateArtistGroupSet {
         name: String,
-        rule: Option<GroupRule>,
+    },
+    RenameArtistGroupSet {
+        id: i64,
+        name: String,
+    },
+    DeleteArtistGroupSet {
+        id: i64,
+    },
+    CreateArtistGroup {
+        set_id: Option<i64>,
+        name: String,
+        member_ids: Vec<i64>,
     },
     UpdateArtistGroup {
         id: i64,
         name: String,
-        rule: Option<GroupRule>,
+        member_ids: Vec<i64>,
     },
     DeleteArtistGroup {
         id: i64,
     },
     ReorderArtistGroups {
+        set_id: i64,
         ids: Vec<i64>,
     },
     SetArtistGroupCollapsed {
@@ -144,6 +159,7 @@ pub enum UiToWorkerCommand {
         collapsed: bool,
     },
     PinArtists {
+        set_id: i64,
         band_ids: Vec<i64>,
         target: PinTarget,
     },
@@ -158,8 +174,10 @@ pub enum WorkerToUiEvent {
         artists: Vec<ArtistView>,
         settings: Settings,
         folders: Vec<crate::types::ArtistFolder>,
+        active_grouping: ActiveGrouping,
+        group_sets: Vec<ArtistGroupSet>,
         groups: Vec<ArtistGroup>,
-        pins: HashMap<i64, Option<i64>>,
+        pins: HashMap<i64, i64>,
     },
     SettingsUpdated(Settings),
     ArtistUpserted(ArtistView),
@@ -245,8 +263,10 @@ pub enum WorkerToUiEvent {
         prompt: bool,
     },
     ArtistGroupsChanged {
+        active_grouping: ActiveGrouping,
+        group_sets: Vec<ArtistGroupSet>,
         groups: Vec<ArtistGroup>,
-        pins: HashMap<i64, Option<i64>>,
+        pins: HashMap<i64, i64>,
     },
     ArtistGroupError {
         message: String,

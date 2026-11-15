@@ -33,12 +33,35 @@ pub fn run(conn: &mut Connection) -> Result<(), DbError> {
 
 pub fn run_with(conn: &mut Connection, migrations: &[(i32, &str)]) -> Result<(), DbError> {
     let max_version = migrations.iter().map(|(v, _)| *v).max().unwrap_or(0);
-    let current_version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let mut current_version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if current_version > max_version {
         return Err(DbError::TooNew {
             found: current_version,
             max_supported: max_version,
         });
+    }
+
+    // Repair local dev databases that applied the pre-rework 0009 schema before
+    // artist_group_sets was introduced on this unmerged branch.
+    if current_version == 9
+        && migrations
+            .iter()
+            .any(|(v, sql)| *v == 9 && sql.contains("artist_group_sets"))
+    {
+        let has_sets: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artist_group_sets')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_sets {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS artist_group_pins;\nDROP TABLE IF EXISTS artist_groups;",
+            )?;
+            tx.pragma_update(None, "user_version", 8)?;
+            tx.commit()?;
+            current_version = 8;
+        }
     }
 
     for &(version, sql) in migrations {
@@ -393,5 +416,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cnt_after, 0);
+    }
+
+    #[test]
+    fn migration_9_repairs_pre_rework_v9_schema_without_group_sets() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_with(&mut conn, &MIGRATIONS[..8]).unwrap();
+
+        conn.execute_batch(
+            "CREATE TABLE artist_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                pos INTEGER NOT NULL,
+                collapsed INTEGER NOT NULL DEFAULT 0,
+                rules_json TEXT NOT NULL DEFAULT '[]'
+            ) STRICT;
+            CREATE TABLE artist_group_pins (
+                band_id INTEGER PRIMARY KEY REFERENCES artists(band_id) ON DELETE CASCADE,
+                group_id INTEGER REFERENCES artist_groups(id) ON DELETE CASCADE
+            ) STRICT;
+            PRAGMA user_version = 9;",
+        )
+        .unwrap();
+
+        run(&mut conn).unwrap();
+
+        let has_sets: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artist_group_sets')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(has_sets);
+
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
     }
 }

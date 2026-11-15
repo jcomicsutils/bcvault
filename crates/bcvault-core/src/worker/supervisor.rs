@@ -99,9 +99,9 @@ impl Supervisor {
             .await
             .unwrap_or_default();
 
-        let (initial_groups, initial_pins) = pool
+        let (initial_grouping, initial_sets, initial_groups, initial_pins) = pool
             .reader
-            .call(|c| Ok((groups_repo::list_groups(c)?, groups_repo::list_pins(c)?)))
+            .call(load_group_snapshot)
             .await
             .unwrap_or_default();
 
@@ -111,6 +111,8 @@ impl Supervisor {
             artists: initial_artists,
             settings: initial_settings,
             folders: initial_folders.clone(),
+            active_grouping: initial_grouping,
+            group_sets: initial_sets,
             groups: initial_groups,
             pins: initial_pins,
         });
@@ -184,15 +186,18 @@ impl Supervisor {
                         .writer
                         .call(move |c| {
                             artists::delete(c, band_id)?;
-                            let groups = groups_repo::list_groups(c)?;
-                            let pins = groups_repo::list_pins(c)?;
-                            Ok((groups, pins))
+                            load_group_snapshot(c)
                         })
                         .await;
                     match res {
-                        Ok((groups, pins)) => {
+                        Ok((active_grouping, group_sets, groups, pins)) => {
                             bridge.emit(WorkerToUiEvent::ArtistRemoved { band_id });
-                            bridge.emit(WorkerToUiEvent::ArtistGroupsChanged { groups, pins });
+                            bridge.emit(WorkerToUiEvent::ArtistGroupsChanged {
+                                active_grouping,
+                                group_sets,
+                                groups,
+                                pins,
+                            });
                         }
                         Err(e) => {
                             bridge.log(
@@ -590,29 +595,89 @@ impl Supervisor {
                 self.library_cancel.cancel();
                 self.library_cancel = self.root_cancel.child_token();
             }
-            UiToWorkerCommand::CreateArtistGroup { name, rule } => {
+            UiToWorkerCommand::SetActiveGrouping { grouping } => {
+                self.run_group_write(move |c| groups_repo::set_active_grouping(c, grouping));
+            }
+            UiToWorkerCommand::CreateArtistGroupSet { name } => {
                 self.run_group_write(move |c| {
-                    groups_repo::create_group(c, &name, rule.as_ref())?;
+                    let set = groups_repo::create_group_set(c, &name)?;
+                    groups_repo::set_active_grouping(
+                        c,
+                        crate::groups::ActiveGrouping::CustomSet(set.id),
+                    )?;
                     Ok(())
                 });
             }
-            UiToWorkerCommand::UpdateArtistGroup { id, name, rule } => {
+            UiToWorkerCommand::RenameArtistGroupSet { id, name } => {
+                self.run_group_write(move |c| groups_repo::rename_group_set(c, id, &name));
+            }
+            UiToWorkerCommand::DeleteArtistGroupSet { id } => {
+                self.run_group_write(move |c| groups_repo::delete_group_set(c, id));
+            }
+            UiToWorkerCommand::CreateArtistGroup {
+                set_id,
+                name,
+                member_ids,
+            } => {
                 self.run_group_write(move |c| {
-                    groups_repo::update_group(c, id, &name, rule.as_ref())?;
+                    let target_set_id = if let Some(sid) = set_id {
+                        sid
+                    } else if let crate::groups::ActiveGrouping::CustomSet(sid) =
+                        groups_repo::get_active_grouping(c)?
+                    {
+                        sid
+                    } else if let Some(first) = groups_repo::list_group_sets(c)?.first() {
+                        groups_repo::set_active_grouping(
+                            c,
+                            crate::groups::ActiveGrouping::CustomSet(first.id),
+                        )?;
+                        first.id
+                    } else {
+                        let created = groups_repo::create_group_set(c, "Custom Groups")?;
+                        groups_repo::set_active_grouping(
+                            c,
+                            crate::groups::ActiveGrouping::CustomSet(created.id),
+                        )?;
+                        created.id
+                    };
+                    let g = groups_repo::create_group(c, target_set_id, &name)?;
+                    if !member_ids.is_empty() {
+                        groups_repo::set_pins(
+                            c,
+                            target_set_id,
+                            &member_ids,
+                            crate::groups::PinTarget::Group(g.id),
+                        )?;
+                    }
+                    Ok(())
+                });
+            }
+            UiToWorkerCommand::UpdateArtistGroup {
+                id,
+                name,
+                member_ids,
+            } => {
+                self.run_group_write(move |c| {
+                    let set_id = groups_repo::update_group(c, id, &name)?;
+                    groups_repo::replace_group_members(c, set_id, id, &member_ids)?;
                     Ok(())
                 });
             }
             UiToWorkerCommand::DeleteArtistGroup { id } => {
                 self.run_group_write(move |c| groups_repo::delete_group(c, id));
             }
-            UiToWorkerCommand::ReorderArtistGroups { ids } => {
-                self.run_group_write(move |c| groups_repo::reorder_groups(c, &ids));
+            UiToWorkerCommand::ReorderArtistGroups { set_id, ids } => {
+                self.run_group_write(move |c| groups_repo::reorder_groups(c, set_id, &ids));
             }
             UiToWorkerCommand::SetArtistGroupCollapsed { id, collapsed } => {
                 self.run_group_write(move |c| groups_repo::set_collapsed(c, id, collapsed));
             }
-            UiToWorkerCommand::PinArtists { band_ids, target } => {
-                self.run_group_write(move |c| groups_repo::set_pins(c, &band_ids, target));
+            UiToWorkerCommand::PinArtists {
+                set_id,
+                band_ids,
+                target,
+            } => {
+                self.run_group_write(move |c| groups_repo::set_pins(c, set_id, &band_ids, target));
             }
             UiToWorkerCommand::UpdateSettings(mut new_settings) => {
                 new_settings.sanitize();
@@ -667,14 +732,17 @@ impl Supervisor {
                 .writer
                 .call(move |c| {
                     op(c)?;
-                    let groups = groups_repo::list_groups(c)?;
-                    let pins = groups_repo::list_pins(c)?;
-                    Ok((groups, pins))
+                    load_group_snapshot(c)
                 })
                 .await;
             match res {
-                Ok((groups, pins)) => {
-                    bridge.emit(WorkerToUiEvent::ArtistGroupsChanged { groups, pins });
+                Ok((active_grouping, group_sets, groups, pins)) => {
+                    bridge.emit(WorkerToUiEvent::ArtistGroupsChanged {
+                        active_grouping,
+                        group_sets,
+                        groups,
+                        pins,
+                    });
                 }
                 Err(e) => {
                     let message = e.to_string();
@@ -686,12 +754,33 @@ impl Supervisor {
     }
 }
 
+type GroupSnapshot = (
+    crate::groups::ActiveGrouping,
+    Vec<crate::groups::ArtistGroupSet>,
+    Vec<crate::groups::ArtistGroup>,
+    std::collections::HashMap<i64, i64>,
+);
+
+fn load_group_snapshot(c: &mut rusqlite::Connection) -> Result<GroupSnapshot, DbError> {
+    let active_grouping = groups_repo::get_active_grouping(c)?;
+    let group_sets = groups_repo::list_group_sets(c)?;
+    let (groups, pins) = if let crate::groups::ActiveGrouping::CustomSet(set_id) = active_grouping {
+        (
+            groups_repo::list_groups(c, set_id)?,
+            groups_repo::list_pins(c, set_id)?,
+        )
+    } else {
+        (Vec::new(), std::collections::HashMap::new())
+    };
+    Ok((active_grouping, group_sets, groups, pins))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::bandcamp::gate::BandcampGate;
-    use crate::groups::{Condition, ConditionKind, GroupRule, MatchMode, PinTarget};
+    use crate::groups::{ActiveGrouping, BuiltinGrouping, PinTarget};
     use tokio::sync::mpsc::unbounded_channel;
 
     async fn next_group_event(rx: &mut UnboundedReceiver<WorkerToUiEvent>) -> WorkerToUiEvent {
@@ -753,25 +842,46 @@ mod tests {
             .unwrap()
             .unwrap();
         match ready {
-            WorkerToUiEvent::Ready { groups, pins, .. } => {
+            WorkerToUiEvent::Ready {
+                active_grouping,
+                group_sets,
+                groups,
+                pins,
+                ..
+            } => {
+                assert_eq!(active_grouping, ActiveGrouping::None);
+                assert!(group_sets.is_empty());
                 assert!(groups.is_empty());
                 assert!(pins.is_empty());
             }
             other => panic!("expected Ready, got {other:?}"),
         }
 
-        // Create group
-        let rule = GroupRule {
-            mode: MatchMode::All,
-            conditions: vec![Condition {
-                negate: false,
-                kind: ConditionKind::NeverSynced,
-            }],
+        // Create group set + group
+        cmd_tx
+            .send(UiToWorkerCommand::CreateArtistGroupSet {
+                name: "Workflow".into(),
+            })
+            .unwrap();
+        let set_id = match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged {
+                active_grouping,
+                group_sets,
+                ..
+            } => {
+                assert_eq!(group_sets.len(), 1);
+                assert_eq!(group_sets[0].name, "Workflow");
+                assert_eq!(active_grouping, ActiveGrouping::CustomSet(group_sets[0].id));
+                group_sets[0].id
+            }
+            other => panic!("unexpected event: {other:?}"),
         };
+
         cmd_tx
             .send(UiToWorkerCommand::CreateArtistGroup {
+                set_id: Some(set_id),
                 name: "Ambient".into(),
-                rule: Some(rule),
+                member_ids: vec![],
             })
             .unwrap();
         let gid = match next_group_event(&mut ev_rx).await {
@@ -786,8 +896,9 @@ mod tests {
         // Invalid create surfaces ArtistGroupError
         cmd_tx
             .send(UiToWorkerCommand::CreateArtistGroup {
+                set_id: Some(set_id),
                 name: "   ".into(),
-                rule: None,
+                member_ids: vec![],
             })
             .unwrap();
         match next_group_event(&mut ev_rx).await {
@@ -797,7 +908,7 @@ mod tests {
             other => panic!("expected ArtistGroupError, got {other:?}"),
         }
 
-        // Collapse + Pin + RemoveArtist
+        // Collapse + Pin + Non-destructive switch + RemoveArtist
         cmd_tx
             .send(UiToWorkerCommand::SetArtistGroupCollapsed {
                 id: gid,
@@ -813,13 +924,56 @@ mod tests {
 
         cmd_tx
             .send(UiToWorkerCommand::PinArtists {
+                set_id,
                 band_ids: vec![42],
                 target: PinTarget::Group(gid),
             })
             .unwrap();
         match next_group_event(&mut ev_rx).await {
             WorkerToUiEvent::ArtistGroupsChanged { pins, .. } => {
-                assert_eq!(pins.get(&42), Some(&Some(gid)));
+                assert_eq!(pins.get(&42), Some(&gid));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // Switch to FirstLetter, then back to CustomSet(set_id) non-destructively
+        cmd_tx
+            .send(UiToWorkerCommand::SetActiveGrouping {
+                grouping: ActiveGrouping::Builtin(BuiltinGrouping::FirstLetter),
+            })
+            .unwrap();
+        match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged {
+                active_grouping,
+                groups,
+                pins,
+                ..
+            } => {
+                assert_eq!(
+                    active_grouping,
+                    ActiveGrouping::Builtin(BuiltinGrouping::FirstLetter)
+                );
+                assert!(groups.is_empty());
+                assert!(pins.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        cmd_tx
+            .send(UiToWorkerCommand::SetActiveGrouping {
+                grouping: ActiveGrouping::CustomSet(set_id),
+            })
+            .unwrap();
+        match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged {
+                active_grouping,
+                groups,
+                pins,
+                ..
+            } => {
+                assert_eq!(active_grouping, ActiveGrouping::CustomSet(set_id));
+                assert_eq!(groups.len(), 1);
+                assert_eq!(pins.get(&42), Some(&gid));
             }
             other => panic!("unexpected event: {other:?}"),
         }

@@ -1,21 +1,21 @@
 use crate::ui::{state::UiState, theme::pal, widgets::sharp_button};
 use bcvault_core::{
     groups::{
-        ArtistGroup, Condition, ConditionKind, DownloadState, GroupError, GroupRule, LibraryState,
-        MAX_GROUPS, MAX_RULE_CONDITIONS, MatchMode, RulePreset, preview_rule, validate_group_name,
+        ActiveGrouping, ArtistGroup, ArtistGroupSet, GroupError, MAX_GROUP_SETS, MAX_GROUPS,
+        artist_matches_filter, validate_group_name,
     },
     worker::messages::UiToWorkerCommand,
 };
-use egui::{Align2, Context, Order, RichText, Ui};
+use egui::{Align2, Context, Order, RichText};
+use std::collections::{BTreeSet, HashMap};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Debug)]
 pub struct GroupEditorState {
     pub editing_id: Option<i64>,
     pub name: String,
-    pub is_automatic: bool,
-    pub rule: GroupRule,
-    pub pending_pin_ids: Vec<i64>,
+    pub artist_filter: String,
+    pub selected_members: BTreeSet<i64>,
 }
 
 impl GroupEditorState {
@@ -23,40 +23,21 @@ impl GroupEditorState {
         Self {
             editing_id: None,
             name: String::new(),
-            is_automatic: false,
-            rule: GroupRule {
-                mode: MatchMode::All,
-                conditions: vec![Condition {
-                    negate: false,
-                    kind: ConditionKind::NameContains(String::new()),
-                }],
-            },
-            pending_pin_ids,
+            artist_filter: String::new(),
+            selected_members: pending_pin_ids.into_iter().collect(),
         }
     }
 
-    pub fn from_group(group: &ArtistGroup) -> Self {
-        let is_automatic = group.rule.is_some();
-        let rule = group.rule.clone().unwrap_or_else(|| GroupRule {
-            mode: MatchMode::All,
-            conditions: vec![Condition {
-                negate: false,
-                kind: ConditionKind::NameContains(String::new()),
-            }],
-        });
+    pub fn from_group(group: &ArtistGroup, current_members: &[i64]) -> Self {
         Self {
             editing_id: Some(group.id),
             name: group.name.clone(),
-            is_automatic,
-            rule,
-            pending_pin_ids: Vec::new(),
+            artist_filter: String::new(),
+            selected_members: current_members.iter().copied().collect(),
         }
     }
 
-    pub fn validate(
-        &self,
-        existing_groups: &[ArtistGroup],
-    ) -> Result<(String, Option<GroupRule>), String> {
+    pub fn validate(&self, existing_groups: &[ArtistGroup]) -> Result<String, String> {
         let name = validate_group_name(&self.name).map_err(|e| e.to_string())?;
         if self.editing_id.is_none() && existing_groups.len() >= MAX_GROUPS {
             return Err(GroupError::TooManyGroups { max: MAX_GROUPS }.to_string());
@@ -67,13 +48,52 @@ impl GroupEditorState {
         if dup {
             return Err(GroupError::DuplicateName(name).to_string());
         }
-        let rule = if self.is_automatic {
-            self.rule.validate().map_err(|e| e.to_string())?;
-            Some(self.rule.clone())
-        } else {
-            None
-        };
-        Ok((name, rule))
+        Ok(name)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupSetModalState {
+    pub editing_id: Option<i64>,
+    pub name: String,
+}
+
+impl GroupSetModalState {
+    pub fn new() -> Self {
+        Self {
+            editing_id: None,
+            name: String::new(),
+        }
+    }
+
+    pub fn rename(set: &ArtistGroupSet) -> Self {
+        Self {
+            editing_id: Some(set.id),
+            name: set.name.clone(),
+        }
+    }
+
+    pub fn validate(&self, existing_sets: &[ArtistGroupSet]) -> Result<String, String> {
+        let name = validate_group_name(&self.name).map_err(|e| e.to_string())?;
+        if self.editing_id.is_none() && existing_sets.len() >= MAX_GROUP_SETS {
+            return Err(GroupError::TooManyGroupSets {
+                max: MAX_GROUP_SETS,
+            }
+            .to_string());
+        }
+        let dup = existing_sets
+            .iter()
+            .any(|s| Some(s.id) != self.editing_id && s.name.eq_ignore_ascii_case(&name));
+        if dup {
+            return Err(GroupError::DuplicateSetName(name).to_string());
+        }
+        Ok(name)
+    }
+}
+
+impl Default for GroupSetModalState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -97,10 +117,10 @@ pub fn show_group_editor_modal(
         .order(Order::Foreground)
         .collapsible(false)
         .resizable(false)
-        .max_size([620.0, 560.0])
+        .max_size([540.0, 560.0])
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.set_min_width(520.0);
+            ui.set_min_width(460.0);
 
             ui.horizontal(|ui| {
                 ui.label("Name:");
@@ -111,167 +131,130 @@ pub fn show_group_editor_modal(
                 );
             });
 
+            ui.separator();
+
+            let group_names: HashMap<i64, &str> = state
+                .groups
+                .iter()
+                .map(|g| (g.id, g.name.as_str()))
+                .collect();
+            let filter_lower = editor.artist_filter.trim().to_lowercase();
+            let visible_ids: Vec<i64> = state
+                .artists
+                .iter()
+                .filter(|a| artist_matches_filter(a, &filter_lower))
+                .map(|a| a.band_id)
+                .collect();
+
             ui.horizontal(|ui| {
-                ui.label("Kind:");
-                if ui.radio(!editor.is_automatic, "Manual").clicked() {
-                    editor.is_automatic = false;
+                ui.label(
+                    RichText::new(format!(
+                        "Artists ({} selected)",
+                        editor.selected_members.len()
+                    ))
+                    .strong()
+                    .color(pal::TEXT),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.artist_filter)
+                        .hint_text("Filter artists...")
+                        .desired_width(170.0),
+                );
+                if sharp_button(ui, "Select visible").clicked() {
+                    for id in &visible_ids {
+                        editor.selected_members.insert(*id);
+                    }
                 }
-                if ui.radio(editor.is_automatic, "Automatic (rules)").clicked() {
-                    editor.is_automatic = true;
+                if sharp_button(ui, "Clear").clicked() {
+                    editor.selected_members.clear();
                 }
             });
 
-            if !editor.pending_pin_ids.is_empty() {
-                ui.label(
-                    RichText::new(format!(
-                        "{} selected artist(s) will be placed in this group.",
-                        editor.pending_pin_ids.len()
-                    ))
-                    .color(pal::TEXT_DIM),
-                );
-            }
-
-            ui.separator();
-
-            if editor.is_automatic {
-                ui.horizontal(|ui| {
-                    ui.label("Match:");
-                    ui.selectable_value(&mut editor.rule.mode, MatchMode::All, "All conditions");
-                    ui.selectable_value(&mut editor.rule.mode, MatchMode::Any, "Any condition");
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button("Presets", |ui| {
-                            for preset in RulePreset::ALL {
-                                if sharp_button(ui, preset.label()).clicked() {
-                                    let (preset_name, preset_rule) = preset.build();
-                                    if editor.name.trim().is_empty() {
-                                        editor.name = preset_name.to_string();
+            ui.add_space(4.0);
+            egui::Frame::NONE
+                .fill(pal::BG0)
+                .stroke(egui::Stroke::new(1.0_f32, pal::BORDER))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            if state.artists.is_empty() {
+                                ui.label(RichText::new("No artists yet.").color(pal::TEXT_DIM));
+                            } else if visible_ids.is_empty() {
+                                ui.label(
+                                    RichText::new("No artists match the filter.")
+                                        .color(pal::TEXT_DIM),
+                                );
+                            } else {
+                                for artist in &state.artists {
+                                    if !artist_matches_filter(artist, &filter_lower) {
+                                        continue;
                                     }
-                                    editor.rule = preset_rule;
-                                    ui.close();
+                                    let mut checked =
+                                        editor.selected_members.contains(&artist.band_id);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .checkbox(&mut checked, artist.display_name())
+                                            .changed()
+                                        {
+                                            if checked {
+                                                editor.selected_members.insert(artist.band_id);
+                                            } else {
+                                                editor.selected_members.remove(&artist.band_id);
+                                            }
+                                        }
+                                        if let Some(&other_gid) = state.pins.get(&artist.band_id)
+                                            && Some(other_gid) != editor.editing_id
+                                            && let Some(other_name) = group_names.get(&other_gid)
+                                        {
+                                            ui.label(
+                                                RichText::new(format!("[in {other_name}]"))
+                                                    .size(11.0)
+                                                    .color(pal::TEXT_DIM),
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         });
-                    });
                 });
-
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        let mut remove_idx: Option<usize> = None;
-                        for idx in 0..editor.rule.conditions.len() {
-                            ui.horizontal(|ui| {
-                                draw_condition_row(ui, idx, &mut editor.rule.conditions[idx]);
-                                if sharp_button(ui, "x").clicked() {
-                                    remove_idx = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(idx) = remove_idx {
-                            editor.rule.conditions.remove(idx);
-                        }
-                    });
-
-                ui.horizontal(|ui| {
-                    let can_add = editor.rule.conditions.len() < MAX_RULE_CONDITIONS;
-                    if ui
-                        .add_enabled(
-                            can_add,
-                            egui::Button::new("+ Add condition")
-                                .corner_radius(egui::CornerRadius::ZERO),
-                        )
-                        .clicked()
-                    {
-                        editor.rule.conditions.push(Condition {
-                            negate: false,
-                            kind: ConditionKind::NameContains(String::new()),
-                        });
-                    }
-                    ui.label(
-                        RichText::new(format!(
-                            "{}/{} conditions",
-                            editor.rule.conditions.len(),
-                            MAX_RULE_CONDITIONS
-                        ))
-                        .size(11.0)
-                        .color(pal::TEXT_DIM),
-                    );
-                });
-
-                ui.separator();
-
-                // Live preview
-                let now = chrono::Utc::now().timestamp();
-                let preview = preview_rule(
-                    &editor.rule,
-                    &state.artists,
-                    &state.pins,
-                    &state.folders,
-                    now,
-                    editor.editing_id,
-                );
-                let preview_line = if preview.pinned_elsewhere > 0 {
-                    format!(
-                        "Matches {} artists ({} are placed elsewhere by hand)",
-                        preview.total_matching, preview.pinned_elsewhere
-                    )
-                } else {
-                    format!("Matches {} artists", preview.total_matching)
-                };
-                ui.label(RichText::new(preview_line).strong());
-                if !preview.sample_names.is_empty() {
-                    ui.label(
-                        RichText::new(preview.sample_names.join(", "))
-                            .size(11.0)
-                            .color(pal::TEXT_DIM),
-                    );
-                }
-            } else {
-                ui.label(
-                    RichText::new("Manual groups only contain artists you move into them by hand.")
-                        .color(pal::TEXT_DIM),
-                );
-            }
-
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Artists you move by hand always stay where you put them. Groups higher in the list win when several rules match.")
-                    .size(11.0)
-                    .color(pal::TEXT_DIM),
-            );
 
             let validation = editor.validate(&state.groups);
             if let Err(err) = &validation {
-                ui.colored_label(pal::ERR, err);
+                ui.add_space(4.0);
+                ui.label(RichText::new(err).color(pal::ERR));
             }
-            if let Some(err) = &state.group_error {
-                ui.colored_label(pal::ERR, err);
+            if let Some(server_err) = &state.group_error {
+                ui.add_space(2.0);
+                ui.label(RichText::new(server_err).color(pal::ERR));
             }
 
             ui.separator();
             ui.horizontal(|ui| {
-                let valid = validation.is_ok();
+                let can_save = validation.is_ok();
                 if ui
-                    .add_enabled(
-                        valid,
-                        egui::Button::new("Save").corner_radius(egui::CornerRadius::ZERO),
-                    )
+                    .add_enabled(can_save, egui::Button::new("Save"))
                     .clicked()
-                    && let Ok((name, rule)) = validation
+                    && let Ok(name) = validation
                 {
+                    let member_ids: Vec<i64> = editor.selected_members.iter().copied().collect();
                     if let Some(id) = editor.editing_id {
                         let _ = cmd_tx.send(UiToWorkerCommand::UpdateArtistGroup {
                             id,
                             name,
-                            rule,
+                            member_ids,
                         });
                     } else {
-                        if !editor.pending_pin_ids.is_empty() {
-                            state.pending_group_pins =
-                                Some((name.clone(), editor.pending_pin_ids.clone()));
-                        }
-                        let _ = cmd_tx.send(UiToWorkerCommand::CreateArtistGroup { name, rule });
+                        let set_id = match state.active_grouping {
+                            ActiveGrouping::CustomSet(sid) => Some(sid),
+                            _ => None,
+                        };
+                        let _ = cmd_tx.send(UiToWorkerCommand::CreateArtistGroup {
+                            set_id,
+                            name,
+                            member_ids,
+                        });
                     }
                     keep_open = false;
                 }
@@ -286,140 +269,66 @@ pub fn show_group_editor_modal(
     }
 }
 
-fn draw_condition_row(ui: &mut Ui, idx: usize, cond: &mut Condition) {
-    ui.checkbox(&mut cond.negate, "not");
+pub fn show_group_set_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    esc: bool,
+) {
+    let Some(mut modal) = state.group_set_modal.take() else {
+        return;
+    };
+    let mut keep_open = !esc;
+    let title = if modal.editing_id.is_some() {
+        "Rename Grouping Set"
+    } else {
+        "New Grouping Set"
+    };
 
-    let current_label = cond.kind.label();
-    egui::ComboBox::from_id_salt(("classic_cond_kind", idx))
-        .selected_text(current_label)
-        .width(160.0)
-        .show_ui(ui, |ui| {
-            let variants: [(&str, ConditionKind); 9] = [
-                ("Name contains", ConditionKind::NameContains(String::new())),
-                (
-                    "Name starts with",
-                    ConditionKind::NameStartsWith(String::new()),
-                ),
-                (
-                    "Name initial range",
-                    ConditionKind::NameInitial { from: 'a', to: 'f' },
-                ),
-                (
-                    "Downloads",
-                    ConditionKind::Downloads(DownloadState::HasRemaining),
-                ),
-                ("Library", ConditionKind::Library(LibraryState::NoFolder)),
-                (
-                    "Synced older than (days)",
-                    ConditionKind::SyncedOlderThanDays(30),
-                ),
-                ("Never synced", ConditionKind::NeverSynced),
-                (
-                    "Total releases",
-                    ConditionKind::TotalReleases {
-                        at_least: Some(1),
-                        at_most: None,
-                    },
-                ),
-                ("Custom domain", ConditionKind::CustomDomain(true)),
-            ];
-            for (label, default_kind) in variants {
-                let selected =
-                    std::mem::discriminant(&cond.kind) == std::mem::discriminant(&default_kind);
-                if ui.selectable_label(selected, label).clicked() && !selected {
-                    cond.kind = default_kind;
-                }
+    egui::Window::new(title)
+        .order(Order::Foreground)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            ui.horizontal(|ui| {
+                ui.label("Set name:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut modal.name)
+                        .hint_text("e.g. Workflow, Favorites")
+                        .desired_width(240.0),
+                );
+            });
+            let validation = modal.validate(&state.group_sets);
+            if let Err(err) = &validation {
+                ui.label(RichText::new(err).color(pal::ERR));
             }
+            if let Some(server_err) = &state.group_error {
+                ui.label(RichText::new(server_err).color(pal::ERR));
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(validation.is_ok(), egui::Button::new("Save"))
+                    .clicked()
+                    && let Ok(name) = validation
+                {
+                    if let Some(id) = modal.editing_id {
+                        let _ = cmd_tx.send(UiToWorkerCommand::RenameArtistGroupSet { id, name });
+                    } else {
+                        let _ = cmd_tx.send(UiToWorkerCommand::CreateArtistGroupSet { name });
+                    }
+                    keep_open = false;
+                }
+                if sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
         });
 
-    match &mut cond.kind {
-        ConditionKind::NameContains(s) | ConditionKind::NameStartsWith(s) => {
-            ui.add(egui::TextEdit::singleline(s).desired_width(150.0));
-        }
-        ConditionKind::NameInitial { from, to } => {
-            let mut is_hash = *from == '#' && *to == '#';
-            if ui.checkbox(&mut is_hash, "# (0-9/sym)").changed() {
-                if is_hash {
-                    *from = '#';
-                    *to = '#';
-                } else {
-                    *from = 'a';
-                    *to = 'f';
-                }
-            }
-            if !is_hash {
-                let mut f_str = from.to_string();
-                let mut t_str = to.to_string();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut f_str).desired_width(24.0))
-                    .changed()
-                    && let Some(c) = f_str.chars().next()
-                {
-                    *from = c;
-                }
-                ui.label("to");
-                if ui
-                    .add(egui::TextEdit::singleline(&mut t_str).desired_width(24.0))
-                    .changed()
-                    && let Some(c) = t_str.chars().next()
-                {
-                    *to = c;
-                }
-            }
-        }
-        ConditionKind::Downloads(dl) => {
-            egui::ComboBox::from_id_salt(("classic_cond_dl", idx))
-                .selected_text(dl.label())
-                .width(150.0)
-                .show_ui(ui, |ui| {
-                    for variant in DownloadState::ALL {
-                        ui.selectable_value(dl, variant, variant.label());
-                    }
-                });
-        }
-        ConditionKind::Library(lib) => {
-            egui::ComboBox::from_id_salt(("classic_cond_lib", idx))
-                .selected_text(lib.label())
-                .width(150.0)
-                .show_ui(ui, |ui| {
-                    for variant in LibraryState::ALL {
-                        ui.selectable_value(lib, variant, variant.label());
-                    }
-                });
-        }
-        ConditionKind::SyncedOlderThanDays(days) => {
-            ui.add(egui::DragValue::new(days).range(1..=3650).suffix(" d"));
-        }
-        ConditionKind::NeverSynced => {}
-        ConditionKind::TotalReleases { at_least, at_most } => {
-            let mut min_v = at_least.unwrap_or(0);
-            let mut has_min = at_least.is_some();
-            if ui.checkbox(&mut has_min, "min").changed() {
-                *at_least = if has_min { Some(min_v) } else { None };
-            }
-            if has_min
-                && ui
-                    .add(egui::DragValue::new(&mut min_v).range(0..=10000))
-                    .changed()
-            {
-                *at_least = Some(min_v);
-            }
-            let mut max_v = at_most.unwrap_or(10);
-            let mut has_max = at_most.is_some();
-            if ui.checkbox(&mut has_max, "max").changed() {
-                *at_most = if has_max { Some(max_v) } else { None };
-            }
-            if has_max
-                && ui
-                    .add(egui::DragValue::new(&mut max_v).range(0..=10000))
-                    .changed()
-            {
-                *at_most = Some(max_v);
-            }
-        }
-        ConditionKind::CustomDomain(val) => {
-            ui.checkbox(val, "is custom domain");
-        }
+    if keep_open {
+        state.group_set_modal = Some(modal);
     }
 }
 
@@ -432,38 +341,22 @@ mod tests {
     fn test_15_classic_group_editor_validation_and_save_gating() {
         let existing = vec![ArtistGroup {
             id: 1,
+            set_id: 1,
             name: "Ambient".into(),
             pos: 0,
             collapsed: false,
-            rule: None,
         }];
-
-        let mut ed = GroupEditorState::new_manual(vec![]);
-        assert!(ed.validate(&existing).is_err()); // empty name
-
-        ed.name = "ambient".into();
-        assert!(ed.validate(&existing).is_err()); // duplicate case-insensitive
-
-        ed.name = "Electronic".into();
-        assert!(ed.validate(&existing).is_ok());
-
-        // Automatic with reversed initial range -> invalid
-        ed.is_automatic = true;
-        ed.rule = GroupRule {
-            mode: MatchMode::All,
-            conditions: vec![Condition {
-                negate: false,
-                kind: ConditionKind::NameInitial { from: 'z', to: 'a' },
-            }],
-        };
+        let mut ed = GroupEditorState::new_manual(vec![10, 20]);
         assert!(ed.validate(&existing).is_err());
 
-        // Valid automatic rule -> Save enabled
-        ed.rule.conditions[0].kind = ConditionKind::NameInitial { from: 'a', to: 'f' };
-        assert!(ed.validate(&existing).is_ok());
+        ed.name = "ambient".into();
+        assert!(ed.validate(&existing).is_err());
 
-        // Editing existing group keeps its own name valid
-        let edit_existing = GroupEditorState::from_group(&existing[0]);
-        assert!(edit_existing.validate(&existing).is_ok());
+        ed.name = "Favorites".into();
+        assert_eq!(ed.validate(&existing).unwrap(), "Favorites");
+        assert_eq!(ed.selected_members, BTreeSet::from([10, 20]));
+
+        let edit_existing = GroupEditorState::from_group(&existing[0], &[10]);
+        assert_eq!(edit_existing.validate(&existing).unwrap(), "Ambient");
     }
 }

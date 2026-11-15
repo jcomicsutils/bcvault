@@ -36,7 +36,9 @@ pub fn show(
         || state.settings_draft.is_some()
         || state.confirm_remove_artist.is_some()
         || state.confirm_delete_group.is_some()
+        || state.confirm_delete_group_set.is_some()
         || state.group_editor_modal.is_some()
+        || state.group_set_modal.is_some()
         || state.rename_artist_modal.is_some()
         || state.link_folder_modal.is_some()
         || state.reconcile_report_modal.is_some();
@@ -78,8 +80,14 @@ pub fn show(
     if state.confirm_delete_group.is_some() {
         show_confirm_delete_group_modal(ctx, state, cmd_tx, esc);
     }
+    if state.confirm_delete_group_set.is_some() {
+        show_confirm_delete_group_set_modal(ctx, state, cmd_tx, esc);
+    }
     if state.group_editor_modal.is_some() {
         crate::ui::groups::show_group_editor_modal(ctx, state, cmd_tx, esc);
+    }
+    if state.group_set_modal.is_some() {
+        crate::ui::groups::show_group_set_modal(ctx, state, cmd_tx, esc);
     }
     if state.rename_artist_modal.is_some() {
         show_rename_artist_modal(ctx, state, cmd_tx, esc);
@@ -446,9 +454,9 @@ fn show_confirm_delete_group_modal(
             ui.set_min_width(340.0);
             ui.label(format!("Delete group '{name}'?"));
             let pin_msg = match pin_count {
-                0 => "This group has no manual artist placements.".to_string(),
-                1 => "1 artist is manually placed in this group and will fall back to automatic rules or Ungrouped.".to_string(),
-                n => format!("{n} artists are manually placed in this group and will fall back to automatic rules or Ungrouped."),
+                0 => "This group has no artists.".to_string(),
+                1 => "1 artist in this group will move to Ungrouped.".to_string(),
+                n => format!("{n} artists in this group will move to Ungrouped."),
             };
             ui.label(RichText::new(pin_msg).color(pal::TEXT_DIM));
             ui.separator();
@@ -465,6 +473,46 @@ fn show_confirm_delete_group_modal(
 
     if keep_open {
         state.confirm_delete_group = Some((id, name, pin_count));
+    }
+}
+
+fn show_confirm_delete_group_set_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    esc: bool,
+) {
+    let Some((id, name)) = state.confirm_delete_group_set.take() else {
+        return;
+    };
+    let mut keep_open = !esc;
+
+    egui::Window::new("Delete Grouping Set")
+        .order(Order::Foreground)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            ui.label(format!("Delete grouping set '{name}'?"));
+            ui.label(
+                RichText::new("All groups and artist placements in this set will be removed.")
+                    .color(pal::TEXT_DIM),
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if sharp_button(ui, "Delete").clicked() {
+                    let _ = cmd_tx.send(UiToWorkerCommand::DeleteArtistGroupSet { id });
+                    keep_open = false;
+                }
+                if sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
+
+    if keep_open {
+        state.confirm_delete_group_set = Some((id, name));
     }
 }
 

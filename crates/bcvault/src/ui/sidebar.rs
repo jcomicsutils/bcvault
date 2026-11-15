@@ -7,7 +7,7 @@ use crate::{
     },
     worker::messages::UiToWorkerCommand,
 };
-use bcvault_core::groups::{PinTarget, SidebarRow};
+use bcvault_core::groups::{ActiveGrouping, BuiltinGrouping, PinTarget, SidebarRow};
 use egui::{Align, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -43,23 +43,13 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
             .desired_width(f32::INFINITY),
     );
 
+    // 3. Grouping mode / Group Set switcher
+    show_classic_grouping_bar(ui, state, cmd_tx);
+
     ui.separator();
 
     // Reserve footer height (~72px) for Sync controls
     let list_height = (ui.available_height() - 78.0).max(80.0);
-
-    if let Some((ref pending_name, ref band_ids)) = state.pending_group_pins
-        && let Some(g) = state
-            .groups
-            .iter()
-            .find(|g| g.name.eq_ignore_ascii_case(pending_name))
-    {
-        let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-            band_ids: band_ids.clone(),
-            target: PinTarget::Group(g.id),
-        });
-        state.pending_group_pins = None;
-    }
 
     state.ensure_sidebar_rows(chrono::Utc::now().timestamp());
     let rows = state.sidebar_rows.clone();
@@ -96,35 +86,59 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                                 );
                                 ui.close();
                             }
-                            if !state.groups.is_empty() {
+                            if sharp_button(ui, "New grouping set...").clicked() {
+                                state.group_error = None;
+                                state.group_set_modal =
+                                    Some(crate::ui::groups::GroupSetModalState::new());
+                                ui.close();
+                            }
+                            if !state.groups.is_empty() || !state.builtin_groups.is_empty() {
                                 ui.separator();
                                 if sharp_button(ui, "Collapse all groups").clicked() {
-                                    for g in &state.groups {
-                                        if !g.collapsed {
-                                            let _ = cmd_tx.send(
-                                                UiToWorkerCommand::SetArtistGroupCollapsed {
-                                                    id: g.id,
-                                                    collapsed: true,
-                                                },
-                                            );
+                                    match state.active_grouping {
+                                        ActiveGrouping::CustomSet(_) => {
+                                            for g in &state.groups {
+                                                if !g.collapsed {
+                                                    let _ = cmd_tx.send(
+                                                        UiToWorkerCommand::SetArtistGroupCollapsed {
+                                                            id: g.id,
+                                                            collapsed: true,
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                            state.ungrouped_collapsed = true;
                                         }
+                                        ActiveGrouping::Builtin(_) => {
+                                            for g in &state.builtin_groups {
+                                                state.collapsed_builtin_groups.insert(g.id);
+                                            }
+                                        }
+                                        ActiveGrouping::None => {}
                                     }
-                                    state.ungrouped_collapsed = true;
                                     state.sidebar_dirty = true;
                                     ui.close();
                                 }
                                 if sharp_button(ui, "Expand all groups").clicked() {
-                                    for g in &state.groups {
-                                        if g.collapsed {
-                                            let _ = cmd_tx.send(
-                                                UiToWorkerCommand::SetArtistGroupCollapsed {
-                                                    id: g.id,
-                                                    collapsed: false,
-                                                },
-                                            );
+                                    match state.active_grouping {
+                                        ActiveGrouping::CustomSet(_) => {
+                                            for g in &state.groups {
+                                                if g.collapsed {
+                                                    let _ = cmd_tx.send(
+                                                        UiToWorkerCommand::SetArtistGroupCollapsed {
+                                                            id: g.id,
+                                                            collapsed: false,
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                            state.ungrouped_collapsed = false;
                                         }
+                                        ActiveGrouping::Builtin(_) => {
+                                            state.collapsed_builtin_groups.clear();
+                                        }
+                                        ActiveGrouping::None => {}
                                     }
-                                    state.ungrouped_collapsed = false;
                                     state.sidebar_dirty = true;
                                     ui.close();
                                 }
@@ -140,25 +154,39 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                         let member_ids = group_member_ids(state, *id);
                         let (dl, elig) = sum_member_stats(state, &member_ids);
                         let resp = draw_group_header_row(ui, name, *count, *collapsed, dl, elig);
-                        if resp.dnd_hover_payload::<i64>().is_some() {
-                            sharp_rect(
-                                ui.painter(),
-                                resp.rect,
-                                egui::Color32::TRANSPARENT,
-                                Stroke::new(2.0_f32, pal::ACCENT),
-                            );
-                        }
-                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
-                            let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-                                band_ids: vec![*dragged_band_id],
-                                target: PinTarget::Group(*id),
-                            });
+                        if let ActiveGrouping::CustomSet(set_id) = state.active_grouping
+                            && *id > 0
+                        {
+                            if resp.dnd_hover_payload::<Vec<i64>>().is_some() {
+                                sharp_rect(
+                                    ui.painter(),
+                                    resp.rect,
+                                    egui::Color32::TRANSPARENT,
+                                    Stroke::new(2.0_f32, pal::ACCENT),
+                                );
+                            }
+                            if let Some(dragged_ids) = resp.dnd_release_payload::<Vec<i64>>() {
+                                let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+                                    set_id,
+                                    band_ids: (*dragged_ids).clone(),
+                                    target: PinTarget::Group(*id),
+                                });
+                            }
                         }
                         if resp.clicked() {
-                            let _ = cmd_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
-                                id: *id,
-                                collapsed: !*collapsed,
-                            });
+                            if *id < 0 {
+                                if *collapsed {
+                                    state.collapsed_builtin_groups.remove(id);
+                                } else {
+                                    state.collapsed_builtin_groups.insert(*id);
+                                }
+                                state.sidebar_dirty = true;
+                            } else {
+                                let _ = cmd_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                                    id: *id,
+                                    collapsed: !*collapsed,
+                                });
+                            }
                         }
                         let group_id = *id;
                         let group_name = name.clone();
@@ -178,19 +206,22 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                         let (dl, elig) = sum_member_stats(state, &member_ids);
                         let resp =
                             draw_group_header_row(ui, "Ungrouped", *count, *collapsed, dl, elig);
-                        if resp.dnd_hover_payload::<i64>().is_some() {
-                            sharp_rect(
-                                ui.painter(),
-                                resp.rect,
-                                egui::Color32::TRANSPARENT,
-                                Stroke::new(2.0_f32, pal::ACCENT),
-                            );
-                        }
-                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
-                            let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-                                band_ids: vec![*dragged_band_id],
-                                target: PinTarget::Ungrouped,
-                            });
+                        if let ActiveGrouping::CustomSet(set_id) = state.active_grouping {
+                            if resp.dnd_hover_payload::<Vec<i64>>().is_some() {
+                                sharp_rect(
+                                    ui.painter(),
+                                    resp.rect,
+                                    egui::Color32::TRANSPARENT,
+                                    Stroke::new(2.0_f32, pal::ACCENT),
+                                );
+                            }
+                            if let Some(dragged_ids) = resp.dnd_release_payload::<Vec<i64>>() {
+                                let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+                                    set_id,
+                                    band_ids: (*dragged_ids).clone(),
+                                    target: PinTarget::Ungrouped,
+                                });
+                            }
                         }
                         if resp.clicked() {
                             state.ungrouped_collapsed = !*collapsed;
@@ -256,7 +287,13 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             &artist_folders,
                         );
                         if resp.drag_started() {
-                            resp.dnd_set_drag_payload(artist.band_id);
+                            let payload: Vec<i64> =
+                                if is_selected && state.selected_artists.len() > 1 {
+                                    state.selected_artists.iter().copied().collect()
+                                } else {
+                                    vec![artist.band_id]
+                                };
+                            resp.dnd_set_drag_payload(payload);
                         }
                         if resp.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -749,6 +786,109 @@ fn draw_group_header_row(
     resp
 }
 
+fn show_classic_grouping_bar(
+    ui: &mut Ui,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+) {
+    let current_label = match state.active_grouping {
+        ActiveGrouping::None => "No Grouping".to_string(),
+        ActiveGrouping::Builtin(kind) => format!("Auto: {}", kind.label()),
+        ActiveGrouping::CustomSet(set_id) => state
+            .group_sets
+            .iter()
+            .find(|s| s.id == set_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "Custom Set".to_string()),
+    };
+
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("classic_grouping_switcher")
+            .selected_text(current_label)
+            .width(ui.available_width() - 96.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(state.active_grouping == ActiveGrouping::None, "No Grouping")
+                    .clicked()
+                {
+                    let _ = cmd_tx.send(UiToWorkerCommand::SetActiveGrouping {
+                        grouping: ActiveGrouping::None,
+                    });
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("Built-in (Automatic)")
+                        .size(11.0)
+                        .color(pal::TEXT_DIM),
+                );
+                for kind in BuiltinGrouping::ALL {
+                    let target = ActiveGrouping::Builtin(kind);
+                    if ui
+                        .selectable_label(state.active_grouping == target, kind.label())
+                        .clicked()
+                    {
+                        let _ =
+                            cmd_tx.send(UiToWorkerCommand::SetActiveGrouping { grouping: target });
+                    }
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("Custom Group Sets")
+                        .size(11.0)
+                        .color(pal::TEXT_DIM),
+                );
+                for set in &state.group_sets {
+                    let target = ActiveGrouping::CustomSet(set.id);
+                    if ui
+                        .selectable_label(state.active_grouping == target, &set.name)
+                        .clicked()
+                    {
+                        let _ =
+                            cmd_tx.send(UiToWorkerCommand::SetActiveGrouping { grouping: target });
+                    }
+                }
+                if sharp_button(ui, "+ New Grouping Set...").clicked() {
+                    state.group_error = None;
+                    state.group_set_modal = Some(crate::ui::groups::GroupSetModalState::new());
+                    ui.close();
+                }
+            });
+
+        if sharp_button(ui, "+Grp")
+            .on_hover_text("Create a new artist group")
+            .clicked()
+        {
+            state.group_error = None;
+            let preselect: Vec<i64> = state.selected_artists.iter().copied().collect();
+            state.group_editor_modal =
+                Some(crate::ui::groups::GroupEditorState::new_manual(preselect));
+        }
+
+        if let ActiveGrouping::CustomSet(set_id) = state.active_grouping
+            && let Some(set) = state.group_sets.iter().find(|s| s.id == set_id).cloned()
+        {
+            ui.menu_button("Set", |ui| {
+                if sharp_button(ui, "Rename Set...").clicked() {
+                    state.group_error = None;
+                    state.group_set_modal =
+                        Some(crate::ui::groups::GroupSetModalState::rename(&set));
+                    ui.close();
+                }
+                if sharp_button(ui, "New Set...").clicked() {
+                    state.group_error = None;
+                    state.group_set_modal = Some(crate::ui::groups::GroupSetModalState::new());
+                    ui.close();
+                }
+                ui.separator();
+                if sharp_button(ui, "Delete Set...").clicked() {
+                    state.confirm_delete_group_set = Some((set.id, set.name));
+                    ui.close();
+                }
+            });
+        }
+    });
+}
+
 fn show_group_context_menu(
     ui: &mut Ui,
     state: &mut UiState,
@@ -757,23 +897,19 @@ fn show_group_context_menu(
     group_name: &str,
     member_ids: &[i64],
 ) {
-    if sharp_button(ui, "Rename...").clicked() {
+    let is_custom = matches!(state.active_grouping, ActiveGrouping::CustomSet(_)) && group_id > 0;
+    if is_custom && sharp_button(ui, "Edit group & members...").clicked() {
         if let Some(g) = state.groups.iter().find(|g| g.id == group_id) {
             state.group_error = None;
-            state.group_editor_modal = Some(crate::ui::groups::GroupEditorState::from_group(g));
+            state.group_editor_modal = Some(crate::ui::groups::GroupEditorState::from_group(
+                g, member_ids,
+            ));
         }
         ui.close();
     }
-    if sharp_button(ui, "Edit rule...").clicked() {
-        if let Some(g) = state.groups.iter().find(|g| g.id == group_id) {
-            state.group_error = None;
-            let mut ed = crate::ui::groups::GroupEditorState::from_group(g);
-            ed.is_automatic = true;
-            state.group_editor_modal = Some(ed);
-        }
-        ui.close();
+    if is_custom {
+        ui.separator();
     }
-    ui.separator();
     if sharp_button(ui, "Sync group").clicked() {
         let _ = cmd_tx.send(UiToWorkerCommand::Sync {
             scope: SyncScope::Selected(member_ids.to_vec()),
@@ -799,29 +935,29 @@ fn show_group_context_menu(
         state.mark_query_immediate();
         ui.close();
     }
-    ui.separator();
-    if let Some(pos) = state.groups.iter().position(|g| g.id == group_id) {
-        if pos > 0 && sharp_button(ui, "Move up").clicked() {
-            let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
-            ids.swap(pos, pos - 1);
-            let _ = cmd_tx.send(UiToWorkerCommand::ReorderArtistGroups { ids });
+    if let ActiveGrouping::CustomSet(set_id) = state.active_grouping
+        && group_id > 0
+    {
+        ui.separator();
+        if let Some(pos) = state.groups.iter().position(|g| g.id == group_id) {
+            if pos > 0 && sharp_button(ui, "Move up").clicked() {
+                let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
+                ids.swap(pos, pos - 1);
+                let _ = cmd_tx.send(UiToWorkerCommand::ReorderArtistGroups { set_id, ids });
+                ui.close();
+            }
+            if pos + 1 < state.groups.len() && sharp_button(ui, "Move down").clicked() {
+                let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
+                ids.swap(pos, pos + 1);
+                let _ = cmd_tx.send(UiToWorkerCommand::ReorderArtistGroups { set_id, ids });
+                ui.close();
+            }
+        }
+        if sharp_button(ui, "Delete group...").clicked() {
+            let pin_count = state.pins.values().filter(|&&gid| gid == group_id).count();
+            state.confirm_delete_group = Some((group_id, group_name.to_string(), pin_count));
             ui.close();
         }
-        if pos + 1 < state.groups.len() && sharp_button(ui, "Move down").clicked() {
-            let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
-            ids.swap(pos, pos + 1);
-            let _ = cmd_tx.send(UiToWorkerCommand::ReorderArtistGroups { ids });
-            ui.close();
-        }
-    }
-    if sharp_button(ui, "Delete group...").clicked() {
-        let pin_count = state
-            .pins
-            .values()
-            .filter(|&&p| p == Some(group_id))
-            .count();
-        state.confirm_delete_group = Some((group_id, group_name.to_string(), pin_count));
-        ui.close();
     }
 }
 
@@ -837,35 +973,47 @@ fn show_move_to_group_submenu(
         } else {
             vec![band_id]
         };
-    ui.menu_button("Move to group", |ui| {
-        for g in &state.groups {
-            if sharp_button(ui, &g.name).clicked() {
-                let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-                    band_ids: target_ids.clone(),
-                    target: PinTarget::Group(g.id),
-                });
-                ui.close();
+    let label = if target_ids.len() > 1 {
+        format!("Move {} artists to group", target_ids.len())
+    } else {
+        "Move to group".to_string()
+    };
+    ui.menu_button(label, |ui| {
+        if let ActiveGrouping::CustomSet(set_id) = state.active_grouping {
+            for g in &state.groups {
+                if sharp_button(ui, &g.name).clicked() {
+                    let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+                        set_id,
+                        band_ids: target_ids.clone(),
+                        target: PinTarget::Group(g.id),
+                    });
+                    ui.close();
+                }
+            }
+            let any_in_group = target_ids.iter().any(|id| state.pins.contains_key(id));
+            if any_in_group {
+                if !state.groups.is_empty() {
+                    ui.separator();
+                }
+                if sharp_button(ui, "Ungrouped").clicked() {
+                    let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+                        set_id,
+                        band_ids: target_ids.clone(),
+                        target: PinTarget::Ungrouped,
+                    });
+                    ui.close();
+                }
+            }
+            if !state.groups.is_empty() || any_in_group {
+                ui.separator();
             }
         }
-        if !state.groups.is_empty() {
-            ui.separator();
-        }
-        if sharp_button(ui, "Ungrouped").clicked() {
-            let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-                band_ids: target_ids.clone(),
-                target: PinTarget::Ungrouped,
-            });
-            ui.close();
-        }
-        if sharp_button(ui, "Automatic (remove manual placement)").clicked() {
-            let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
-                band_ids: target_ids.clone(),
-                target: PinTarget::Auto,
-            });
-            ui.close();
-        }
-        ui.separator();
-        if sharp_button(ui, "New group from selection...").clicked() {
+        if sharp_button(
+            ui,
+            &format!("New group from selection ({})...", target_ids.len()),
+        )
+        .clicked()
+        {
             state.group_error = None;
             state.group_editor_modal = Some(crate::ui::groups::GroupEditorState::new_manual(
                 target_ids.clone(),

@@ -477,9 +477,9 @@ pub fn show_modals(
             .show(ctx, |ui| {
                 ui.label(format!("Delete group '{name}'?"));
                 let pin_msg = match pin_count {
-                    0 => "This group has no manual artist placements.".to_string(),
-                    1 => "1 artist is manually placed in this group and will fall back to automatic rules or Ungrouped.".to_string(),
-                    n => format!("{n} artists are manually placed in this group and will fall back to automatic rules or Ungrouped."),
+                    0 => "This group has no artists.".to_string(),
+                    1 => "1 artist in this group will move to Ungrouped.".to_string(),
+                    n => format!("{n} artists in this group will move to Ungrouped."),
                 };
                 ui.label(RichText::new(pin_msg).color(th.text_dim));
                 ui.horizontal(|ui| {
@@ -497,11 +497,40 @@ pub fn show_modals(
         }
     }
 
+    // 5c. Confirm Delete Group Set Modal
+    if let Some((id, name)) = state.confirm_delete_group_set.clone() {
+        let mut close_del = esc;
+        egui::Window::new("Delete Grouping Set")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Delete grouping set '{name}'?"));
+                ui.label(
+                    RichText::new("All groups and artist placements in this set will be removed.")
+                        .color(th.text_dim),
+                );
+                ui.horizontal(|ui| {
+                    if paint::sharp_button(ui, "Delete").clicked() {
+                        let _ = core_tx.send(UiToWorkerCommand::DeleteArtistGroupSet { id });
+                        close_del = true;
+                    }
+                    if paint::sharp_button(ui, "Cancel").clicked() {
+                        close_del = true;
+                    }
+                });
+            });
+        if close_del {
+            state.confirm_delete_group_set = None;
+        }
+    }
+
     show_link_folder_modal(ctx, state, core_tx, rt_handle, esc);
     show_reconcile_report_modal(ctx, state, core_tx, esc);
     show_resolve_missing_modal(ctx, state, core_tx, rt_handle, esc);
     show_unavailable_modal(ctx, state, core_tx, rt_handle, esc);
     crate::overlays::groups::show_fx_group_editor_modal(ctx, state, core_tx, esc);
+    crate::overlays::groups::show_fx_group_set_modal(ctx, state, core_tx, esc);
 
     for act in pending_actions {
         state.dispatch(act, core_tx, fx_tx, now_s);

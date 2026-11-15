@@ -561,9 +561,15 @@ pub struct FxState {
         std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
     pub pending_relink_pick: Option<ItemKey>,
 
-    // Artist Groups
+    // Artist Groups & Multi-Select
+    pub active_grouping: bcvault_core::groups::ActiveGrouping,
+    pub group_sets: Vec<bcvault_core::groups::ArtistGroupSet>,
     pub groups: Vec<bcvault_core::groups::ArtistGroup>,
-    pub pins: HashMap<i64, Option<i64>>,
+    pub builtin_groups: Vec<bcvault_core::groups::ArtistGroup>,
+    pub collapsed_builtin_groups: BTreeSet<i64>,
+    pub pins: HashMap<i64, i64>,
+    pub selected_artists: BTreeSet<i64>,
+    pub last_clicked_artist: Option<i64>,
     pub group_assignment: bcvault_core::groups::Assignment,
     pub sidebar_rows: Vec<bcvault_core::groups::SidebarRow>,
     pub ungrouped_collapsed: bool,
@@ -573,7 +579,9 @@ pub struct FxState {
     pub sidebar_recompute_count: u64,
     pub group_error: Option<String>,
     pub confirm_delete_group: Option<(i64, String, usize)>,
+    pub confirm_delete_group_set: Option<(i64, String)>,
     pub group_editor: Option<crate::overlays::groups::FxGroupEditorState>,
+    pub group_set_modal: Option<crate::overlays::groups::FxGroupSetModalState>,
     pub pending_group_pins: Option<(String, Vec<i64>)>,
 
     // Jobs, Speed Sparkline, Rate limit, Toasts & Logs
@@ -731,8 +739,14 @@ impl FxState {
             folders: HashMap::new(),
             relink_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             pending_relink_pick: None,
+            active_grouping: bcvault_core::groups::ActiveGrouping::None,
+            group_sets: Vec::new(),
             groups: Vec::new(),
+            builtin_groups: Vec::new(),
+            collapsed_builtin_groups: BTreeSet::new(),
             pins: HashMap::new(),
+            selected_artists: BTreeSet::new(),
+            last_clicked_artist: None,
             group_assignment: bcvault_core::groups::Assignment::default(),
             sidebar_rows: vec![bcvault_core::groups::SidebarRow::AllArtists],
             ungrouped_collapsed: false,
@@ -742,7 +756,9 @@ impl FxState {
             sidebar_recompute_count: 0,
             group_error: None,
             confirm_delete_group: None,
+            confirm_delete_group_set: None,
             group_editor: None,
+            group_set_modal: None,
             pending_group_pins: None,
             jobs: Vec::new(),
             speed_samples: std::collections::VecDeque::from(vec![0.0; 30]),
@@ -781,7 +797,9 @@ impl FxState {
     pub fn has_open_modal(&self) -> bool {
         self.confirm_remove_artist.is_some()
             || self.confirm_delete_group.is_some()
+            || self.confirm_delete_group_set.is_some()
             || self.group_editor.is_some()
+            || self.group_set_modal.is_some()
             || self.rename_artist_modal.is_some()
             || self.save_view_modal.is_some()
             || self.redeem_modal.is_some()
@@ -814,7 +832,13 @@ impl FxState {
         if self.confirm_delete_group.take().is_some() {
             return true;
         }
+        if self.confirm_delete_group_set.take().is_some() {
+            return true;
+        }
         if self.group_editor.take().is_some() {
+            return true;
+        }
+        if self.group_set_modal.take().is_some() {
             return true;
         }
         if self.rename_artist_modal.take().is_some() {
@@ -942,27 +966,54 @@ impl FxState {
 
     pub fn ensure_sidebar_rows(&mut self, now_ts: bcvault_core::types::Ts) {
         let filter_changed = self.artist_filter != self.sidebar_last_filter;
-        let age_refresh =
-            !self.groups.is_empty() && now_ts.saturating_sub(self.sidebar_last_recompute_ts) >= 60;
+        let age_refresh = matches!(
+            self.active_grouping,
+            bcvault_core::groups::ActiveGrouping::Builtin(
+                bcvault_core::groups::BuiltinGrouping::SyncFreshness
+            )
+        ) && now_ts.saturating_sub(self.sidebar_last_recompute_ts) >= 60;
         if !self.sidebar_dirty && !filter_changed && !age_refresh {
             return;
         }
-        self.group_assignment = bcvault_core::groups::assign(
-            &self.artists,
-            &self.groups,
-            &self.pins,
-            &self.folders,
-            now_ts,
-        );
+        match self.active_grouping {
+            bcvault_core::groups::ActiveGrouping::None => {
+                self.builtin_groups.clear();
+                self.group_assignment = bcvault_core::groups::Assignment {
+                    groups: Vec::new(),
+                    ungrouped: self.artists.iter().map(|a| a.band_id).collect(),
+                };
+            }
+            bcvault_core::groups::ActiveGrouping::Builtin(kind) => {
+                let (bg, assign) = bcvault_core::groups::assign_builtin(
+                    kind,
+                    &self.artists,
+                    &self.folders,
+                    now_ts,
+                    &self.collapsed_builtin_groups,
+                );
+                self.builtin_groups = bg;
+                self.group_assignment = assign;
+            }
+            bcvault_core::groups::ActiveGrouping::CustomSet(_) => {
+                self.builtin_groups.clear();
+                self.group_assignment =
+                    bcvault_core::groups::assign_custom(&self.artists, &self.groups, &self.pins);
+            }
+        }
         let artists_by_id: HashMap<i64, usize> = self
             .artists
             .iter()
             .enumerate()
             .map(|(i, a)| (a.band_id, i))
             .collect();
+        let active_groups: &[bcvault_core::groups::ArtistGroup] = match self.active_grouping {
+            bcvault_core::groups::ActiveGrouping::Builtin(_) => &self.builtin_groups,
+            bcvault_core::groups::ActiveGrouping::CustomSet(_) => &self.groups,
+            bcvault_core::groups::ActiveGrouping::None => &[],
+        };
         self.sidebar_rows = bcvault_core::groups::build_sidebar_rows(
             &self.group_assignment,
-            &self.groups,
+            active_groups,
             &artists_by_id,
             &self.artists,
             &self.artist_filter,
@@ -1359,6 +1410,8 @@ impl FxState {
                 artists,
                 settings,
                 folders,
+                active_grouping,
+                group_sets,
                 groups,
                 pins,
             } => {
@@ -1368,6 +1421,8 @@ impl FxState {
                 for f in folders {
                     self.folders.entry(f.band_id).or_default().push(f);
                 }
+                self.active_grouping = active_grouping;
+                self.group_sets = group_sets;
                 self.groups = groups;
                 self.pins = pins;
                 self.sidebar_dirty = true;
@@ -1625,7 +1680,14 @@ impl FxState {
                     self.show_unavailable_window = true;
                 }
             }
-            WorkerToUiEvent::ArtistGroupsChanged { groups, pins } => {
+            WorkerToUiEvent::ArtistGroupsChanged {
+                active_grouping,
+                group_sets,
+                groups,
+                pins,
+            } => {
+                self.active_grouping = active_grouping;
+                self.group_sets = group_sets;
                 self.groups = groups;
                 self.pins = pins;
                 self.group_error = None;
@@ -1822,6 +1884,13 @@ impl FxState {
                 self.issue_wall_and_facets_query(fx_tx);
             }
             FxAction::SelectArtist(band_id) => {
+                self.selected_artists.clear();
+                if let Some(bid) = band_id {
+                    self.selected_artists.insert(bid);
+                    self.last_clicked_artist = Some(bid);
+                } else {
+                    self.last_clicked_artist = None;
+                }
                 if self.query.base.band_id != band_id || !self.query.base.band_ids.is_empty() {
                     self.nav.push(self.current_view_state());
                     self.query.base.band_id = band_id;
@@ -1834,6 +1903,21 @@ impl FxState {
                     }
                     self.issue_wall_and_facets_query(fx_tx);
                 }
+            }
+            FxAction::SelectArtists(ids) => {
+                self.selected_artists = ids.iter().copied().collect();
+                self.nav.push(self.current_view_state());
+                if ids.is_empty() {
+                    self.query.base.band_id = None;
+                    self.query.base.band_ids.clear();
+                } else if ids.len() == 1 {
+                    self.query.base.band_id = Some(ids[0]);
+                    self.query.base.band_ids.clear();
+                } else {
+                    self.query.base.band_id = None;
+                    self.query.base.band_ids = ids;
+                }
+                self.issue_wall_and_facets_query(fx_tx);
             }
             FxAction::OpenDrawer(key) => {
                 self.drawer_key = Some(key);
@@ -2194,19 +2278,47 @@ impl FxState {
             }
             FxAction::EditGroup(id) => {
                 if let Some(g) = self.groups.iter().find(|g| g.id == id) {
+                    let members = self.group_member_ids(id);
                     self.group_error = None;
-                    self.group_editor =
-                        Some(crate::overlays::groups::FxGroupEditorState::from_group(g));
+                    self.group_editor = Some(
+                        crate::overlays::groups::FxGroupEditorState::from_group(g, &members),
+                    );
                 }
             }
             FxAction::DeleteGroup(id) => {
                 if let Some(g) = self.groups.iter().find(|g| g.id == id) {
-                    let pin_count = self.pins.values().filter(|&&p| p == Some(id)).count();
+                    let pin_count = self.pins.values().filter(|&&gid| gid == id).count();
                     self.confirm_delete_group = Some((id, g.name.clone(), pin_count));
                 }
             }
+            FxAction::SetActiveGrouping(grouping) => {
+                let _ = core_tx.send(UiToWorkerCommand::SetActiveGrouping { grouping });
+            }
+            FxAction::NewGroupSet => {
+                self.group_error = None;
+                self.group_set_modal = Some(crate::overlays::groups::FxGroupSetModalState::new());
+            }
+            FxAction::RenameGroupSet(id) => {
+                if let Some(set) = self.group_sets.iter().find(|s| s.id == id) {
+                    self.group_error = None;
+                    self.group_set_modal =
+                        Some(crate::overlays::groups::FxGroupSetModalState::rename(set));
+                }
+            }
+            FxAction::DeleteGroupSet(id) => {
+                if let Some(set) = self.group_sets.iter().find(|s| s.id == id) {
+                    self.confirm_delete_group_set = Some((id, set.name.clone()));
+                }
+            }
             FxAction::ToggleGroup(id) => {
-                if let Some(g) = self.groups.iter().find(|g| g.id == id) {
+                if id < 0 {
+                    if self.collapsed_builtin_groups.contains(&id) {
+                        self.collapsed_builtin_groups.remove(&id);
+                    } else {
+                        self.collapsed_builtin_groups.insert(id);
+                    }
+                    self.sidebar_dirty = true;
+                } else if let Some(g) = self.groups.iter().find(|g| g.id == id) {
                     let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
                         id,
                         collapsed: !g.collapsed,
@@ -2218,31 +2330,57 @@ impl FxState {
                 self.sidebar_dirty = true;
             }
             FxAction::CollapseAllGroups => {
-                for g in &self.groups {
-                    if !g.collapsed {
-                        let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
-                            id: g.id,
-                            collapsed: true,
-                        });
+                match self.active_grouping {
+                    bcvault_core::groups::ActiveGrouping::CustomSet(_) => {
+                        for g in &self.groups {
+                            if !g.collapsed {
+                                let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                                    id: g.id,
+                                    collapsed: true,
+                                });
+                            }
+                        }
+                        self.ungrouped_collapsed = true;
                     }
+                    bcvault_core::groups::ActiveGrouping::Builtin(_) => {
+                        for g in &self.builtin_groups {
+                            self.collapsed_builtin_groups.insert(g.id);
+                        }
+                    }
+                    bcvault_core::groups::ActiveGrouping::None => {}
                 }
-                self.ungrouped_collapsed = true;
                 self.sidebar_dirty = true;
             }
             FxAction::ExpandAllGroups => {
-                for g in &self.groups {
-                    if g.collapsed {
-                        let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
-                            id: g.id,
-                            collapsed: false,
-                        });
+                match self.active_grouping {
+                    bcvault_core::groups::ActiveGrouping::CustomSet(_) => {
+                        for g in &self.groups {
+                            if g.collapsed {
+                                let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                                    id: g.id,
+                                    collapsed: false,
+                                });
+                            }
+                        }
+                        self.ungrouped_collapsed = false;
                     }
+                    bcvault_core::groups::ActiveGrouping::Builtin(_) => {
+                        self.collapsed_builtin_groups.clear();
+                    }
+                    bcvault_core::groups::ActiveGrouping::None => {}
                 }
-                self.ungrouped_collapsed = false;
                 self.sidebar_dirty = true;
             }
             FxAction::MoveArtistsToGroup(band_ids, target) => {
-                let _ = core_tx.send(UiToWorkerCommand::PinArtists { band_ids, target });
+                if let bcvault_core::groups::ActiveGrouping::CustomSet(set_id) =
+                    self.active_grouping
+                {
+                    let _ = core_tx.send(UiToWorkerCommand::PinArtists {
+                        set_id,
+                        band_ids,
+                        target,
+                    });
+                }
             }
             FxAction::SyncGroup(id) => {
                 let members = self.group_member_ids(id);
@@ -2258,6 +2396,7 @@ impl FxState {
                 let title = self
                     .groups
                     .iter()
+                    .chain(self.builtin_groups.iter())
                     .find(|g| g.id == id)
                     .map(|g| format!("Download Remaining for {}", g.name))
                     .unwrap_or_else(|| "Download Remaining for Group".to_string());
@@ -2616,6 +2755,8 @@ mod tests {
                 artists: vec![],
                 settings: Settings::default_with_dir(std::path::PathBuf::from("/out")),
                 folders: vec![f1],
+                active_grouping: bcvault_core::groups::ActiveGrouping::None,
+                group_sets: vec![],
                 groups: vec![],
                 pins: std::collections::HashMap::new(),
             },
@@ -2855,6 +2996,8 @@ mod tests {
                 artists: vec![],
                 settings: Settings::default(),
                 folders: vec![f1_a1.clone(), f2_a1.clone(), f3_a2.clone()],
+                active_grouping: bcvault_core::groups::ActiveGrouping::None,
+                group_sets: vec![],
                 groups: vec![],
                 pins: std::collections::HashMap::new(),
             },
@@ -3254,7 +3397,7 @@ mod tests {
 
     #[test]
     fn test_14_fx_sidebar_groups_dirty_cache_and_actions() {
-        use bcvault_core::groups::{ArtistGroup, Condition, ConditionKind, GroupRule, MatchMode};
+        use bcvault_core::groups::{ActiveGrouping, ArtistGroup, ArtistGroupSet};
         use bcvault_core::types::ArtistStats;
 
         let mut state = FxState::new();
@@ -3270,18 +3413,17 @@ mod tests {
             last_synced_at: None,
             stats: ArtistStats::default(),
         };
+        let s1 = ArtistGroupSet {
+            id: 1,
+            name: "Workflow".into(),
+            pos: 0,
+        };
         let g1 = ArtistGroup {
             id: 10,
-            name: "A-F".into(),
+            set_id: 1,
+            name: "Priority".into(),
             pos: 0,
             collapsed: false,
-            rule: Some(GroupRule {
-                mode: MatchMode::All,
-                conditions: vec![Condition {
-                    negate: false,
-                    kind: ConditionKind::NameInitial { from: 'a', to: 'f' },
-                }],
-            }),
         };
 
         state.apply_core_event(
@@ -3289,8 +3431,10 @@ mod tests {
                 artists: vec![a1],
                 settings: Settings::default(),
                 folders: vec![],
+                active_grouping: ActiveGrouping::CustomSet(1),
+                group_sets: vec![s1],
                 groups: vec![g1],
-                pins: HashMap::new(),
+                pins: HashMap::from([(1, 10)]),
             },
             &fx_tx,
             0.0,

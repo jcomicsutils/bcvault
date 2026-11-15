@@ -157,21 +157,11 @@ pub fn show(
             .desired_width(f32::INFINITY),
     );
 
+    show_fx_grouping_bar(ui, state, &mut pending_actions);
+
     ui.separator();
 
     let list_height = (ui.available_height() - 78.0).max(80.0);
-    if let Some((ref pending_name, ref band_ids)) = state.pending_group_pins
-        && let Some(g) = state
-            .groups
-            .iter()
-            .find(|g| g.name.eq_ignore_ascii_case(pending_name))
-    {
-        let _ = core_tx.send(UiToWorkerCommand::PinArtists {
-            band_ids: band_ids.clone(),
-            target: bcvault_core::groups::PinTarget::Group(g.id),
-        });
-        state.pending_group_pins = None;
-    }
     state.ensure_sidebar_rows(chrono::Utc::now().timestamp());
     let rows = state.sidebar_rows.clone();
 
@@ -196,7 +186,9 @@ pub fn show(
             for row_idx in row_range {
                 match &rows[row_idx] {
                     bcvault_core::groups::SidebarRow::AllArtists => {
-                        let is_selected = state.query.base.band_id.is_none();
+                        let is_selected = state.selected_artists.is_empty()
+                            && state.query.base.band_id.is_none()
+                            && state.query.base.band_ids.is_empty();
                         let resp = draw_artist_row(
                             ui,
                             state,
@@ -215,7 +207,11 @@ pub fn show(
                                 pending_actions.push(FxAction::NewGroup);
                                 ui.close();
                             }
-                            if !state.groups.is_empty() {
+                            if paint::sharp_button(ui, "New grouping set...").clicked() {
+                                pending_actions.push(FxAction::NewGroupSet);
+                                ui.close();
+                            }
+                            if !state.groups.is_empty() || !state.builtin_groups.is_empty() {
                                 ui.separator();
                                 if paint::sharp_button(ui, "Collapse all groups").clicked() {
                                     pending_actions.push(FxAction::CollapseAllGroups);
@@ -238,19 +234,25 @@ pub fn show(
                         let (dl, elig) = sum_fx_member_stats(state, &member_ids);
                         let resp =
                             draw_fx_group_header_row(ui, state, name, *count, *collapsed, dl, elig);
-                        if resp.dnd_hover_payload::<i64>().is_some() {
-                            paint::rect(
-                                ui.painter(),
-                                resp.rect,
-                                egui::Color32::TRANSPARENT,
-                                egui::Stroke::new(2.0_f32, state.active_theme.accent),
-                            );
-                        }
-                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
-                            pending_actions.push(FxAction::MoveArtistsToGroup(
-                                vec![*dragged_band_id],
-                                bcvault_core::groups::PinTarget::Group(*id),
-                            ));
+                        if matches!(
+                            state.active_grouping,
+                            bcvault_core::groups::ActiveGrouping::CustomSet(_)
+                        ) && *id > 0
+                        {
+                            if resp.dnd_hover_payload::<Vec<i64>>().is_some() {
+                                paint::rect(
+                                    ui.painter(),
+                                    resp.rect,
+                                    egui::Color32::TRANSPARENT,
+                                    egui::Stroke::new(2.0_f32, state.active_theme.accent),
+                                );
+                            }
+                            if let Some(dragged_ids) = resp.dnd_release_payload::<Vec<i64>>() {
+                                pending_actions.push(FxAction::MoveArtistsToGroup(
+                                    (*dragged_ids).clone(),
+                                    bcvault_core::groups::PinTarget::Group(*id),
+                                ));
+                            }
                         }
                         if resp.clicked() {
                             pending_actions.push(FxAction::ToggleGroup(*id));
@@ -281,19 +283,24 @@ pub fn show(
                             dl,
                             elig,
                         );
-                        if resp.dnd_hover_payload::<i64>().is_some() {
-                            paint::rect(
-                                ui.painter(),
-                                resp.rect,
-                                egui::Color32::TRANSPARENT,
-                                egui::Stroke::new(2.0_f32, state.active_theme.accent),
-                            );
-                        }
-                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
-                            pending_actions.push(FxAction::MoveArtistsToGroup(
-                                vec![*dragged_band_id],
-                                bcvault_core::groups::PinTarget::Ungrouped,
-                            ));
+                        if matches!(
+                            state.active_grouping,
+                            bcvault_core::groups::ActiveGrouping::CustomSet(_)
+                        ) {
+                            if resp.dnd_hover_payload::<Vec<i64>>().is_some() {
+                                paint::rect(
+                                    ui.painter(),
+                                    resp.rect,
+                                    egui::Color32::TRANSPARENT,
+                                    egui::Stroke::new(2.0_f32, state.active_theme.accent),
+                                );
+                            }
+                            if let Some(dragged_ids) = resp.dnd_release_payload::<Vec<i64>>() {
+                                pending_actions.push(FxAction::MoveArtistsToGroup(
+                                    (*dragged_ids).clone(),
+                                    bcvault_core::groups::PinTarget::Ungrouped,
+                                ));
+                            }
                         }
                         if resp.clicked() {
                             pending_actions.push(FxAction::ToggleUngrouped);
@@ -326,7 +333,8 @@ pub fn show(
                         else {
                             continue;
                         };
-                        let is_selected = state.query.base.band_id == Some(artist.band_id);
+                        let is_selected = state.selected_artists.contains(&artist.band_id)
+                            || state.query.base.band_id == Some(artist.band_id);
                         let sync_frac = state.active_syncs.get(&artist.band_id).map(|p| {
                             if p.total == 0 {
                                 0.15_f32
@@ -349,13 +357,81 @@ pub fn show(
                             sync_frac,
                             now_s,
                         );
+                        if resp.drag_started() {
+                            let payload: Vec<i64> =
+                                if is_selected && state.selected_artists.len() > 1 {
+                                    state.selected_artists.iter().copied().collect()
+                                } else {
+                                    vec![artist.band_id]
+                                };
+                            resp.dnd_set_drag_payload(payload);
+                        }
 
+                        let modifiers = ui.input(|i| i.modifiers);
                         if resp.clicked() {
-                            pending_actions.push(FxAction::SelectArtist(Some(artist.band_id)));
+                            if modifiers.shift
+                                && let Some(anchor_id) = state.last_clicked_artist
+                            {
+                                let visible_ids: Vec<i64> = rows
+                                    .iter()
+                                    .filter_map(|r| match r {
+                                        bcvault_core::groups::SidebarRow::Artist { band_id } => {
+                                            Some(*band_id)
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect();
+                                let pos_a = visible_ids.iter().position(|&id| id == anchor_id);
+                                let pos_b = visible_ids.iter().position(|&id| id == artist.band_id);
+                                if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                                    if !modifiers.ctrl && !modifiers.command {
+                                        state.selected_artists.clear();
+                                    }
+                                    for &bid in &visible_ids[lo..=hi] {
+                                        state.selected_artists.insert(bid);
+                                    }
+                                    let ids: Vec<i64> =
+                                        state.selected_artists.iter().copied().collect();
+                                    pending_actions.push(FxAction::SelectArtists(ids));
+                                } else {
+                                    pending_actions
+                                        .push(FxAction::SelectArtist(Some(artist.band_id)));
+                                }
+                            } else if modifiers.ctrl || modifiers.command {
+                                if state.selected_artists.contains(&artist.band_id) {
+                                    state.selected_artists.remove(&artist.band_id);
+                                } else {
+                                    state.selected_artists.insert(artist.band_id);
+                                }
+                                state.last_clicked_artist = Some(artist.band_id);
+                                let ids: Vec<i64> =
+                                    state.selected_artists.iter().copied().collect();
+                                pending_actions.push(FxAction::SelectArtists(ids));
+                            } else {
+                                pending_actions.push(FxAction::SelectArtist(Some(artist.band_id)));
+                            }
                         }
 
                         resp.context_menu(|ui| {
-                            if paint::sharp_button(ui, "Sync Artist").clicked() {
+                            if state.selected_artists.contains(&artist.band_id)
+                                && state.selected_artists.len() > 1
+                            {
+                                let sel_ids: Vec<i64> =
+                                    state.selected_artists.iter().copied().collect();
+                                if paint::sharp_button(
+                                    ui,
+                                    format!("Sync {} Selected Artists", sel_ids.len()),
+                                )
+                                .clicked()
+                                {
+                                    let _ = core_tx.send(UiToWorkerCommand::Sync {
+                                        scope: SyncScope::Selected(sel_ids),
+                                        mode: state.sync_mode,
+                                    });
+                                    ui.close();
+                                }
+                            } else if paint::sharp_button(ui, "Sync Artist").clicked() {
                                 let _ = core_tx.send(UiToWorkerCommand::Sync {
                                     scope: SyncScope::Selected(vec![artist.band_id]),
                                     mode: state.sync_mode,
@@ -571,9 +647,6 @@ fn draw_artist_row(
     let th = state.active_theme;
     let desired = Vec2::new(ui.available_width(), 26.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
-    if resp.drag_started() {
-        resp.dnd_set_drag_payload(band_id);
-    }
     if resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
@@ -867,6 +940,106 @@ fn draw_fx_group_header_row(
     resp
 }
 
+fn show_fx_grouping_bar(ui: &mut egui::Ui, state: &FxState, pending_actions: &mut Vec<FxAction>) {
+    let th = &state.active_theme;
+    let current_label = match state.active_grouping {
+        bcvault_core::groups::ActiveGrouping::None => "No Grouping".to_string(),
+        bcvault_core::groups::ActiveGrouping::Builtin(kind) => format!("Auto: {}", kind.label()),
+        bcvault_core::groups::ActiveGrouping::CustomSet(set_id) => state
+            .group_sets
+            .iter()
+            .find(|s| s.id == set_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "Custom Set".to_string()),
+    };
+
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("fx_grouping_switcher")
+            .selected_text(current_label)
+            .width((ui.available_width() - 96.0).max(80.0))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        state.active_grouping == bcvault_core::groups::ActiveGrouping::None,
+                        "No Grouping",
+                    )
+                    .clicked()
+                {
+                    pending_actions.push(FxAction::SetActiveGrouping(
+                        bcvault_core::groups::ActiveGrouping::None,
+                    ));
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("Built-in (Automatic)")
+                        .size(11.0)
+                        .color(th.text_dim),
+                );
+                for kind in bcvault_core::groups::BuiltinGrouping::ALL {
+                    let target = bcvault_core::groups::ActiveGrouping::Builtin(kind);
+                    if ui
+                        .selectable_label(state.active_grouping == target, kind.label())
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::SetActiveGrouping(target));
+                    }
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("Custom Group Sets")
+                        .size(11.0)
+                        .color(th.text_dim),
+                );
+                for set in &state.group_sets {
+                    let target = bcvault_core::groups::ActiveGrouping::CustomSet(set.id);
+                    if ui
+                        .selectable_label(state.active_grouping == target, &set.name)
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::SetActiveGrouping(target));
+                    }
+                }
+                if paint::sharp_button(ui, "+ New Grouping Set...").clicked() {
+                    pending_actions.push(FxAction::NewGroupSet);
+                    ui.close();
+                }
+            });
+
+        if paint::sharp_button(ui, "+Grp")
+            .on_hover_text("Create a new artist group")
+            .clicked()
+        {
+            if state.selected_artists.is_empty() {
+                pending_actions.push(FxAction::NewGroup);
+            } else {
+                pending_actions.push(FxAction::NewGroupFromSelection(
+                    state.selected_artists.iter().copied().collect(),
+                ));
+            }
+        }
+
+        if let bcvault_core::groups::ActiveGrouping::CustomSet(set_id) = state.active_grouping
+            && let Some(set) = state.group_sets.iter().find(|s| s.id == set_id)
+        {
+            ui.menu_button("Set", |ui| {
+                if paint::sharp_button(ui, "Rename Set...").clicked() {
+                    pending_actions.push(FxAction::RenameGroupSet(set.id));
+                    ui.close();
+                }
+                if paint::sharp_button(ui, "New Set...").clicked() {
+                    pending_actions.push(FxAction::NewGroupSet);
+                    ui.close();
+                }
+                ui.separator();
+                if paint::sharp_button(ui, "Delete Set...").clicked() {
+                    pending_actions.push(FxAction::DeleteGroupSet(set.id));
+                    ui.close();
+                }
+            });
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn show_fx_group_context_menu(
     ui: &mut egui::Ui,
@@ -875,17 +1048,19 @@ fn show_fx_group_context_menu(
     pending_actions: &mut Vec<FxAction>,
     group_id: i64,
     _group_name: &str,
-    _member_ids: &[i64],
+    member_ids: &[i64],
 ) {
-    if paint::sharp_button(ui, "Rename...").clicked() {
-        pending_actions.push(FxAction::EditGroup(group_id));
-        ui.close();
+    let is_custom = matches!(
+        state.active_grouping,
+        bcvault_core::groups::ActiveGrouping::CustomSet(_)
+    ) && group_id > 0;
+    if is_custom {
+        if paint::sharp_button(ui, "Edit group & members...").clicked() {
+            pending_actions.push(FxAction::EditGroup(group_id));
+            ui.close();
+        }
+        ui.separator();
     }
-    if paint::sharp_button(ui, "Edit rule...").clicked() {
-        pending_actions.push(FxAction::EditGroup(group_id));
-        ui.close();
-    }
-    ui.separator();
     if paint::sharp_button(ui, "Sync group").clicked() {
         pending_actions.push(FxAction::SyncGroup(group_id));
         ui.close();
@@ -894,28 +1069,36 @@ fn show_fx_group_context_menu(
         pending_actions.push(FxAction::DownloadRemainingGroup(group_id));
         ui.close();
     }
+    if paint::sharp_button(ui, "Select artists in group").clicked() {
+        pending_actions.push(FxAction::SelectArtists(member_ids.to_vec()));
+        ui.close();
+    }
     if paint::sharp_button(ui, "View releases of group").clicked() {
         pending_actions.push(FxAction::ViewGroup(group_id));
         ui.close();
     }
-    ui.separator();
-    if let Some(pos) = state.groups.iter().position(|g| g.id == group_id) {
-        if pos > 0 && paint::sharp_button(ui, "Move up").clicked() {
-            let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
-            ids.swap(pos, pos - 1);
-            let _ = core_tx.send(UiToWorkerCommand::ReorderArtistGroups { ids });
+    if let bcvault_core::groups::ActiveGrouping::CustomSet(set_id) = state.active_grouping
+        && group_id > 0
+    {
+        ui.separator();
+        if let Some(pos) = state.groups.iter().position(|g| g.id == group_id) {
+            if pos > 0 && paint::sharp_button(ui, "Move up").clicked() {
+                let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
+                ids.swap(pos, pos - 1);
+                let _ = core_tx.send(UiToWorkerCommand::ReorderArtistGroups { set_id, ids });
+                ui.close();
+            }
+            if pos + 1 < state.groups.len() && paint::sharp_button(ui, "Move down").clicked() {
+                let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
+                ids.swap(pos, pos + 1);
+                let _ = core_tx.send(UiToWorkerCommand::ReorderArtistGroups { set_id, ids });
+                ui.close();
+            }
+        }
+        if paint::sharp_button(ui, "Delete group...").clicked() {
+            pending_actions.push(FxAction::DeleteGroup(group_id));
             ui.close();
         }
-        if pos + 1 < state.groups.len() && paint::sharp_button(ui, "Move down").clicked() {
-            let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
-            ids.swap(pos, pos + 1);
-            let _ = core_tx.send(UiToWorkerCommand::ReorderArtistGroups { ids });
-            ui.close();
-        }
-    }
-    if paint::sharp_button(ui, "Delete group...").clicked() {
-        pending_actions.push(FxAction::DeleteGroup(group_id));
-        ui.close();
     }
 }
 
@@ -925,36 +1108,54 @@ fn show_fx_move_to_group_submenu(
     pending_actions: &mut Vec<FxAction>,
     band_id: i64,
 ) {
-    let target_ids = vec![band_id];
-    ui.menu_button("Move to group", |ui| {
-        for g in &state.groups {
-            if paint::sharp_button(ui, &g.name).clicked() {
-                pending_actions.push(FxAction::MoveArtistsToGroup(
-                    target_ids.clone(),
-                    bcvault_core::groups::PinTarget::Group(g.id),
-                ));
-                ui.close();
+    let target_ids: Vec<i64> =
+        if state.selected_artists.contains(&band_id) && state.selected_artists.len() > 1 {
+            state.selected_artists.iter().copied().collect()
+        } else {
+            vec![band_id]
+        };
+    let label = if target_ids.len() > 1 {
+        format!("Move {} artists to group", target_ids.len())
+    } else {
+        "Move to group".to_string()
+    };
+    ui.menu_button(label, |ui| {
+        if matches!(
+            state.active_grouping,
+            bcvault_core::groups::ActiveGrouping::CustomSet(_)
+        ) {
+            for g in &state.groups {
+                if paint::sharp_button(ui, &g.name).clicked() {
+                    pending_actions.push(FxAction::MoveArtistsToGroup(
+                        target_ids.clone(),
+                        bcvault_core::groups::PinTarget::Group(g.id),
+                    ));
+                    ui.close();
+                }
+            }
+            let any_in_group = target_ids.iter().any(|id| state.pins.contains_key(id));
+            if any_in_group {
+                if !state.groups.is_empty() {
+                    ui.separator();
+                }
+                if paint::sharp_button(ui, "Ungrouped").clicked() {
+                    pending_actions.push(FxAction::MoveArtistsToGroup(
+                        target_ids.clone(),
+                        bcvault_core::groups::PinTarget::Ungrouped,
+                    ));
+                    ui.close();
+                }
+            }
+            if !state.groups.is_empty() || any_in_group {
+                ui.separator();
             }
         }
-        if !state.groups.is_empty() {
-            ui.separator();
-        }
-        if paint::sharp_button(ui, "Ungrouped").clicked() {
-            pending_actions.push(FxAction::MoveArtistsToGroup(
-                target_ids.clone(),
-                bcvault_core::groups::PinTarget::Ungrouped,
-            ));
-            ui.close();
-        }
-        if paint::sharp_button(ui, "Automatic (remove manual placement)").clicked() {
-            pending_actions.push(FxAction::MoveArtistsToGroup(
-                target_ids.clone(),
-                bcvault_core::groups::PinTarget::Auto,
-            ));
-            ui.close();
-        }
-        ui.separator();
-        if paint::sharp_button(ui, "New group from selection...").clicked() {
+        if paint::sharp_button(
+            ui,
+            format!("New group from selection ({})...", target_ids.len()),
+        )
+        .clicked()
+        {
             pending_actions.push(FxAction::NewGroupFromSelection(target_ids.clone()));
             ui.close();
         }

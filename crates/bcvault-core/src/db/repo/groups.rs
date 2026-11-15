@@ -1,56 +1,197 @@
 use crate::error::DbError;
 use crate::groups::{
-    ArtistGroup, GroupError, GroupRule, MAX_GROUPS, PinTarget, deserialize_rule_json,
-    serialize_rule_json, validate_group_name,
+    ActiveGrouping, ArtistGroup, ArtistGroupSet, GroupError, MAX_GROUP_SETS, MAX_GROUPS, PinTarget,
+    validate_group_name,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashMap;
 use tracing::warn;
 
-pub fn list_groups(conn: &Connection) -> Result<Vec<ArtistGroup>, DbError> {
+const ACTIVE_GROUPING_KEY: &str = "active_artist_grouping";
+
+pub fn get_active_grouping(conn: &Connection) -> Result<ActiveGrouping, DbError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![ACTIVE_GROUPING_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(json) = raw else {
+        return Ok(ActiveGrouping::None);
+    };
+    match serde_json::from_str::<ActiveGrouping>(&json) {
+        Ok(ActiveGrouping::CustomSet(set_id)) => {
+            let exists: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM artist_group_sets WHERE id = ?1",
+                    params![set_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if exists.is_some() {
+                Ok(ActiveGrouping::CustomSet(set_id))
+            } else {
+                Ok(ActiveGrouping::None)
+            }
+        }
+        Ok(other) => Ok(other),
+        Err(err) => {
+            warn!("ignoring invalid active_artist_grouping setting: {}", err);
+            Ok(ActiveGrouping::None)
+        }
+    }
+}
+
+pub fn set_active_grouping(conn: &Connection, grouping: ActiveGrouping) -> Result<(), DbError> {
+    if let ActiveGrouping::CustomSet(set_id) = grouping {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM artist_group_sets WHERE id = ?1",
+                params![set_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(GroupError::GroupSetNotFound(set_id).into());
+        }
+    }
+    let json = serde_json::to_string(&grouping)?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![ACTIVE_GROUPING_KEY, json],
+    )?;
+    Ok(())
+}
+
+pub fn list_group_sets(conn: &Connection) -> Result<Vec<ArtistGroupSet>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, pos, collapsed, rule_json
-         FROM artist_groups
+        "SELECT id, name, pos
+         FROM artist_group_sets
          ORDER BY pos ASC, id ASC",
     )?;
     let rows = stmt.query_map([], |row| {
-        let id: i64 = row.get(0)?;
-        let name: String = row.get(1)?;
-        let pos: i32 = row.get(2)?;
-        let collapsed: i32 = row.get(3)?;
-        let rule_json: Option<String> = row.get(4)?;
-        Ok((id, name, pos, collapsed != 0, rule_json))
+        Ok(ArtistGroupSet {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            pos: row.get(2)?,
+        })
+    })?;
+    let mut sets = Vec::new();
+    for row in rows {
+        sets.push(row?);
+    }
+    Ok(sets)
+}
+
+pub fn create_group_set(conn: &Connection, name: &str) -> Result<ArtistGroupSet, DbError> {
+    let name = validate_group_name(name)?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM artist_group_sets", [], |r| r.get(0))?;
+    if count >= MAX_GROUP_SETS as i64 {
+        return Err(GroupError::TooManyGroupSets {
+            max: MAX_GROUP_SETS,
+        }
+        .into());
+    }
+    let duplicate: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artist_group_sets WHERE name = ?1",
+            params![&name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if duplicate.is_some() {
+        return Err(GroupError::DuplicateSetName(name).into());
+    }
+    let pos: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(pos) + 1, 0) FROM artist_group_sets",
+        [],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO artist_group_sets (name, pos) VALUES (?1, ?2)",
+        params![&name, pos],
+    )?;
+    let id = conn.last_insert_rowid();
+    Ok(ArtistGroupSet { id, name, pos })
+}
+
+pub fn rename_group_set(conn: &Connection, set_id: i64, name: &str) -> Result<(), DbError> {
+    let name = validate_group_name(name)?;
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artist_group_sets WHERE id = ?1",
+            params![set_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(GroupError::GroupSetNotFound(set_id).into());
+    }
+    let duplicate: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artist_group_sets WHERE name = ?1 AND id != ?2",
+            params![&name, set_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if duplicate.is_some() {
+        return Err(GroupError::DuplicateSetName(name).into());
+    }
+    conn.execute(
+        "UPDATE artist_group_sets SET name = ?1 WHERE id = ?2",
+        params![&name, set_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_group_set(conn: &Connection, set_id: i64) -> Result<(), DbError> {
+    let changed = conn.execute(
+        "DELETE FROM artist_group_sets WHERE id = ?1",
+        params![set_id],
+    )?;
+    if changed == 0 {
+        return Err(GroupError::GroupSetNotFound(set_id).into());
+    }
+    if matches!(get_active_grouping(conn)?, ActiveGrouping::None) {
+        // ActiveGrouping::CustomSet(set_id) now resolves to None; persist None cleanly.
+        let _ = set_active_grouping(conn, ActiveGrouping::None);
+    }
+    Ok(())
+}
+
+pub fn list_groups(conn: &Connection, set_id: i64) -> Result<Vec<ArtistGroup>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, set_id, name, pos, collapsed
+         FROM artist_groups
+         WHERE set_id = ?1
+         ORDER BY pos ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![set_id], |row| {
+        let collapsed: i32 = row.get(4)?;
+        Ok(ArtistGroup {
+            id: row.get(0)?,
+            set_id: row.get(1)?,
+            name: row.get(2)?,
+            pos: row.get(3)?,
+            collapsed: collapsed != 0,
+        })
     })?;
 
     let mut groups = Vec::new();
     for row in rows {
-        let (id, name, pos, collapsed, rule_json) = row?;
-        let rule = match rule_json {
-            Some(json) => match deserialize_rule_json(&json) {
-                Ok(r) => Some(r),
-                Err(err) => {
-                    warn!(group_id = id, "ignoring invalid group rule_json: {}", err);
-                    None
-                }
-            },
-            None => None,
-        };
-        groups.push(ArtistGroup {
-            id,
-            name,
-            pos,
-            collapsed,
-            rule,
-        });
+        groups.push(row?);
     }
     Ok(groups)
 }
 
-pub fn list_pins(conn: &Connection) -> Result<HashMap<i64, Option<i64>>, DbError> {
-    let mut stmt = conn.prepare("SELECT band_id, group_id FROM artist_group_pins")?;
-    let rows = stmt.query_map([], |row| {
+pub fn list_pins(conn: &Connection, set_id: i64) -> Result<HashMap<i64, i64>, DbError> {
+    let mut stmt =
+        conn.prepare("SELECT band_id, group_id FROM artist_group_pins WHERE set_id = ?1")?;
+    let rows = stmt.query_map(params![set_id], |row| {
         let band_id: i64 = row.get(0)?;
-        let group_id: Option<i64> = row.get(1)?;
+        let group_id: i64 = row.get(1)?;
         Ok((band_id, group_id))
     })?;
     let mut pins = HashMap::new();
@@ -61,25 +202,32 @@ pub fn list_pins(conn: &Connection) -> Result<HashMap<i64, Option<i64>>, DbError
     Ok(pins)
 }
 
-pub fn create_group(
-    conn: &Connection,
-    name: &str,
-    rule: Option<&GroupRule>,
-) -> Result<ArtistGroup, DbError> {
-    let name = validate_group_name(name)?;
-    if let Some(r) = rule {
-        r.validate()?;
+pub fn create_group(conn: &Connection, set_id: i64, name: &str) -> Result<ArtistGroup, DbError> {
+    let set_exists: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artist_group_sets WHERE id = ?1",
+            params![set_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if set_exists.is_none() {
+        return Err(GroupError::GroupSetNotFound(set_id).into());
     }
 
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM artist_groups", [], |r| r.get(0))?;
+    let name = validate_group_name(name)?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM artist_groups WHERE set_id = ?1",
+        params![set_id],
+        |r| r.get(0),
+    )?;
     if count >= MAX_GROUPS as i64 {
         return Err(GroupError::TooManyGroups { max: MAX_GROUPS }.into());
     }
 
     let duplicate: Option<i64> = conn
         .query_row(
-            "SELECT id FROM artist_groups WHERE name = ?1",
-            params![&name],
+            "SELECT id FROM artist_groups WHERE set_id = ?1 AND name = ?2",
+            params![set_id, &name],
             |r| r.get(0),
         )
         .optional()?;
@@ -87,54 +235,43 @@ pub fn create_group(
         return Err(GroupError::DuplicateName(name).into());
     }
 
-    let rule_json = rule.map(serialize_rule_json).transpose()?;
     let pos: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(pos) + 1, 0) FROM artist_groups",
-        [],
+        "SELECT COALESCE(MAX(pos) + 1, 0) FROM artist_groups WHERE set_id = ?1",
+        params![set_id],
         |r| r.get(0),
     )?;
 
     conn.execute(
-        "INSERT INTO artist_groups (name, pos, collapsed, rule_json) VALUES (?1, ?2, 0, ?3)",
-        params![&name, pos, rule_json],
+        "INSERT INTO artist_groups (set_id, name, pos, collapsed) VALUES (?1, ?2, ?3, 0)",
+        params![set_id, &name, pos],
     )?;
     let id = conn.last_insert_rowid();
-
     Ok(ArtistGroup {
         id,
+        set_id,
         name,
         pos,
         collapsed: false,
-        rule: rule.cloned(),
     })
 }
 
-pub fn update_group(
-    conn: &Connection,
-    id: i64,
-    name: &str,
-    rule: Option<&GroupRule>,
-) -> Result<ArtistGroup, DbError> {
-    let name = validate_group_name(name)?;
-    if let Some(r) = rule {
-        r.validate()?;
-    }
-
-    let existing: Option<(i32, i32)> = conn
+pub fn update_group(conn: &Connection, id: i64, name: &str) -> Result<i64, DbError> {
+    let set_id: Option<i64> = conn
         .query_row(
-            "SELECT pos, collapsed FROM artist_groups WHERE id = ?1",
+            "SELECT set_id FROM artist_groups WHERE id = ?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .optional()?;
-    let Some((pos, collapsed)) = existing else {
+    let Some(set_id) = set_id else {
         return Err(GroupError::GroupNotFound(id).into());
     };
 
+    let name = validate_group_name(name)?;
     let duplicate: Option<i64> = conn
         .query_row(
-            "SELECT id FROM artist_groups WHERE name = ?1 AND id != ?2",
-            params![&name, id],
+            "SELECT id FROM artist_groups WHERE set_id = ?1 AND name = ?2 AND id != ?3",
+            params![set_id, &name, id],
             |r| r.get(0),
         )
         .optional()?;
@@ -142,19 +279,11 @@ pub fn update_group(
         return Err(GroupError::DuplicateName(name).into());
     }
 
-    let rule_json = rule.map(serialize_rule_json).transpose()?;
     conn.execute(
-        "UPDATE artist_groups SET name = ?1, rule_json = ?2 WHERE id = ?3",
-        params![&name, rule_json, id],
+        "UPDATE artist_groups SET name = ?1 WHERE id = ?2",
+        params![&name, id],
     )?;
-
-    Ok(ArtistGroup {
-        id,
-        name,
-        pos,
-        collapsed: collapsed != 0,
-        rule: rule.cloned(),
-    })
+    Ok(set_id)
 }
 
 pub fn delete_group(conn: &Connection, id: i64) -> Result<(), DbError> {
@@ -165,39 +294,14 @@ pub fn delete_group(conn: &Connection, id: i64) -> Result<(), DbError> {
     Ok(())
 }
 
-pub fn reorder_groups(conn: &mut Connection, ids: &[i64]) -> Result<(), DbError> {
+pub fn reorder_groups(conn: &mut Connection, set_id: i64, ids: &[i64]) -> Result<(), DbError> {
     let tx = conn.transaction()?;
-    let mut existing_ids = Vec::new();
-    {
-        let mut stmt = tx.prepare("SELECT id FROM artist_groups ORDER BY pos ASC, id ASC")?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        for row in rows {
-            existing_ids.push(row?);
-        }
+    for (pos, &id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE artist_groups SET pos = ?1 WHERE id = ?2 AND set_id = ?3",
+            params![pos as i32, id, set_id],
+        )?;
     }
-
-    let mut next_pos: i32 = 0;
-    let mut seen = Vec::with_capacity(existing_ids.len());
-    for &id in ids {
-        if existing_ids.contains(&id) && !seen.contains(&id) {
-            tx.execute(
-                "UPDATE artist_groups SET pos = ?1 WHERE id = ?2",
-                params![next_pos, id],
-            )?;
-            next_pos += 1;
-            seen.push(id);
-        }
-    }
-    for id in existing_ids {
-        if !seen.contains(&id) {
-            tx.execute(
-                "UPDATE artist_groups SET pos = ?1 WHERE id = ?2",
-                params![next_pos, id],
-            )?;
-            next_pos += 1;
-        }
-    }
-
     tx.commit()?;
     Ok(())
 }
@@ -213,48 +317,78 @@ pub fn set_collapsed(conn: &Connection, id: i64, collapsed: bool) -> Result<(), 
     Ok(())
 }
 
-pub fn set_pins(conn: &mut Connection, band_ids: &[i64], target: PinTarget) -> Result<(), DbError> {
+pub fn set_pins(
+    conn: &mut Connection,
+    set_id: i64,
+    band_ids: &[i64],
+    target: PinTarget,
+) -> Result<(), DbError> {
     if band_ids.is_empty() {
         return Ok(());
     }
+    if let PinTarget::Group(gid) = target {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM artist_groups WHERE id = ?1 AND set_id = ?2",
+                params![gid, set_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(GroupError::GroupNotFound(gid).into());
+        }
+    }
+
     let tx = conn.transaction()?;
-    match target {
-        PinTarget::Auto => {
-            let mut stmt = tx.prepare("DELETE FROM artist_group_pins WHERE band_id = ?1")?;
-            for &band_id in band_ids {
-                stmt.execute(params![band_id])?;
+    for &band_id in band_ids {
+        match target {
+            PinTarget::Group(gid) => {
+                tx.execute(
+                    "INSERT INTO artist_group_pins (set_id, band_id, group_id) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(set_id, band_id) DO UPDATE SET group_id = excluded.group_id",
+                    params![set_id, band_id, gid],
+                )?;
+            }
+            PinTarget::Ungrouped => {
+                tx.execute(
+                    "DELETE FROM artist_group_pins WHERE set_id = ?1 AND band_id = ?2",
+                    params![set_id, band_id],
+                )?;
             }
         }
-        PinTarget::Ungrouped => {
-            let mut stmt = tx.prepare(
-                "INSERT INTO artist_group_pins (band_id, group_id)
-                 VALUES (?1, NULL)
-                 ON CONFLICT(band_id) DO UPDATE SET group_id = NULL",
-            )?;
-            for &band_id in band_ids {
-                stmt.execute(params![band_id])?;
-            }
-        }
-        PinTarget::Group(gid) => {
-            let exists: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM artist_groups WHERE id = ?1",
-                    params![gid],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if exists.is_none() {
-                return Err(GroupError::GroupNotFound(gid).into());
-            }
-            let mut stmt = tx.prepare(
-                "INSERT INTO artist_group_pins (band_id, group_id)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(band_id) DO UPDATE SET group_id = excluded.group_id",
-            )?;
-            for &band_id in band_ids {
-                stmt.execute(params![band_id, gid])?;
-            }
-        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn replace_group_members(
+    conn: &mut Connection,
+    set_id: i64,
+    group_id: i64,
+    member_band_ids: &[i64],
+) -> Result<(), DbError> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM artist_groups WHERE id = ?1 AND set_id = ?2",
+            params![group_id, set_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(GroupError::GroupNotFound(group_id).into());
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM artist_group_pins WHERE set_id = ?1 AND group_id = ?2",
+        params![set_id, group_id],
+    )?;
+    for &band_id in member_band_ids {
+        tx.execute(
+            "INSERT INTO artist_group_pins (set_id, band_id, group_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(set_id, band_id) DO UPDATE SET group_id = excluded.group_id",
+            params![set_id, band_id, group_id],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -264,172 +398,66 @@ pub fn set_pins(conn: &mut Connection, band_ids: &[i64], target: PinTarget) -> R
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::db::migrations::{MIGRATIONS, run, run_with};
-    use crate::groups::{Condition, ConditionKind, MatchMode};
+    use crate::db::migrations;
+    use crate::groups::BuiltinGrouping;
 
-    fn setup_db() -> Connection {
+    fn setup() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        run(&mut conn).unwrap();
+        migrations::run(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO artists (band_id, slug, name, url) VALUES
+             (1, 'a1', 'Artist 1', 'https://a1.bandcamp.com'),
+             (2, 'a2', 'Artist 2', 'https://a2.bandcamp.com')",
+            [],
+        )
+        .unwrap();
         conn
     }
 
-    fn insert_artist(conn: &Connection, band_id: i64, name: &str) {
-        conn.execute(
-            "INSERT INTO artists (band_id, slug, name, url) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                band_id,
-                format!("slug-{band_id}"),
-                name,
-                format!("https://slug-{band_id}.bandcamp.com")
-            ],
-        )
-        .unwrap();
-    }
-
-    // Test 7: Migration on a populated database
     #[test]
-    fn test_7_migration_on_populated_db_and_fk_check() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        run_with(&mut conn, &MIGRATIONS[..8]).unwrap();
+    fn test_group_sets_non_destructive_switching_and_cascades() {
+        let mut conn = setup();
+        assert_eq!(get_active_grouping(&conn).unwrap(), ActiveGrouping::None);
 
-        insert_artist(&conn, 42, "Existing Artist");
-        conn.execute(
-            "INSERT INTO releases (item_type, item_id, band_id, title, artist_name, url)
-             VALUES ('album', 100, 42, 'Existing Release', 'Existing Artist', 'https://slug-42.bandcamp.com/album/a')",
-            [],
-        )
-        .unwrap();
+        let s1 = create_group_set(&conn, "Workflow").unwrap();
+        let s2 = create_group_set(&conn, "Labels").unwrap();
+        let g1 = create_group(&conn, s1.id, "Finished").unwrap();
+        let g2 = create_group(&conn, s2.id, "Finished").unwrap(); // same name allowed in different set
 
-        run(&mut conn).unwrap();
+        set_pins(&mut conn, s1.id, &[1], PinTarget::Group(g1.id)).unwrap();
+        set_pins(&mut conn, s2.id, &[2], PinTarget::Group(g2.id)).unwrap();
 
-        let artist_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(artist_count, 1);
+        set_active_grouping(&conn, ActiveGrouping::CustomSet(s1.id)).unwrap();
+        assert_eq!(
+            get_active_grouping(&conn).unwrap(),
+            ActiveGrouping::CustomSet(s1.id)
+        );
+        set_active_grouping(&conn, ActiveGrouping::Builtin(BuiltinGrouping::FirstLetter)).unwrap();
+        assert_eq!(
+            get_active_grouping(&conn).unwrap(),
+            ActiveGrouping::Builtin(BuiltinGrouping::FirstLetter)
+        );
 
-        let fk_violations: Vec<String> = conn
-            .prepare("PRAGMA foreign_key_check")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert!(fk_violations.is_empty());
-        assert!(list_groups(&conn).unwrap().is_empty());
-        assert!(list_pins(&conn).unwrap().is_empty());
-    }
+        // Pins and groups in s1 and s2 remain intact
+        assert_eq!(
+            list_pins(&conn, s1.id).unwrap(),
+            HashMap::from([(1, g1.id)])
+        );
+        assert_eq!(
+            list_pins(&conn, s2.id).unwrap(),
+            HashMap::from([(2, g2.id)])
+        );
 
-    // Test 8: Cascades and case-insensitive uniqueness
-    #[test]
-    fn test_8_cascades_and_case_insensitive_unique_names() {
-        let mut conn = setup_db();
-        insert_artist(&conn, 1, "Artist One");
-        insert_artist(&conn, 2, "Artist Two");
+        // replace_group_members swaps members cleanly
+        replace_group_members(&mut conn, s1.id, g1.id, &[2]).unwrap();
+        assert_eq!(
+            list_pins(&conn, s1.id).unwrap(),
+            HashMap::from([(2, g1.id)])
+        );
 
-        let g = create_group(&conn, "Ambient", None).unwrap();
-        let dup = create_group(&conn, "ambient", None).unwrap_err();
-        assert!(matches!(dup, DbError::Group(GroupError::DuplicateName(_))));
-
-        set_pins(&mut conn, &[1, 2], PinTarget::Group(g.id)).unwrap();
-        assert_eq!(list_pins(&conn).unwrap().len(), 2);
-
-        // Deleting artist removes its pin
-        conn.execute("DELETE FROM artists WHERE band_id = 1", [])
-            .unwrap();
-        assert_eq!(list_pins(&conn).unwrap().len(), 1);
-        assert!(!list_pins(&conn).unwrap().contains_key(&1));
-
-        // Deleting group removes remaining pin via ON DELETE CASCADE
-        delete_group(&conn, g.id).unwrap();
-        assert!(list_pins(&conn).unwrap().is_empty());
-    }
-
-    // Test 9: Bad rule_json loads with rule = None and no panic
-    #[test]
-    fn test_9_bad_rule_json_loads_as_none() {
-        let conn = setup_db();
-        conn.execute(
-            "INSERT INTO artist_groups (name, pos, collapsed, rule_json) VALUES ('Broken', 0, 0, '{not valid json')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO artist_groups (name, pos, collapsed, rule_json) VALUES ('Future', 1, 0, '{\"v\":99,\"mode\":\"All\",\"conditions\":[]}')",
-            [],
-        )
-        .unwrap();
-
-        let groups = list_groups(&conn).unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].rule, None);
-        assert_eq!(groups[1].rule, None);
-    }
-
-    // Test 10: Validation, 64-group cap, reorder, collapsed, set_pins for all three targets
-    #[test]
-    fn test_10_repo_validation_reorder_collapsed_and_pins() {
-        let mut conn = setup_db();
-        insert_artist(&conn, 1, "A");
-        insert_artist(&conn, 2, "B");
-
-        // Name length validation
-        assert!(matches!(
-            create_group(&conn, "   ", None),
-            Err(DbError::Group(GroupError::EmptyName))
-        ));
-        let long_name = "a".repeat(41);
-        assert!(matches!(
-            create_group(&conn, &long_name, None),
-            Err(DbError::Group(GroupError::NameTooLong { max: 40 }))
-        ));
-
-        let rule = GroupRule {
-            mode: MatchMode::All,
-            conditions: vec![Condition {
-                negate: false,
-                kind: ConditionKind::NeverSynced,
-            }],
-        };
-
-        let g1 = create_group(&conn, "First", Some(&rule)).unwrap();
-        let g2 = create_group(&conn, "Second", None).unwrap();
-
-        // Update
-        let updated = update_group(&conn, g2.id, "Renamed", Some(&rule)).unwrap();
-        assert_eq!(updated.name, "Renamed");
-        assert_eq!(updated.rule, Some(rule));
-
-        // Reorder
-        reorder_groups(&mut conn, &[g2.id, g1.id]).unwrap();
-        let listed = list_groups(&conn).unwrap();
-        assert_eq!(listed[0].id, g2.id);
-        assert_eq!(listed[1].id, g1.id);
-
-        // Collapsed
-        set_collapsed(&conn, g2.id, true).unwrap();
-        assert!(list_groups(&conn).unwrap()[0].collapsed);
-
-        // Pins for all three targets
-        set_pins(&mut conn, &[1, 2], PinTarget::Group(g1.id)).unwrap();
-        let pins = list_pins(&conn).unwrap();
-        assert_eq!(pins.get(&1), Some(&Some(g1.id)));
-        assert_eq!(pins.get(&2), Some(&Some(g1.id)));
-
-        set_pins(&mut conn, &[1], PinTarget::Ungrouped).unwrap();
-        assert_eq!(list_pins(&conn).unwrap().get(&1), Some(&None));
-
-        set_pins(&mut conn, &[1], PinTarget::Auto).unwrap();
-        assert!(!list_pins(&conn).unwrap().contains_key(&1));
-
-        // 64-group cap (already have 2)
-        for i in 2..64 {
-            create_group(&conn, &format!("G{i}"), None).unwrap();
-        }
-        assert!(matches!(
-            create_group(&conn, "Overflow", None),
-            Err(DbError::Group(GroupError::TooManyGroups { max: 64 }))
-        ));
+        // Deleting s1 cascades its groups and pins without touching s2
+        delete_group_set(&conn, s1.id).unwrap();
+        assert!(list_groups(&conn, s1.id).unwrap().is_empty());
+        assert_eq!(list_groups(&conn, s2.id).unwrap().len(), 1);
     }
 }

@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/artist-groups  ·  Updated: 2026-11-15
 
 ## Done
+- none: rework artist groups with non-destructive group sets, 7 built-in automatic groupings, multi-artist selection in fx, and searchable member checklist in group editor (`feat/artist-groups` rework; updated `0009_artist_groups.sql` before merge, updated `ARCHIVE.md` for future `ByGenre` grouping)
 - none: document groups and rules (`ARTIST_GROUPS.md` step 10)
 - none: drag artists onto group headers (`ARTIST_GROUPS.md` step 9)
 - none: filter releases by several artists (`ARTIST_GROUPS.md` step 8)

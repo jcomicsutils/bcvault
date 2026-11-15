@@ -180,6 +180,15 @@ An Archive section:
 - A status line: releases with archived text, covers stored, total size in MB, and a projected total once at least 20 covers are stored (average size times releases that have an `art_id`).
 - Buttons: Backfill text (with its page count), Fetch missing covers, Convert stored covers, Cancel, Purge covers, Purge orphaned data. State that turning options off never deletes data.
 
+### 3.12 Genre artist grouping integration (`bcvault-core::groups`)
+
+Once `release_archive.tags_json` is in place, add `BuiltinGrouping::ByGenre` to `bcvault-core::groups` (and expose it in the sidebar Grouping switcher in both `bcvault-fx` and `bcvault`):
+
+- For each artist, aggregate all tags from `release_archive.tags_json` joined with `releases` on `(item_type, item_id)` for `band_id`.
+- Bucket each artist by its most frequent tag (normalized/title-cased, tie-broken alphabetically), falling back to `"Untagged"` when an artist has no archived tags yet.
+- Sort genre buckets alphabetically, with `"Untagged"` last.
+- Keep `ByGenre` strictly non-destructive (computed on the fly, never modifying any custom Group Set).
+
 ## 4. Tests
 
 | # | Area | Scenario | Expected |
@@ -217,7 +226,8 @@ Each step leaves the workspace compiling with tests green.
 6. `feat(worker): add archive backfill and convert jobs` (tests 15, 16).
 7. `feat(fx): archive settings, status and save cover as`, including purge actions (tests 18, 20).
 8. `feat(ui): archive settings in the classic UI`.
-9. `docs(archive): document what is archived and the cover options` and update the README.
+9. `feat(groups): add built-in ByGenre artist grouping from release_archive.tags_json`.
+10. `docs(archive): document what is archived and the cover options` and update the README.
 
 ## 6. Definition of done
 

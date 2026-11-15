@@ -20,7 +20,7 @@
 | Tooling (T0) | Active: architectural guards (`scripts/guards.sh`), `scripts/check.sh`, and `.githooks/pre-push` with auto `install-fx.sh` landed; commit-msg hooks and cliff optional. |
 | Tabbed settings & ZIP options (`PLANS/SETTINGS_TABS/SETTINGS_TABS.md`) | Implemented (Steps 1 to 7) on `feat/settings-tabs`; 6-tab settings modal, `Settings::sanitize`, ZIP extraction/cleanup parity, and coverage tests. |
 | Bulk selection & download remaining (`PLANS/DOWNLOAD_FLOW/DOWNLOAD_FLOW.md`) | Planned, not started; select all/remaining/invert, idempotent `in_flight` enqueue, `EnqueueSummary`, soft-quota parity in FX, and bulk confirmation. |
-| Artist groups (`PLANS/ARTIST_GROUPS/ARTIST_GROUPS.md`) | Planned, not started; manual and rule-based collapsible sidebar groups (`0009_artist_groups.sql` or next free migration). |
+| Artist groups (`PLANS/ARTIST_GROUPS/ARTIST_GROUPS.md`) | Implemented (`feat/artist-groups`): non-destructive custom Group Sets, 7 built-in automatic groupings, multi-artist selection (`0009_artist_groups.sql`). `ByGenre` grouping awaits `ARCHIVE.md`. |
 | Complete keyboard operation (`PLANS/KEYBOARD/KEYBOARD.md`) | Planned, not started; per-UI shortcut registry, `F6` focus regions, spatial wall/table/sidebar/dock navigation, modal focus scope, and `?`/`F1` help overlay. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed (`0009_auto_sync.sql` or next free migration). |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync (`0010_archive.sql` or next free migration). |

@@ -10,7 +10,10 @@ use crate::{
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
 };
 use bcvault_core::{
-    groups::{ArtistGroup, Assignment, SidebarRow, assign, build_sidebar_rows},
+    groups::{
+        ActiveGrouping, ArtistGroup, ArtistGroupSet, Assignment, BuiltinGrouping, SidebarRow,
+        assign_builtin, assign_custom, build_sidebar_rows,
+    },
     selection::{self, SelectScope, SelectionStats},
     worker::quota::{preview_bulk, should_confirm_bulk},
 };
@@ -534,8 +537,12 @@ pub struct UiState {
     pub sync_mode: SyncMode,
     pub active_syncs: HashMap<i64, SyncProgress>,
 
+    pub active_grouping: ActiveGrouping,
+    pub group_sets: Vec<ArtistGroupSet>,
     pub groups: Vec<ArtistGroup>,
-    pub pins: HashMap<i64, Option<i64>>,
+    pub builtin_groups: Vec<ArtistGroup>,
+    pub collapsed_builtin_groups: BTreeSet<i64>,
+    pub pins: HashMap<i64, i64>,
     pub group_assignment: Assignment,
     pub sidebar_rows: Vec<SidebarRow>,
     pub ungrouped_collapsed: bool,
@@ -545,7 +552,9 @@ pub struct UiState {
     pub sidebar_recompute_count: u64,
     pub group_error: Option<String>,
     pub confirm_delete_group: Option<(i64, String, usize)>,
+    pub confirm_delete_group_set: Option<(i64, String)>,
     pub group_editor_modal: Option<crate::ui::groups::GroupEditorState>,
+    pub group_set_modal: Option<crate::ui::groups::GroupSetModalState>,
     pub pending_group_pins: Option<(String, Vec<i64>)>,
 
     pub rows: Vec<CachedRow>,
@@ -625,7 +634,11 @@ impl UiState {
             sync_mode: SyncMode::Incremental,
             active_syncs: HashMap::new(),
 
+            active_grouping: ActiveGrouping::None,
+            group_sets: Vec::new(),
             groups: Vec::new(),
+            builtin_groups: Vec::new(),
+            collapsed_builtin_groups: BTreeSet::new(),
             pins: HashMap::new(),
             group_assignment: Assignment::default(),
             sidebar_rows: vec![SidebarRow::AllArtists],
@@ -636,7 +649,9 @@ impl UiState {
             sidebar_recompute_count: 0,
             group_error: None,
             confirm_delete_group: None,
+            confirm_delete_group_set: None,
             group_editor_modal: None,
+            group_set_modal: None,
             pending_group_pins: None,
 
             rows: Vec::new(),
@@ -764,27 +779,51 @@ impl UiState {
 
     pub fn ensure_sidebar_rows(&mut self, now_ts: bcvault_core::types::Ts) {
         let filter_changed = self.artist_filter != self.sidebar_last_filter;
-        let age_refresh =
-            !self.groups.is_empty() && now_ts.saturating_sub(self.sidebar_last_recompute_ts) >= 60;
+        let age_refresh = matches!(
+            self.active_grouping,
+            ActiveGrouping::Builtin(BuiltinGrouping::SyncFreshness)
+        ) && now_ts.saturating_sub(self.sidebar_last_recompute_ts) >= 60;
         if !self.sidebar_dirty && !filter_changed && !age_refresh {
             return;
         }
-        self.group_assignment = assign(
-            &self.artists,
-            &self.groups,
-            &self.pins,
-            &self.folders,
-            now_ts,
-        );
+        match self.active_grouping {
+            ActiveGrouping::None => {
+                self.builtin_groups.clear();
+                self.group_assignment = Assignment {
+                    groups: Vec::new(),
+                    ungrouped: self.artists.iter().map(|a| a.band_id).collect(),
+                };
+            }
+            ActiveGrouping::Builtin(kind) => {
+                let (bg, assign) = assign_builtin(
+                    kind,
+                    &self.artists,
+                    &self.folders,
+                    now_ts,
+                    &self.collapsed_builtin_groups,
+                );
+                self.builtin_groups = bg;
+                self.group_assignment = assign;
+            }
+            ActiveGrouping::CustomSet(_) => {
+                self.builtin_groups.clear();
+                self.group_assignment = assign_custom(&self.artists, &self.groups, &self.pins);
+            }
+        }
         let artists_by_id: HashMap<i64, usize> = self
             .artists
             .iter()
             .enumerate()
             .map(|(i, a)| (a.band_id, i))
             .collect();
+        let active_groups: &[ArtistGroup] = match self.active_grouping {
+            ActiveGrouping::Builtin(_) => &self.builtin_groups,
+            ActiveGrouping::CustomSet(_) => &self.groups,
+            ActiveGrouping::None => &[],
+        };
         self.sidebar_rows = build_sidebar_rows(
             &self.group_assignment,
-            &self.groups,
+            active_groups,
             &artists_by_id,
             &self.artists,
             &self.artist_filter,
@@ -1135,6 +1174,8 @@ impl UiState {
                 artists,
                 settings,
                 folders,
+                active_grouping,
+                group_sets,
                 groups,
                 pins,
             } => {
@@ -1144,6 +1185,8 @@ impl UiState {
                 for f in folders {
                     self.folders.entry(f.band_id).or_default().push(f);
                 }
+                self.active_grouping = active_grouping;
+                self.group_sets = group_sets;
                 self.groups = groups;
                 self.pins = pins;
                 self.sidebar_dirty = true;
@@ -1405,7 +1448,14 @@ impl UiState {
                     self.show_unavailable_window = true;
                 }
             }
-            WorkerToUiEvent::ArtistGroupsChanged { groups, pins } => {
+            WorkerToUiEvent::ArtistGroupsChanged {
+                active_grouping,
+                group_sets,
+                groups,
+                pins,
+            } => {
+                self.active_grouping = active_grouping;
+                self.group_sets = group_sets;
                 self.groups = groups;
                 self.pins = pins;
                 self.group_error = None;
@@ -1510,6 +1560,8 @@ mod tests {
             artists: vec![],
             settings: Settings::default(),
             folders: vec![f1.clone(), f2.clone()],
+            active_grouping: ActiveGrouping::None,
+            group_sets: vec![],
             groups: vec![],
             pins: std::collections::HashMap::new(),
         });
@@ -1895,6 +1947,8 @@ mod tests {
             artists: vec![],
             settings: Settings::default(),
             folders: vec![f1_a1.clone(), f2_a1.clone(), f3_a2.clone()],
+            active_grouping: ActiveGrouping::None,
+            group_sets: vec![],
             groups: vec![],
             pins: std::collections::HashMap::new(),
         });
@@ -2161,7 +2215,6 @@ mod tests {
 
     #[test]
     fn test_14_classic_sidebar_groups_dirty_cache_and_filter() {
-        use bcvault_core::groups::{Condition, ConditionKind, GroupRule, MatchMode};
         use bcvault_core::types::ArtistStats;
 
         let mut st = UiState::new();
@@ -2183,26 +2236,27 @@ mod tests {
             last_synced_at: None,
             stats: ArtistStats::default(),
         };
+        let s1 = ArtistGroupSet {
+            id: 1,
+            name: "Workflow".into(),
+            pos: 0,
+        };
         let g1 = ArtistGroup {
             id: 10,
-            name: "A-F".into(),
+            set_id: 1,
+            name: "Priority".into(),
             pos: 0,
             collapsed: true,
-            rule: Some(GroupRule {
-                mode: MatchMode::All,
-                conditions: vec![Condition {
-                    negate: false,
-                    kind: ConditionKind::NameInitial { from: 'a', to: 'f' },
-                }],
-            }),
         };
 
         st.apply_event(WorkerToUiEvent::Ready {
             artists: vec![a1, a2],
             settings: Settings::default(),
             folders: vec![],
+            active_grouping: ActiveGrouping::CustomSet(1),
+            group_sets: vec![s1],
             groups: vec![g1],
-            pins: HashMap::new(),
+            pins: HashMap::from([(1, 10)]),
         });
 
         st.ensure_sidebar_rows(1000);
@@ -2213,7 +2267,7 @@ mod tests {
                 SidebarRow::AllArtists,
                 SidebarRow::GroupHeader {
                     id: 10,
-                    name: "A-F".into(),
+                    name: "Priority".into(),
                     count: 1,
                     collapsed: true,
                 },
@@ -2229,21 +2283,17 @@ mod tests {
         st.ensure_sidebar_rows(1010);
         assert_eq!(st.sidebar_recompute_count, 1);
 
-        // 60s elapsed triggers age refresh
-        st.ensure_sidebar_rows(1060);
-        assert_eq!(st.sidebar_recompute_count, 2);
-
         // Filter change triggers recompute and expands matching collapsed group
         st.artist_filter = "alp".into();
         st.ensure_sidebar_rows(1065);
-        assert_eq!(st.sidebar_recompute_count, 3);
+        assert_eq!(st.sidebar_recompute_count, 2);
         assert_eq!(
             st.sidebar_rows,
             vec![
                 SidebarRow::AllArtists,
                 SidebarRow::GroupHeader {
                     id: 10,
-                    name: "A-F".into(),
+                    name: "Priority".into(),
                     count: 1,
                     collapsed: false,
                 },
