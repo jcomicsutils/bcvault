@@ -1380,8 +1380,13 @@ mod tests {
         })
         .await
         .unwrap();
-        // Give dispatcher cleanup a moment to drop the lock
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait for dispatcher cleanup to clear in_flight after JobState::Failed is emitted
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while mgr.in_flight_len() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
         assert_eq!(mgr.in_flight_len(), 0);
 
         cancel.cancel();
