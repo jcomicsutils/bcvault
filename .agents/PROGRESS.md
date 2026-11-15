@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/artist-groups  ·  Updated: 2026-11-15
 
 ## Done
+- none: add the group editor in fx UI (`ARTIST_GROUPS.md` step 7)
 - none: render groups with actions and palette commands in fx sidebar (`ARTIST_GROUPS.md` step 6)
 - none: add the group editor in classic UI (`ARTIST_GROUPS.md` step 5)
 - none: render groups with a menu for moving artists in classic sidebar (`ARTIST_GROUPS.md` step 4)

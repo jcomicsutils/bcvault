@@ -160,6 +160,18 @@ pub fn show(
     ui.separator();
 
     let list_height = (ui.available_height() - 78.0).max(80.0);
+    if let Some((ref pending_name, ref band_ids)) = state.pending_group_pins
+        && let Some(g) = state
+            .groups
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(pending_name))
+    {
+        let _ = core_tx.send(UiToWorkerCommand::PinArtists {
+            band_ids: band_ids.clone(),
+            target: bcvault_core::groups::PinTarget::Group(g.id),
+        });
+        state.pending_group_pins = None;
+    }
     state.ensure_sidebar_rows(chrono::Utc::now().timestamp());
     let rows = state.sidebar_rows.clone();
 

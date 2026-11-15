@@ -501,6 +501,7 @@ pub fn show_modals(
     show_reconcile_report_modal(ctx, state, core_tx, esc);
     show_resolve_missing_modal(ctx, state, core_tx, rt_handle, esc);
     show_unavailable_modal(ctx, state, core_tx, rt_handle, esc);
+    crate::overlays::groups::show_fx_group_editor_modal(ctx, state, core_tx, esc);
 
     for act in pending_actions {
         state.dispatch(act, core_tx, fx_tx, now_s);

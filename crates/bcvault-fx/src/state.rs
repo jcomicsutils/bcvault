@@ -573,6 +573,7 @@ pub struct FxState {
     pub sidebar_recompute_count: u64,
     pub group_error: Option<String>,
     pub confirm_delete_group: Option<(i64, String, usize)>,
+    pub group_editor: Option<crate::overlays::groups::FxGroupEditorState>,
     pub pending_group_pins: Option<(String, Vec<i64>)>,
 
     // Jobs, Speed Sparkline, Rate limit, Toasts & Logs
@@ -741,6 +742,7 @@ impl FxState {
             sidebar_recompute_count: 0,
             group_error: None,
             confirm_delete_group: None,
+            group_editor: None,
             pending_group_pins: None,
             jobs: Vec::new(),
             speed_samples: std::collections::VecDeque::from(vec![0.0; 30]),
@@ -779,6 +781,7 @@ impl FxState {
     pub fn has_open_modal(&self) -> bool {
         self.confirm_remove_artist.is_some()
             || self.confirm_delete_group.is_some()
+            || self.group_editor.is_some()
             || self.rename_artist_modal.is_some()
             || self.save_view_modal.is_some()
             || self.redeem_modal.is_some()
@@ -809,6 +812,9 @@ impl FxState {
             return true;
         }
         if self.confirm_delete_group.take().is_some() {
+            return true;
+        }
+        if self.group_editor.take().is_some() {
             return true;
         }
         if self.rename_artist_modal.take().is_some() {
@@ -2174,8 +2180,23 @@ impl FxState {
             FxAction::UndoBatch(batch_id) => {
                 let _ = core_tx.send(UiToWorkerCommand::UndoBatch { batch_id });
             }
-            FxAction::NewGroup | FxAction::NewGroupFromSelection(_) | FxAction::EditGroup(_) => {
-                // Group editor modal is wired in the next step.
+            FxAction::NewGroup => {
+                self.group_error = None;
+                self.group_editor = Some(crate::overlays::groups::FxGroupEditorState::new_manual(
+                    Vec::new(),
+                ));
+            }
+            FxAction::NewGroupFromSelection(ids) => {
+                self.group_error = None;
+                self.group_editor =
+                    Some(crate::overlays::groups::FxGroupEditorState::new_manual(ids));
+            }
+            FxAction::EditGroup(id) => {
+                if let Some(g) = self.groups.iter().find(|g| g.id == id) {
+                    self.group_error = None;
+                    self.group_editor =
+                        Some(crate::overlays::groups::FxGroupEditorState::from_group(g));
+                }
             }
             FxAction::DeleteGroup(id) => {
                 if let Some(g) = self.groups.iter().find(|g| g.id == id) {
@@ -3220,5 +3241,70 @@ mod tests {
             }
             other => panic!("expected EnqueueRemaining, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_14_fx_sidebar_groups_dirty_cache_and_actions() {
+        use bcvault_core::groups::{ArtistGroup, Condition, ConditionKind, GroupRule, MatchMode};
+        use bcvault_core::types::ArtistStats;
+
+        let mut state = FxState::new();
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let a1 = ArtistView {
+            band_id: 1,
+            slug: "alpha".into(),
+            name: "Alpha".into(),
+            custom_name: None,
+            url: "https://alpha.bandcamp.com".into(),
+            last_synced_at: None,
+            stats: ArtistStats::default(),
+        };
+        let g1 = ArtistGroup {
+            id: 10,
+            name: "A-F".into(),
+            pos: 0,
+            collapsed: false,
+            rule: Some(GroupRule {
+                mode: MatchMode::All,
+                conditions: vec![Condition {
+                    negate: false,
+                    kind: ConditionKind::NameInitial { from: 'a', to: 'f' },
+                }],
+            }),
+        };
+
+        state.apply_core_event(
+            WorkerToUiEvent::Ready {
+                artists: vec![a1],
+                settings: Settings::default(),
+                folders: vec![],
+                groups: vec![g1],
+                pins: HashMap::new(),
+            },
+            &fx_tx,
+            0.0,
+        );
+
+        state.ensure_sidebar_rows(1000);
+        assert_eq!(state.sidebar_recompute_count, 1);
+        state.ensure_sidebar_rows(1010);
+        assert_eq!(state.sidebar_recompute_count, 1);
+
+        state.dispatch(FxAction::ToggleGroup(10), &core_tx, &fx_tx, 0.0);
+        assert!(matches!(
+            core_rx.try_recv(),
+            Ok(UiToWorkerCommand::SetArtistGroupCollapsed {
+                id: 10,
+                collapsed: true
+            })
+        ));
+
+        state.dispatch(FxAction::EditGroup(10), &core_tx, &fx_tx, 0.0);
+        assert!(state.group_editor.is_some());
+        assert!(state.has_open_modal());
+        assert!(state.close_top_modal());
+        assert!(state.group_editor.is_none());
     }
 }
