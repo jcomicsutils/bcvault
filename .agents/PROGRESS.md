@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: report an enqueue summary with quota deferrals (`DOWNLOAD_FLOW.md` step 3)
 - none: skip downloaded and in-flight releases when enqueueing (`DOWNLOAD_FLOW.md` step 2)
 - none: add download candidates, selection helpers and bulk preview (`DOWNLOAD_FLOW.md` step 1)
 - none: update README.md built-in theme count and Catppuccin Macchiato/Frappe/Latte list

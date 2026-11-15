@@ -858,6 +858,7 @@ impl UiState {
                     opts,
                 });
             }
+            WorkerToUiEvent::EnqueueSummary(_) => {}
             WorkerToUiEvent::RateLimit(status) => {
                 self.rate_limit = status;
             }

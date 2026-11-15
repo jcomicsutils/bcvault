@@ -21,7 +21,7 @@ use crate::{
     worker::{
         bridge::UiBridge,
         extract::extract_zip_archive,
-        messages::WorkerToUiEvent,
+        messages::{DeferCause, DeferredBatch, EnqueueSummary, WorkerToUiEvent},
         quota::{QuotaDecision, decide},
         stream::{StreamRequest, stream_download},
         thumbs::fetch_cover_to_path,
@@ -198,6 +198,8 @@ impl DownloadManager {
         mode: EnqueueMode,
     ) {
         if items.is_empty() {
+            self.bridge
+                .emit(WorkerToUiEvent::EnqueueSummary(EnqueueSummary::default()));
             return;
         }
 
@@ -210,6 +212,7 @@ impl DownloadManager {
         // Deduplicate keys while preserving order.
         let mut seen = HashSet::with_capacity(items.len());
         let unique_items: Vec<ItemKey> = items.into_iter().filter(|k| seen.insert(*k)).collect();
+        let requested_total = unique_items.len() as u32;
 
         // Fetch release rows and group by band_id in order
         let items_clone = unique_items;
@@ -217,17 +220,22 @@ impl DownloadManager {
             .pool
             .reader
             .call(move |c| {
-                let mut rows = Vec::new();
+                let mut rows = Vec::with_capacity(items_clone.len());
+                let mut missing = 0u32;
                 for k in items_clone {
                     if let Some(r) = releases::get_release(c, k)? {
                         rows.push(r);
+                    } else {
+                        missing += 1;
                     }
                 }
-                Ok::<_, DbError>(rows)
+                Ok::<_, DbError>((rows, missing))
             })
             .await;
 
-        let Ok(rows) = rows_res else { return };
+        let Ok((rows, missing_count)) = rows_res else {
+            return;
+        };
 
         let in_flight_snapshot: HashSet<ItemKey> = self
             .state
@@ -235,16 +243,25 @@ impl DownloadManager {
             .map(|st| st.in_flight.clone())
             .unwrap_or_default();
 
+        let mut summary = EnqueueSummary {
+            requested: requested_total,
+            skipped_ineligible: missing_count,
+            ..EnqueueSummary::default()
+        };
+
         let mut by_band: HashMap<i64, Vec<ReleaseRow>> = HashMap::new();
         let mut band_order: Vec<i64> = Vec::new();
         for r in rows {
             if !r.is_downloadable() {
+                summary.skipped_ineligible += 1;
                 continue;
             }
             if mode == EnqueueMode::New && r.downloaded {
+                summary.skipped_downloaded += 1;
                 continue;
             }
             if in_flight_snapshot.contains(&r.key) {
+                summary.skipped_in_flight += 1;
                 continue;
             }
             if !by_band.contains_key(&r.band_id) {
@@ -259,6 +276,11 @@ impl DownloadManager {
             };
 
             if self.is_artist_blocked(band_id) {
+                summary.deferred.push(DeferredBatch {
+                    band_id,
+                    count: band_rows.len() as u32,
+                    cause: DeferCause::Blocked30Min,
+                });
                 for r in band_rows {
                     let jid = self.next_job_id.fetch_add(1, Ordering::SeqCst);
                     let label = format!("{} - {}", r.artist_name, r.title);
@@ -313,6 +335,11 @@ impl DownloadManager {
                         ),
                         None,
                     );
+                    summary.deferred.push(DeferredBatch {
+                        band_id,
+                        count: requested,
+                        cause: DeferCause::HardCap,
+                    });
                     for r in band_rows {
                         let jid = self.next_job_id.fetch_add(1, Ordering::SeqCst);
                         let label = format!("{} - {}", r.artist_name, r.title);
@@ -338,7 +365,21 @@ impl DownloadManager {
                             format!("Batch truncated from {requested} to {count} due to limit"),
                             None,
                         );
+                        let excess = requested.saturating_sub(count);
+                        if excess > 0 {
+                            let cause = if used_30d + count >= settings.quota_hard {
+                                DeferCause::HardCap
+                            } else {
+                                DeferCause::BatchLimit
+                            };
+                            summary.deferred.push(DeferredBatch {
+                                band_id,
+                                count: excess,
+                                cause,
+                            });
+                        }
                     }
+                    summary.awaiting_ack += count;
                     let subset: Vec<ItemKey> = band_rows
                         .into_iter()
                         .take(count as usize)
@@ -362,6 +403,19 @@ impl DownloadManager {
                             format!("Batch truncated from {requested} to {count} due to limit"),
                             None,
                         );
+                        let excess = requested.saturating_sub(count);
+                        if excess > 0 {
+                            let cause = if used_30d + count >= settings.quota_hard {
+                                DeferCause::HardCap
+                            } else {
+                                DeferCause::BatchLimit
+                            };
+                            summary.deferred.push(DeferredBatch {
+                                band_id,
+                                count: excess,
+                                cause,
+                            });
+                        }
                     }
                     for r in band_rows.into_iter().take(count as usize) {
                         let jid = self.next_job_id.fetch_add(1, Ordering::SeqCst);
@@ -374,11 +428,17 @@ impl DownloadManager {
                             ack_soft_quota,
                             redeem_url: None,
                         };
-                        self.push_spec(spec);
+                        if self.push_spec(spec) {
+                            summary.queued += 1;
+                        } else {
+                            summary.skipped_in_flight += 1;
+                        }
                     }
                 }
             }
         }
+
+        self.bridge.emit(WorkerToUiEvent::EnqueueSummary(summary));
     }
 
     pub async fn enqueue_redeem(&self, target: ItemKey, url: String, opts: DownloadOpts) {
@@ -1200,6 +1260,16 @@ mod tests {
             .count();
         assert_eq!(queued2, 0);
         assert_eq!(mgr.in_flight_len(), 3);
+        let summary2 = evs2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary2.requested, 3);
+        assert_eq!(summary2.queued, 0);
+        assert_eq!(summary2.skipped_in_flight, 3);
 
         mgr.cancel_all();
         assert_eq!(mgr.in_flight_len(), 0);
@@ -1309,6 +1379,213 @@ mod tests {
 
         mgr.cancel_all();
         assert_eq!(mgr.in_flight_len(), 0);
+        cancel.cancel();
+    }
+
+    async fn seed_quota_usage(pool: &DbPool, band_id: i64, count: u32) {
+        pool.writer
+            .call(move |c| {
+                for i in 0..count {
+                    let key = ItemKey {
+                        kind: ItemType::Album,
+                        id: 90_000 + i64::from(i),
+                    };
+                    let hid = history::insert_started(
+                        c,
+                        &NewHistoryEntry {
+                            key,
+                            band_id,
+                            format: AudioFormat::Flac,
+                            source: DownloadSource::Api,
+                            counts_against_quota: true,
+                        },
+                    )?;
+                    history::finish(c, hid, HistoryStatus::Success, None, None)?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_6_batch_limit_defers_excess_and_totals_match_requested() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        let mut keys = Vec::new();
+        for i in 0..40 {
+            keys.push(seed_release(&pool, 1, 400 + i, false).await);
+        }
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 25,
+        };
+
+        mgr.enqueue_downloads(keys, opts, false, EnqueueMode::New)
+            .await;
+        let evs = drain_events(&mut rx);
+        let summary = evs
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary.requested, 40);
+        assert_eq!(summary.queued, 25);
+        assert_eq!(
+            summary.deferred,
+            vec![DeferredBatch {
+                band_id: 1,
+                count: 15,
+                cause: DeferCause::BatchLimit,
+            }]
+        );
+        let total = summary.queued
+            + summary.skipped_downloaded
+            + summary.skipped_in_flight
+            + summary.skipped_ineligible
+            + summary.awaiting_ack
+            + summary.deferred_total();
+        assert_eq!(total, summary.requested);
+
+        mgr.cancel_all();
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_7_hard_cap_and_blocked_30_min_deferrals() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        seed_quota_usage(&pool, 1, 195).await;
+        let mut keys = Vec::new();
+        for i in 0..20 {
+            keys.push(seed_release(&pool, 1, 500 + i, false).await);
+        }
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+
+        mgr.enqueue_downloads(keys.clone(), opts.clone(), true, EnqueueMode::New)
+            .await;
+        let evs = drain_events(&mut rx);
+        let summary = evs
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary.queued, 5);
+        assert_eq!(
+            summary.deferred,
+            vec![DeferredBatch {
+                band_id: 1,
+                count: 15,
+                cause: DeferCause::HardCap,
+            }]
+        );
+
+        mgr.cancel_all();
+
+        // At 200 used: decide returns Blocked -> HardCap deferral
+        seed_quota_usage(&pool, 2, 200).await;
+        let k200 = seed_release(&pool, 2, 600, false).await;
+        mgr.enqueue_downloads(vec![k200], opts.clone(), true, EnqueueMode::New)
+            .await;
+        let evs2 = drain_events(&mut rx);
+        let summary2 = evs2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary2.queued, 0);
+        assert_eq!(
+            summary2.deferred,
+            vec![DeferredBatch {
+                band_id: 2,
+                count: 1,
+                cause: DeferCause::HardCap,
+            }]
+        );
+
+        // During 30-min block -> Blocked30Min deferral
+        mgr.block_artist_for_30_mins(1);
+        mgr.enqueue_downloads(vec![keys[0]], opts, true, EnqueueMode::New)
+            .await;
+        let evs3 = drain_events(&mut rx);
+        let summary3 = evs3
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            summary3.deferred,
+            vec![DeferredBatch {
+                band_id: 1,
+                count: 1,
+                cause: DeferCause::Blocked30Min,
+            }]
+        );
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_8_soft_limit_awaiting_ack_then_ack_queues() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        seed_quota_usage(&pool, 1, 145).await;
+        let mut keys = Vec::new();
+        for i in 0..10 {
+            keys.push(seed_release(&pool, 1, 700 + i, false).await);
+        }
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+
+        mgr.enqueue_downloads(keys.clone(), opts.clone(), false, EnqueueMode::New)
+            .await;
+        let evs1 = drain_events(&mut rx);
+        assert!(
+            evs1.iter()
+                .any(|e| matches!(e, WorkerToUiEvent::QuotaWarning { .. }))
+        );
+        let summary1 = evs1
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary1.queued, 0);
+        assert_eq!(summary1.awaiting_ack, 10);
+        assert_eq!(mgr.in_flight_len(), 0);
+
+        mgr.enqueue_downloads(keys, opts, true, EnqueueMode::New)
+            .await;
+        let evs2 = drain_events(&mut rx);
+        let summary2 = evs2
+            .iter()
+            .find_map(|e| match e {
+                WorkerToUiEvent::EnqueueSummary(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(summary2.queued, 10);
+        assert_eq!(summary2.awaiting_ack, 0);
+        assert_eq!(mgr.in_flight_len(), 10);
+
+        mgr.cancel_all();
         cancel.cancel();
     }
 }

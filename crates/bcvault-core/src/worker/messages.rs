@@ -178,6 +178,7 @@ pub enum WorkerToUiEvent {
         items: Vec<ItemKey>,
         opts: DownloadOpts,
     },
+    EnqueueSummary(EnqueueSummary),
     RateLimit(RateLimitStatus),
     ThumbReady {
         key: ItemKey,
@@ -211,4 +212,130 @@ pub enum WorkerToUiEvent {
         prompt: bool,
     },
     Log(LogEntry),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferCause {
+    BatchLimit,
+    HardCap,
+    Blocked30Min,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeferredBatch {
+    pub band_id: i64,
+    pub count: u32,
+    pub cause: DeferCause,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EnqueueSummary {
+    pub requested: u32,
+    pub queued: u32,
+    pub skipped_downloaded: u32,
+    pub skipped_in_flight: u32,
+    pub skipped_ineligible: u32,
+    pub awaiting_ack: u32,
+    pub deferred: Vec<DeferredBatch>,
+}
+
+impl EnqueueSummary {
+    pub fn deferred_total(&self) -> u32 {
+        self.deferred.iter().map(|d| d.count).sum()
+    }
+
+    pub fn format_summary(&self) -> String {
+        if self.requested == 0 {
+            return "Nothing to queue".to_string();
+        }
+        let mut parts = Vec::new();
+        if self.queued > 0
+            || (self.skipped_downloaded == 0
+                && self.skipped_in_flight == 0
+                && self.skipped_ineligible == 0
+                && self.awaiting_ack == 0
+                && self.deferred.is_empty())
+        {
+            parts.push(format!("Queued {}", self.queued));
+        }
+        if self.skipped_downloaded > 0 {
+            parts.push(format!("{} already downloaded", self.skipped_downloaded));
+        }
+        if self.skipped_in_flight > 0 {
+            parts.push(format!("{} already queued", self.skipped_in_flight));
+        }
+        if self.skipped_ineligible > 0 {
+            parts.push(format!("{} ineligible", self.skipped_ineligible));
+        }
+        if self.awaiting_ack > 0 {
+            parts.push(format!("{} awaiting quota confirmation", self.awaiting_ack));
+        }
+        if !self.deferred.is_empty() {
+            let total = self.deferred_total();
+            let artists: std::collections::HashSet<i64> =
+                self.deferred.iter().map(|d| d.band_id).collect();
+            let artist_word = if artists.len() == 1 {
+                "artist"
+            } else {
+                "artists"
+            };
+            parts.push(format!(
+                "{total} deferred ({} {artist_word} reached their limit)",
+                artists.len()
+            ));
+        }
+        parts.join(" · ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_17_enqueue_summary_formatting() {
+        assert_eq!(
+            EnqueueSummary::default().format_summary(),
+            "Nothing to queue"
+        );
+
+        let single_deferred = EnqueueSummary {
+            requested: 40,
+            queued: 25,
+            deferred: vec![DeferredBatch {
+                band_id: 1,
+                count: 15,
+                cause: DeferCause::BatchLimit,
+            }],
+            ..EnqueueSummary::default()
+        };
+        assert_eq!(
+            single_deferred.format_summary(),
+            "Queued 25 · 15 deferred (1 artist reached their limit)"
+        );
+
+        let mixed = EnqueueSummary {
+            requested: 133,
+            queued: 87,
+            skipped_downloaded: 12,
+            skipped_in_flight: 3,
+            deferred: vec![
+                DeferredBatch {
+                    band_id: 1,
+                    count: 20,
+                    cause: DeferCause::BatchLimit,
+                },
+                DeferredBatch {
+                    band_id: 2,
+                    count: 11,
+                    cause: DeferCause::HardCap,
+                },
+            ],
+            ..EnqueueSummary::default()
+        };
+        assert_eq!(
+            mixed.format_summary(),
+            "Queued 87 · 12 already downloaded · 3 already queued · 31 deferred (2 artists reached their limit)"
+        );
+    }
 }

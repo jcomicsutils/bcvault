@@ -979,6 +979,7 @@ impl FxState {
             | WorkerToUiEvent::ThumbReady { .. }
             | WorkerToUiEvent::QuotaStatus { .. }
             | WorkerToUiEvent::QuotaWarning { .. }
+            | WorkerToUiEvent::EnqueueSummary(_)
             | WorkerToUiEvent::LibraryProgress { .. } => {}
             WorkerToUiEvent::ReconcileReport { report } => {
                 self.reconcile_report_modal = Some(FxReconcileReportModalState::new(report));
