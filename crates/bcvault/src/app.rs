@@ -23,6 +23,7 @@ impl App {
         rt_handle: tokio::runtime::Handle,
         worker: WorkerHandle,
     ) -> Self {
+        ui::theme::install_fonts(&cc.egui_ctx);
         ui::theme::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let mut state = UiState::new();

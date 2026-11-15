@@ -50,7 +50,7 @@ impl SettingsTab {
 
     pub const fn fields(self) -> &'static [&'static str] {
         match self {
-            Self::Appearance => &["show_thumbnails"],
+            Self::Appearance => &["show_thumbnails", "mark_invisible_chars"],
             Self::Downloads => &[
                 "out_dir",
                 "layout",

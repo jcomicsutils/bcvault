@@ -201,6 +201,7 @@ In **Downloads → ZIP files**:
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | `out_dir` | Platform Music/Downloads `bcvault/` | Global directory where newly downloaded releases are saved. Cannot overlap with any linked artist folder. |
+| `mark_invisible_chars` | `false` | Highlight non-space invisible, zero-width, control, and non-ASCII whitespace characters in release titles and artist names (e.g. `[ZWSP]`, `[NBSP]`, `[BRAILLE-BLANK]`). |
 | `format` | `Flac` | Preferred download audio format (`Flac`, `Mp3_320`, `Mp3V0`, `Wav`, `AiffLossless`, `Alac`, `Vorbis`, `AacHi`). |
 | `format_fallback` | `Nearest` | `Nearest` selects the closest lossless/lossy format if preferred is unavailable; `Strict` fails the job. |
 | `layout` | `Flat` | Subdirectory structure under `out_dir` (`Flat`, `ByArtist`, `ByPageArtist`). |

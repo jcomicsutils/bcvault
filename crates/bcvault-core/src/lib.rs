@@ -4,5 +4,6 @@ pub mod error;
 pub mod library;
 pub mod paths;
 pub mod selection;
+pub mod text;
 pub mod types;
 pub mod worker;

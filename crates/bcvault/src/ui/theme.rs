@@ -24,6 +24,23 @@ pub fn apply(ctx: &egui::Context) {
     ctx.all_styles_mut(sharpen); // both themes, so a stray theme switch cannot reintroduce rounding
 }
 
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for (key, bytes) in bcvault_core::text::discover_fallback_fonts() {
+        fonts.font_data.insert(
+            key.to_string(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            prop.push(key.to_string());
+        }
+        if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            mono.push(key.to_string());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
 fn sharpen(style: &mut Style) {
     let v = &mut style.visuals;
     v.window_corner_radius = CornerRadius::ZERO;

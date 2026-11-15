@@ -16,5 +16,15 @@ pub fn show(ui: &mut egui::Ui, ctx: &mut TabCtx<'_>) {
                 resp.request_focus();
             }
             ui.end_row();
+
+            ui.label("Invisible Characters:");
+            ui.checkbox(
+                &mut ctx.draft.mark_invisible_chars,
+                "Mark non-space invisible characters",
+            )
+            .on_hover_text(
+                "Highlight zero-width, control, and non-ASCII whitespace characters in titles and artist names (e.g. [ZWSP], [NBSP], [BRAILLE-BLANK]).",
+            );
+            ui.end_row();
         });
 }

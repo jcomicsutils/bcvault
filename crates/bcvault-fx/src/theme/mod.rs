@@ -82,29 +82,15 @@ impl FxTheme {
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
-    let fallback_candidates = [
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\YuGothR.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-    ];
-
-    for path in fallback_candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "os_cjk_fallback".to_string(),
-                Arc::new(FontData::from_owned(bytes)),
-            );
-            if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
-                prop.push("os_cjk_fallback".to_string());
-            }
-            if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
-                mono.push("os_cjk_fallback".to_string());
-            }
-            break;
+    for (key, bytes) in bcvault_core::text::discover_fallback_fonts() {
+        fonts
+            .font_data
+            .insert(key.to_string(), Arc::new(FontData::from_owned(bytes)));
+        if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
+            prop.push(key.to_string());
+        }
+        if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+            mono.push(key.to_string());
         }
     }
 

@@ -80,7 +80,7 @@ impl SettingsTab {
 
     pub const fn fields(self) -> &'static [&'static str] {
         match self {
-            Self::Appearance => &[],
+            Self::Appearance => &["mark_invisible_chars"],
             Self::Downloads => &[
                 "out_dir",
                 "layout",

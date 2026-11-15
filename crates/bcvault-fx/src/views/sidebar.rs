@@ -220,11 +220,15 @@ pub fn show(
                         }
                     });
 
+                    let name_disp = bcvault_core::text::format_display_text(
+                        artist.display_name(),
+                        state.settings.mark_invisible_chars,
+                    );
                     let resp = draw_artist_row(
                         ui,
                         state,
                         artist.band_id,
-                        artist.display_name(),
+                        name_disp.as_ref(),
                         artist.stats,
                         is_selected,
                         sync_frac,

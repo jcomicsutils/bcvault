@@ -576,17 +576,21 @@ pub fn show(
                 Pos2::new(draw_rect.max.x - 6.0, draw_rect.max.y - 4.0),
             );
             let clipped = painter.with_clip_rect(text_rect);
+            let mark_inv = state.settings.mark_invisible_chars;
+            let title_disp = bcvault_core::text::format_display_text(&row.rel.title, mark_inv);
+            let artist_disp =
+                bcvault_core::text::format_display_text(&row.rel.artist_name, mark_inv);
             clipped.text(
                 text_rect.left_top(),
                 egui::Align2::LEFT_TOP,
-                &row.rel.title,
+                title_disp.as_ref(),
                 FontId::proportional(12.5),
                 th.text,
             );
             clipped.text(
                 Pos2::new(text_rect.min.x, text_rect.min.y + 20.0),
                 egui::Align2::LEFT_TOP,
-                &row.rel.artist_name,
+                artist_disp.as_ref(),
                 FontId::proportional(11.0),
                 th.text_dim,
             );

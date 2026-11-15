@@ -804,6 +804,8 @@ pub struct Settings {
     pub review_match_min: f32,
     #[serde(default)]
     pub folder_style: FolderStyle,
+    #[serde(default)]
+    pub mark_invisible_chars: bool,
 }
 
 impl Settings {
@@ -839,6 +841,7 @@ impl Settings {
             auto_match_min: 0.92,
             review_match_min: 0.75,
             folder_style: FolderStyle::default(),
+            mark_invisible_chars: false,
         }
     }
 

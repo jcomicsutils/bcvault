@@ -115,16 +115,29 @@ pub fn show_drawer(
                                 );
 
                                 ui.add_space(6.0);
+                                let mark_inv = state.settings.mark_invisible_chars;
                                 ui.label(
-                                    RichText::new(&row.rel.title)
-                                        .size(17.0)
-                                        .strong()
-                                        .color(th.text),
+                                    RichText::new(
+                                        bcvault_core::text::format_display_text(
+                                            &row.rel.title,
+                                            mark_inv,
+                                        )
+                                        .as_ref(),
+                                    )
+                                    .size(17.0)
+                                    .strong()
+                                    .color(th.text),
                                 );
                                 ui.label(
-                                    RichText::new(&row.rel.artist_name)
-                                        .size(13.5)
-                                        .color(th.text_dim),
+                                    RichText::new(
+                                        bcvault_core::text::format_display_text(
+                                            &row.rel.artist_name,
+                                            mark_inv,
+                                        )
+                                        .as_ref(),
+                                    )
+                                    .size(13.5)
+                                    .color(th.text_dim),
                                 );
 
                                 ui.horizontal(|ui| {

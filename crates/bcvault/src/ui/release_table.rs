@@ -172,8 +172,13 @@ pub fn show(
                 });
 
                 // Column 2: Artist
+                let mark_inv = state.settings.mark_invisible_chars;
                 row.col(|ui| {
-                    ui.add(egui::Label::new(cached.artist_arc.as_ref()).truncate());
+                    let artist_disp = bcvault_core::text::format_display_text(
+                        cached.artist_arc.as_ref(),
+                        mark_inv,
+                    );
+                    ui.add(egui::Label::new(artist_disp.as_ref()).truncate());
                 });
 
                 // Column 3: Title (+ optional thumbnail + badges)
@@ -181,7 +186,8 @@ pub fn show(
                     if state.settings.show_thumbnails {
                         state.thumbs.draw_thumb(ui, key);
                     }
-                    ui.add(egui::Label::new(&r.title).truncate());
+                    let title_disp = bcvault_core::text::format_display_text(&r.title, mark_inv);
+                    ui.add(egui::Label::new(title_disp.as_ref()).truncate());
                     if r.downloaded {
                         if r.local_status == Some(LocalStatus::Archived) {
                             badge(ui, "ARCHIVED", pal::TEXT_DIM, pal::BORDER_HI);

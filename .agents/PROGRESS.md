@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: add layered Unicode fallback fonts across both UIs and `Settings::mark_invisible_chars` (`Mark non-space invisible characters`)
 - none: move wall selection checkbox to top-right, move status badges (UPDATE/MISSING/ARCHIVED/DOWNLOADED) below classification badge, and replace toolbar scope glyph with `Scope` label
 - none: document selection and download remaining (`DOWNLOAD_FLOW.md` step 9)
 - none: add download remaining with scope menu and confirmation in fx (`DOWNLOAD_FLOW.md` step 8)

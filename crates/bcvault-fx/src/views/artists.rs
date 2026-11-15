@@ -88,10 +88,14 @@ pub fn show(
                     }
 
                     let info_x = draw_rect.min.x + 8.0 + 4.0 * (tile_s + 4.0) + 12.0;
+                    let name_disp = bcvault_core::text::format_display_text(
+                        artist.display_name(),
+                        state.settings.mark_invisible_chars,
+                    );
                     ui.painter().text(
                         Pos2::new(info_x, draw_rect.min.y + 14.0),
                         egui::Align2::LEFT_TOP,
-                        artist.display_name(),
+                        name_disp.as_ref(),
                         FontId::proportional(17.0),
                         th.text,
                     );
