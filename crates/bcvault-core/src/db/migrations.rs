@@ -22,9 +22,10 @@ pub const MIGRATIONS: &[(i32, &str)] = &[
         8,
         include_str!("../../migrations/0008_rejected_matches.sql"),
     ),
+    (9, include_str!("../../migrations/0009_artist_groups.sql")),
 ];
 
-pub const MAX_VERSION: i32 = 8;
+pub const MAX_VERSION: i32 = 9;
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     run_with(conn, MIGRATIONS)
@@ -64,14 +65,14 @@ mod tests {
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        assert_eq!(v, 9);
 
         // Re-running is a no-op
         run(&mut conn).unwrap();
         let v2: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v2, 8);
+        assert_eq!(v2, 9);
 
         // Bump to version 99 and verify TooNew
         conn.pragma_update(None, "user_version", 99).unwrap();
@@ -80,7 +81,7 @@ mod tests {
             err,
             DbError::TooNew {
                 found: 99,
-                max_supported: 8
+                max_supported: 9
             }
         ));
     }

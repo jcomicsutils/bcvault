@@ -16,6 +16,8 @@ pub enum DbError {
     SchemaMismatch(String),
     #[error("Folder link error: {0}")]
     LinkFolder(#[from] LinkFolderError),
+    #[error("Artist group error: {0}")]
+    Group(#[from] crate::groups::GroupError),
 }
 
 #[derive(Debug, Error)]
