@@ -218,6 +218,7 @@ pub fn show(
                             state.selected_keys.insert(state.rows[idx].rel.key);
                         }
                     }
+                    state.mark_selection_dirty();
                 }
             }
         } else if bg_resp.clicked() {
@@ -360,10 +361,20 @@ pub fn show(
             let base_rect = Rect::from_min_size(animated_min, target_rect.size());
             state.last_card_rects.insert(key, base_rect);
 
+            let is_selected = state.selected_keys.contains(&key);
+            let show_sel_chk = is_selected || !state.selected_keys.is_empty();
+            let sel_chk_base = Rect::from_min_size(
+                Pos2::new(base_rect.min.x + 6.0, base_rect.min.y + 6.0),
+                Vec2::new(18.0, 18.0),
+            );
+            let sel_chk_resp = ui.interact(
+                sel_chk_base,
+                ui.id().with(("wall_sel_chk", key)),
+                Sense::click(),
+            );
             let card_resp =
                 ui.interact(base_rect, ui.id().with(("wall_card", key)), Sense::click());
-            let is_hovered = card_resp.hovered();
-            let is_selected = state.selected_keys.contains(&key);
+            let is_hovered = card_resp.hovered() || sel_chk_resp.hovered();
             let is_focused = state.focused_key == Some(key);
 
             if is_hovered {
@@ -559,6 +570,23 @@ pub fn show(
                 }
             }
 
+            if show_sel_chk || is_hovered {
+                let box_r = Rect::from_min_size(
+                    Pos2::new(cov_rect.min.x + 6.0, cov_rect.min.y + 6.0),
+                    Vec2::new(16.0, 16.0),
+                );
+                let fill = if is_selected { th.accent } else { th.bg0 };
+                let stroke_col = if is_selected || sel_chk_resp.hovered() {
+                    th.accent
+                } else {
+                    th.border_hi
+                };
+                paint::rect(painter, box_r, fill, Stroke::new(1.5_f32, stroke_col));
+                if is_selected {
+                    paint::drawn_check(painter, box_r, 1.0, Stroke::new(1.8_f32, th.bg0));
+                }
+            }
+
             // Title + artist label strip below cover
             let text_rect = Rect::from_min_max(
                 Pos2::new(draw_rect.min.x + 6.0, draw_rect.min.y + layout.card_w + 4.0),
@@ -592,7 +620,9 @@ pub fn show(
             }
 
             let mods = ui.input(|i| i.modifiers);
-            if card_resp.double_clicked() {
+            if sel_chk_resp.clicked() {
+                pending_actions.push(FxAction::ToggleSelect(key));
+            } else if card_resp.double_clicked() {
                 pending_actions.push(FxAction::OpenDrawer(key));
             } else if card_resp.clicked() {
                 if mods.shift {
@@ -604,6 +634,7 @@ pub fn show(
                     state.selected_keys.insert(key);
                     state.last_clicked_key = Some(key);
                     state.focused_key = Some(key);
+                    state.mark_selection_dirty();
                 }
             }
 
@@ -612,11 +643,16 @@ pub fn show(
                     pending_actions.push(FxAction::OpenDrawer(key));
                     ui.close();
                 }
-                if row.rel.classification.auto_downloadable()
-                    && paint::sharp_button(ui, "Download").clicked()
-                {
-                    pending_actions.push(FxAction::DownloadKey(key));
-                    ui.close();
+                if row.rel.is_downloadable() {
+                    if row.rel.downloaded {
+                        if paint::sharp_button(ui, "Re-download").clicked() {
+                            pending_actions.push(FxAction::Redownload(key));
+                            ui.close();
+                        }
+                    } else if paint::sharp_button(ui, "Download").clicked() {
+                        pending_actions.push(FxAction::DownloadKey(key));
+                        ui.close();
+                    }
                 }
                 if paint::sharp_button(ui, "Open in Browser").clicked() {
                     pending_actions.push(FxAction::OpenInBrowser(key));

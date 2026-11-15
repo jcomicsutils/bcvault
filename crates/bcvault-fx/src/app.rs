@@ -154,6 +154,11 @@ impl FxApp {
         let any_modal = self.state.has_open_modal() || self.state.palette_open;
 
         if !any_modal && !ctx.wants_keyboard_input() {
+            if ctx
+                .input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A))
+            {
+                actions.push(FxAction::SelectAll);
+            }
             if ctx.input(|i| {
                 i.key_pressed(egui::Key::Slash)
                     || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::F))

@@ -326,9 +326,11 @@ pub fn show(
             } else {
                 "Download".to_string()
             };
-            if paint::sharp_button(ui, dl_label).clicked() {
-                pending_actions.push(FxAction::DownloadSelected);
-            }
+            ui.add_enabled_ui(sel_cnt > 0, |ui| {
+                if paint::sharp_button(ui, dl_label).clicked() {
+                    pending_actions.push(FxAction::DownloadSelected);
+                }
+            });
 
             egui::ComboBox::from_id_salt("fx_toolbar_fmt")
                 .selected_text(state.settings.format.label())
@@ -345,6 +347,48 @@ pub fn show(
                     }
                 });
         });
+
+        if !state.selected_keys.is_empty() {
+            let stats = state.selection_stats();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} selected ({} downloadable)",
+                        stats.selected, stats.selected_downloadable
+                    ))
+                    .size(11.0)
+                    .color(th.text_dim),
+                );
+                ui.add_enabled_ui(stats.selected_downloadable > 0, |ui| {
+                    if paint::sharp_button(ui, format!("Download {}", stats.selected_downloadable))
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::DownloadSelected);
+                    }
+                });
+                if paint::sharp_button(ui, format!("Select all ({})", stats.total_in_view))
+                    .clicked()
+                {
+                    pending_actions.push(FxAction::SelectAll);
+                }
+                if paint::sharp_button(
+                    ui,
+                    format!("Select remaining ({})", stats.remaining_in_view),
+                )
+                .clicked()
+                {
+                    pending_actions.push(FxAction::SelectRemaining);
+                }
+                if paint::sharp_button(ui, "Invert").clicked() {
+                    pending_actions.push(FxAction::InvertSelection);
+                }
+                if paint::sharp_button(ui, "Clear").clicked() {
+                    pending_actions.push(FxAction::ClearSelection);
+                }
+            });
+        }
     });
 
     for act in pending_actions {

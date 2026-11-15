@@ -168,7 +168,7 @@ pub fn show_drawer(
 
                                 // Action buttons
                                 ui.horizontal_wrapped(|ui| {
-                                    if row.rel.classification.auto_downloadable() {
+                                    if row.rel.is_downloadable() {
                                         let lbl = if row.rel.has_remote_update {
                                             "Update Download"
                                         } else if row.rel.downloaded {
@@ -177,7 +177,11 @@ pub fn show_drawer(
                                             "Download"
                                         };
                                         if paint::sharp_button(ui, lbl).clicked() {
-                                            pending_actions.push(FxAction::DownloadKey(key));
+                                            if row.rel.downloaded {
+                                                pending_actions.push(FxAction::Redownload(key));
+                                            } else {
+                                                pending_actions.push(FxAction::DownloadKey(key));
+                                            }
                                         }
                                     }
                                     if row.rel.local_status

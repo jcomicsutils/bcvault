@@ -559,6 +559,11 @@ pub struct FxState {
     // Quota warnings
     pub quota_warnings: Vec<FxQuotaWarningEntry>,
     pub quota_focus_init: bool,
+
+    // Selection stats cache
+    pub selection_stats: bcvault_core::selection::SelectionStats,
+    pub selection_stats_dirty: bool,
+    pub selection_recount_calls: usize,
 }
 
 impl Default for FxState {
@@ -661,6 +666,9 @@ impl FxState {
             redeem_modal: None,
             quota_warnings: Vec::new(),
             quota_focus_init: false,
+            selection_stats: bcvault_core::selection::SelectionStats::default(),
+            selection_stats_dirty: false,
+            selection_recount_calls: 0,
             save_view_modal: None,
             settings_modal_open: false,
             settings_draft: None,
@@ -808,6 +816,22 @@ impl FxState {
             scroll_y: self.scroll_y,
             focus: self.focused_key,
         }
+    }
+
+    pub fn mark_selection_dirty(&mut self) {
+        self.selection_stats_dirty = true;
+    }
+
+    pub fn selection_stats(&mut self) -> bcvault_core::selection::SelectionStats {
+        if self.selection_stats_dirty {
+            self.selection_stats = bcvault_core::selection::compute_stats(
+                self.rows.iter().map(|w| &w.rel),
+                &self.selected_keys,
+            );
+            self.selection_stats_dirty = false;
+            self.selection_recount_calls += 1;
+        }
+        self.selection_stats
     }
 
     pub fn push_quota_warning(&mut self, entry: FxQuotaWarningEntry) {
@@ -1157,6 +1181,7 @@ impl FxState {
                         w.rel = (*rel).clone();
                     }
                 }
+                self.selection_stats_dirty = true;
                 self.row_flashes.insert(key, now_s + 0.6);
                 if !was_dl && rel.downloaded {
                     let _ = self
@@ -1279,6 +1304,7 @@ impl FxState {
                         self.snapshot_for_flip(now_s);
                     }
                     self.rows = rows;
+                    self.selection_stats_dirty = true;
                 } else {
                     self.rows.extend(rows);
                 }
@@ -1468,21 +1494,47 @@ impl FxState {
                 }
                 self.last_clicked_key = Some(key);
                 self.focused_key = Some(key);
+                self.selection_stats_dirty = true;
             }
             FxAction::SelectRange(key) => {
                 let anchor = self.last_clicked_key.or(self.focused_key).unwrap_or(key);
-                let pos_a = self.rows.iter().position(|r| r.rel.key == anchor);
-                let pos_b = self.rows.iter().position(|r| r.rel.key == key);
-                if let (Some(a), Some(b)) = (pos_a, pos_b) {
-                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    for r in &self.rows[lo..=hi] {
-                        self.selected_keys.insert(r.rel.key);
-                    }
-                }
+                let refs: Vec<&bcvault_core::types::ReleaseRow> =
+                    self.rows.iter().map(|w| &w.rel).collect();
+                let range = bcvault_core::selection::range_keys(
+                    &refs,
+                    anchor,
+                    key,
+                    bcvault_core::selection::SelectScope::All,
+                );
+                self.selected_keys.extend(range);
                 self.focused_key = Some(key);
+                self.selection_stats_dirty = true;
+            }
+            FxAction::SelectAll => {
+                self.selected_keys = bcvault_core::selection::select(
+                    self.rows.iter().map(|w| &w.rel),
+                    bcvault_core::selection::SelectScope::All,
+                );
+                self.selection_stats_dirty = true;
+            }
+            FxAction::InvertSelection => {
+                self.selected_keys = bcvault_core::selection::invert(
+                    self.rows.iter().map(|w| &w.rel),
+                    &self.selected_keys,
+                    bcvault_core::selection::SelectScope::All,
+                );
+                self.selection_stats_dirty = true;
+            }
+            FxAction::SelectRemaining => {
+                self.selected_keys = bcvault_core::selection::select(
+                    self.rows.iter().map(|w| &w.rel),
+                    bcvault_core::selection::SelectScope::Remaining,
+                );
+                self.selection_stats_dirty = true;
             }
             FxAction::ClearSelection => {
                 self.selected_keys.clear();
+                self.selection_stats_dirty = true;
             }
             FxAction::DownloadSelected => {
                 let mut keys: Vec<ItemKey> = self.selected_keys.iter().copied().collect();
@@ -1516,6 +1568,19 @@ impl FxState {
                     opts,
                     ack_soft_quota: false,
                     mode: bcvault_core::types::EnqueueMode::New,
+                });
+            }
+            FxAction::Redownload(key) => {
+                let opts = DownloadOpts {
+                    out_dir: self.settings.out_dir.clone(),
+                    format: self.settings.format,
+                    batch_limit: self.settings.batch_limit,
+                };
+                let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
+                    items: vec![key],
+                    opts,
+                    ack_soft_quota: false,
+                    mode: bcvault_core::types::EnqueueMode::Force,
                 });
             }
             FxAction::OpenInBrowser(key) => {
@@ -2510,5 +2575,118 @@ mod tests {
         assert!(state.close_top_modal());
         assert!(state.quota_warnings.is_empty());
         assert!(core_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_13_fx_selection_actions_and_stats_cache_invalidation() {
+        let mut state = FxState::new();
+        let (core_tx, _core_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (fx_tx, _fx_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let make_row = |id: i64, downloaded: bool, unavailable: bool| WallRow {
+            rel: ReleaseRow {
+                key: ItemKey {
+                    kind: ItemType::Album,
+                    id,
+                },
+                band_id: 10,
+                title: format!("Album {id}"),
+                artist_name: "Artist".into(),
+                url: format!("https://a.bandcamp.com/album/{id}"),
+                cover_url: None,
+                art_id: None,
+                classification: if unavailable {
+                    Classification::Unavailable
+                } else {
+                    Classification::Free
+                },
+                is_preorder: false,
+                track_count: Some(5),
+                published_at: None,
+                modified_at: None,
+                downloaded,
+                downloaded_at: None,
+                downloaded_format: None,
+                local_path: None,
+                local_status: None,
+                origin: None,
+                missing_ack_at: None,
+                has_remote_update: false,
+                remote_update_reason: None,
+            },
+            art_id: None,
+            hue: None,
+            accent: None,
+            added_at: 0,
+        };
+
+        state.rows = vec![
+            make_row(1, false, false),
+            make_row(2, true, false),
+            make_row(3, false, true),
+            make_row(4, false, false),
+        ];
+        state.mark_selection_dirty();
+
+        // Initial stats computation
+        let s0 = state.selection_stats();
+        assert_eq!(s0.total_in_view, 4);
+        assert_eq!(s0.remaining_in_view, 2);
+        assert_eq!(s0.selected, 0);
+        let calls_after_first = state.selection_recount_calls;
+        assert_eq!(calls_after_first, 1);
+
+        // Repeated call without changes must use cache
+        let _ = state.selection_stats();
+        assert_eq!(state.selection_recount_calls, calls_after_first);
+
+        // SelectRemaining selects only items 1 and 4
+        state.dispatch(FxAction::SelectRemaining, &core_tx, &fx_tx, 0.0);
+        assert_eq!(state.selected_keys.len(), 2);
+        assert!(
+            state
+                .selected_keys
+                .contains(&ItemKey::new(ItemType::Album, 1))
+        );
+        assert!(
+            state
+                .selected_keys
+                .contains(&ItemKey::new(ItemType::Album, 4))
+        );
+
+        // InvertSelection selects items 2 and 3
+        state.dispatch(FxAction::InvertSelection, &core_tx, &fx_tx, 0.0);
+        assert_eq!(state.selected_keys.len(), 2);
+        assert!(
+            state
+                .selected_keys
+                .contains(&ItemKey::new(ItemType::Album, 2))
+        );
+        assert!(
+            state
+                .selected_keys
+                .contains(&ItemKey::new(ItemType::Album, 3))
+        );
+
+        // SelectAll selects all 4
+        state.dispatch(FxAction::SelectAll, &core_tx, &fx_tx, 0.0);
+        assert_eq!(state.selected_keys.len(), 4);
+        let s_all = state.selection_stats();
+        assert_eq!(s_all.selected, 4);
+        assert_eq!(s_all.selected_downloadable, 3);
+
+        // ReleaseUpdated invalidates cache and updates remaining count
+        let mut updated = state.rows[0].rel.clone();
+        updated.downloaded = true;
+        state.apply_core_event(
+            WorkerToUiEvent::ReleaseUpdated(Box::new(updated)),
+            &fx_tx,
+            0.0,
+        );
+        let calls_before = state.selection_recount_calls;
+        let s_after = state.selection_stats();
+        assert_eq!(state.selection_recount_calls, calls_before + 1);
+        assert_eq!(s_after.remaining_in_view, 1);
+        assert_eq!(s_after.selected_downloadable, 3);
     }
 }

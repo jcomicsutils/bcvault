@@ -44,7 +44,34 @@ pub fn show(
     table
         .header(26.0, |mut header| {
             header.col(|ui| {
-                ui.label(RichText::new("✓").monospace().color(th.text_dim));
+                let stats = state.selection_stats();
+                let glyph = if stats.total_in_view > 0 && stats.selected == stats.total_in_view {
+                    "☑"
+                } else if stats.selected > 0 {
+                    "⊟"
+                } else {
+                    "☐"
+                };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(glyph).monospace().color(
+                            if stats.selected > 0 {
+                                th.accent
+                            } else {
+                                th.text_dim
+                            },
+                        ))
+                        .frame(false),
+                    )
+                    .on_hover_text("Select all / Clear selection (Ctrl+A)")
+                    .clicked()
+                {
+                    if stats.total_in_view > 0 && stats.selected == stats.total_in_view {
+                        pending_actions.push(FxAction::ClearSelection);
+                    } else {
+                        pending_actions.push(FxAction::SelectAll);
+                    }
+                }
             });
             header.col(|_ui| {});
             sort_header(
@@ -293,7 +320,10 @@ pub fn show(
                         {
                             pending_actions.push(FxAction::OpenFolder(key));
                         }
-                    } else if w.rel.classification.auto_downloadable()
+                        if w.rel.is_downloadable() && paint::sharp_button(ui, "Re-dl").clicked() {
+                            pending_actions.push(FxAction::Redownload(key));
+                        }
+                    } else if w.rel.is_downloadable()
                         && paint::sharp_button(ui, "Download").clicked()
                     {
                         pending_actions.push(FxAction::DownloadKey(key));
