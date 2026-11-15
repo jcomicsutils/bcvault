@@ -178,6 +178,13 @@ impl Default for FxQuery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemainingTarget {
+    View,
+    ThisArtist,
+    AllArtists,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum FxAction {
     SetView(ViewMode),
@@ -200,6 +207,7 @@ pub enum FxAction {
     SelectRemaining,
     ClearSelection,
     DownloadSelected,
+    DownloadRemaining(RemainingTarget),
     DownloadKey(ItemKey),
     Redownload(ItemKey),
     OpenInBrowser(ItemKey),

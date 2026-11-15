@@ -263,6 +263,98 @@ pub fn show_modals(
         }
     }
 
+    // 2b. Bulk Download Confirmation Modal
+    if let Some(modal) = state.bulk_confirm_modal.as_mut() {
+        let mut confirm = false;
+        let mut close = esc;
+        let focus_cancel = !modal.focus_init;
+        modal.focus_init = true;
+
+        egui::Window::new(&modal.title)
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .max_size([600.0, 460.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(480.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} new across {} artist(s): {} will queue now, {} deferred.",
+                        modal.total_new,
+                        modal.rows.len(),
+                        modal.total_queue,
+                        modal.total_deferred
+                    ))
+                    .strong(),
+                );
+                ui.add_space(6.0);
+
+                let row_h = 20.0;
+                let total_rows = modal.rows.len();
+                egui::ScrollArea::vertical().max_height(220.0).show_rows(
+                    ui,
+                    row_h,
+                    total_rows,
+                    |ui, range| {
+                        for row in &modal.rows[range] {
+                            ui.horizontal(|ui| {
+                                ui.set_height(row_h);
+                                ui.label(RichText::new(&row.artist_name).strong());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "— new: {}, queue: {}, deferred: {}, 30d: {} -> {}",
+                                        row.preview.requested,
+                                        row.preview.allowed,
+                                        row.preview.deferred,
+                                        row.preview.used_30d,
+                                        row.preview.used_30d.saturating_add(row.preview.allowed),
+                                    ))
+                                    .color(th.text_dim),
+                                );
+                            });
+                        }
+                    },
+                );
+
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Deferred releases stay remaining; press Download remaining again later.",
+                    )
+                    .color(th.text_dim),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(modal.total_queue > 0, |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(format!("Queue {}", modal.total_queue))
+                                    .corner_radius(CornerRadius::ZERO),
+                            )
+                            .clicked()
+                        {
+                            confirm = true;
+                        }
+                    });
+                    let cancel_resp =
+                        ui.add(egui::Button::new("Cancel").corner_radius(CornerRadius::ZERO));
+                    if focus_cancel {
+                        cancel_resp.request_focus();
+                    }
+                    if cancel_resp.clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if confirm {
+            state.confirm_bulk_modal(core_tx);
+        } else if close {
+            state.bulk_confirm_modal = None;
+        }
+    }
+
     // 3. Save View Modal
     if let Some(mut name_input) = state.save_view_modal.clone() {
         let mut close_sv = esc;

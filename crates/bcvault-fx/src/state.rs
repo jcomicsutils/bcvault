@@ -1,5 +1,5 @@
 use crate::{
-    actions::{FxAction, FxQuery, ViewMode},
+    actions::{FxAction, FxQuery, RemainingTarget, ViewMode},
     db::{Facets, Palette, Prefs, ReleaseDetail, Stats, WallRow},
     motion::{Motion, SpringCfg},
     nav::{NavHistory, SavedView, ViewState},
@@ -101,6 +101,29 @@ pub struct FxUnavailableModalState {
     pub batch_id: u64,
     pub cards: Vec<FxUnavailableCardState>,
     pub picked_folder: std::sync::Arc<std::sync::Mutex<Option<(i64, std::path::PathBuf)>>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FxBulkAction {
+    View(Vec<ItemKey>),
+    Remaining(bcvault_core::types::RemainingScope),
+}
+
+#[derive(Clone, Debug)]
+pub struct FxBulkConfirmRow {
+    pub artist_name: String,
+    pub preview: bcvault_core::worker::quota::BulkPreviewRow,
+}
+
+#[derive(Clone, Debug)]
+pub struct FxBulkConfirmModalState {
+    pub title: String,
+    pub rows: Vec<FxBulkConfirmRow>,
+    pub total_new: u32,
+    pub total_queue: u32,
+    pub total_deferred: u32,
+    pub action: FxBulkAction,
+    pub focus_init: bool,
 }
 
 impl FxUnavailableModalState {
@@ -559,6 +582,7 @@ pub struct FxState {
     // Quota warnings
     pub quota_warnings: Vec<FxQuotaWarningEntry>,
     pub quota_focus_init: bool,
+    pub bulk_confirm_modal: Option<FxBulkConfirmModalState>,
 
     // Selection stats cache
     pub selection_stats: bcvault_core::selection::SelectionStats,
@@ -666,6 +690,7 @@ impl FxState {
             redeem_modal: None,
             quota_warnings: Vec::new(),
             quota_focus_init: false,
+            bulk_confirm_modal: None,
             selection_stats: bcvault_core::selection::SelectionStats::default(),
             selection_stats_dirty: false,
             selection_recount_calls: 0,
@@ -731,6 +756,7 @@ impl FxState {
             || self.save_view_modal.is_some()
             || self.redeem_modal.is_some()
             || !self.quota_warnings.is_empty()
+            || self.bulk_confirm_modal.is_some()
             || self.reconcile_report_modal.is_some()
             || (self.show_resolve_missing_window && self.resolve_missing_modal.is_some())
             || (self.show_unavailable_window && self.unavailable_modal.is_some())
@@ -747,6 +773,9 @@ impl FxState {
         if !self.quota_warnings.is_empty() {
             self.quota_warnings.clear();
             self.quota_focus_init = false;
+            return true;
+        }
+        if self.bulk_confirm_modal.take().is_some() {
             return true;
         }
         if self.confirm_remove_artist.take().is_some() {
@@ -866,6 +895,190 @@ impl FxState {
         }
         self.quota_warnings.clear();
         self.quota_focus_init = false;
+    }
+
+    pub fn library_remaining_count(&self) -> u32 {
+        self.artists
+            .iter()
+            .map(|a| a.stats.eligible.saturating_sub(a.stats.eligible_downloaded))
+            .sum()
+    }
+
+    pub fn trigger_download_remaining(
+        &mut self,
+        target: RemainingTarget,
+        core_tx: &UnboundedSender<UiToWorkerCommand>,
+    ) {
+        let opts = DownloadOpts {
+            format: self.settings.format,
+            out_dir: self.settings.out_dir.clone(),
+            batch_limit: self.settings.batch_limit,
+        };
+        let (title, is_library_or_multi, per_artist, action) = match target {
+            RemainingTarget::View => {
+                let mut counts: HashMap<i64, u32> = HashMap::new();
+                let mut order: Vec<i64> = Vec::new();
+                let mut keys: Vec<ItemKey> = Vec::new();
+                for wr in &self.rows {
+                    if wr.rel.is_download_candidate() {
+                        keys.push(wr.rel.key);
+                        if !counts.contains_key(&wr.rel.band_id) {
+                            order.push(wr.rel.band_id);
+                        }
+                        *counts.entry(wr.rel.band_id).or_insert(0) += 1;
+                    }
+                }
+                if keys.is_empty() {
+                    return;
+                }
+                let per_artist: Vec<(i64, u32, u32)> = order
+                    .into_iter()
+                    .map(|bid| {
+                        let req = counts.get(&bid).copied().unwrap_or(0);
+                        let used = self
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == bid)
+                            .map(|a| a.stats.quota_used_30d)
+                            .unwrap_or(0);
+                        (bid, req, used)
+                    })
+                    .collect();
+                (
+                    "Download Remaining in View".to_string(),
+                    per_artist.len() > 1,
+                    per_artist,
+                    FxBulkAction::View(keys),
+                )
+            }
+            RemainingTarget::ThisArtist => {
+                let Some(bid) = self.query.base.band_id else {
+                    return;
+                };
+                let per_artist: Vec<(i64, u32, u32)> = self
+                    .artists
+                    .iter()
+                    .find(|a| a.band_id == bid)
+                    .map(|a| {
+                        let rem = a.stats.eligible.saturating_sub(a.stats.eligible_downloaded);
+                        (bid, rem, a.stats.quota_used_30d)
+                    })
+                    .filter(|&(_, rem, _)| rem > 0)
+                    .into_iter()
+                    .collect();
+                if per_artist.is_empty() {
+                    return;
+                }
+                (
+                    "Download Remaining for Artist".to_string(),
+                    false,
+                    per_artist,
+                    FxBulkAction::Remaining(bcvault_core::types::RemainingScope::Artists(vec![
+                        bid,
+                    ])),
+                )
+            }
+            RemainingTarget::AllArtists => {
+                let per_artist: Vec<(i64, u32, u32)> = self
+                    .artists
+                    .iter()
+                    .filter_map(|a| {
+                        let rem = a.stats.eligible.saturating_sub(a.stats.eligible_downloaded);
+                        if rem > 0 {
+                            Some((a.band_id, rem, a.stats.quota_used_30d))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if per_artist.is_empty() {
+                    return;
+                }
+                (
+                    "Download Remaining for All Artists".to_string(),
+                    true,
+                    per_artist,
+                    FxBulkAction::Remaining(bcvault_core::types::RemainingScope::Library),
+                )
+            }
+        };
+
+        let preview = bcvault_core::worker::quota::preview_bulk(
+            &per_artist,
+            self.settings.batch_limit,
+            self.settings.quota_soft,
+            self.settings.quota_hard,
+            false,
+        );
+
+        if bcvault_core::worker::quota::should_confirm_bulk(is_library_or_multi, &preview) {
+            let mut rows = Vec::with_capacity(preview.len());
+            let mut total_new = 0u32;
+            let mut total_queue = 0u32;
+            let mut total_deferred = 0u32;
+            for p in preview {
+                let artist_name = self
+                    .artists
+                    .iter()
+                    .find(|a| a.band_id == p.band_id)
+                    .map(|a| a.display_name().to_string())
+                    .unwrap_or_else(|| format!("Artist {}", p.band_id));
+                total_new = total_new.saturating_add(p.requested);
+                total_queue = total_queue.saturating_add(p.allowed);
+                total_deferred = total_deferred.saturating_add(p.deferred);
+                rows.push(FxBulkConfirmRow {
+                    artist_name,
+                    preview: p,
+                });
+            }
+            self.bulk_confirm_modal = Some(FxBulkConfirmModalState {
+                title,
+                rows,
+                total_new,
+                total_queue,
+                total_deferred,
+                action,
+                focus_init: false,
+            });
+        } else {
+            Self::send_bulk_action(action, opts, false, core_tx);
+        }
+    }
+
+    pub fn confirm_bulk_modal(&mut self, core_tx: &UnboundedSender<UiToWorkerCommand>) {
+        if let Some(modal) = self.bulk_confirm_modal.take() {
+            let opts = DownloadOpts {
+                format: self.settings.format,
+                out_dir: self.settings.out_dir.clone(),
+                batch_limit: self.settings.batch_limit,
+            };
+            Self::send_bulk_action(modal.action, opts, true, core_tx);
+        }
+    }
+
+    fn send_bulk_action(
+        action: FxBulkAction,
+        opts: DownloadOpts,
+        ack_soft_quota: bool,
+        core_tx: &UnboundedSender<UiToWorkerCommand>,
+    ) {
+        match action {
+            FxBulkAction::View(items) => {
+                let _ = core_tx.send(UiToWorkerCommand::EnqueueDownloads {
+                    items,
+                    opts,
+                    ack_soft_quota,
+                    mode: bcvault_core::types::EnqueueMode::New,
+                });
+            }
+            FxBulkAction::Remaining(scope) => {
+                let _ = core_tx.send(UiToWorkerCommand::EnqueueRemaining {
+                    scope,
+                    opts,
+                    ack_soft_quota,
+                });
+            }
+        }
     }
 
     pub fn push_toast(&mut self, kind: ToastKind, message: impl Into<String>, now_s: f64) {
@@ -1556,6 +1769,9 @@ impl FxState {
                         mode: bcvault_core::types::EnqueueMode::New,
                     });
                 }
+            }
+            FxAction::DownloadRemaining(target) => {
+                self.trigger_download_remaining(target, core_tx);
             }
             FxAction::DownloadKey(key) => {
                 let opts = DownloadOpts {
@@ -2688,5 +2904,81 @@ mod tests {
         assert_eq!(state.selection_recount_calls, calls_before + 1);
         assert_eq!(s_after.remaining_in_view, 1);
         assert_eq!(s_after.selected_downloadable, 3);
+    }
+
+    #[test]
+    fn test_16_fx_bulk_confirmation_thresholds() {
+        let mut state = FxState::new();
+        let (core_tx, mut core_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let make_artist =
+            |band_id: i64, eligible: u32, eligible_downloaded: u32, used: u32| ArtistView {
+                band_id,
+                slug: format!("artist-{band_id}"),
+                url: format!("https://artist-{band_id}.bandcamp.com"),
+                name: format!("Artist {band_id}"),
+                custom_name: None,
+                last_synced_at: None,
+                stats: bcvault_core::types::ArtistStats {
+                    downloaded: eligible_downloaded,
+                    eligible_downloaded,
+                    non_eligible_downloaded: 0,
+                    eligible,
+                    total: eligible,
+                    email_required: 0,
+                    unknown: 0,
+                    quota_used_30d: used,
+                    archived: 0,
+                    missing_files: 0,
+                },
+            };
+
+        // 1) Small single-artist batch (< 25, no deferrals) -> direct EnqueueRemaining, no modal
+        state.artists = vec![make_artist(1, 5, 0, 0)];
+        state.query.base.band_id = Some(1);
+        state.trigger_download_remaining(RemainingTarget::ThisArtist, &core_tx);
+        assert!(state.bulk_confirm_modal.is_none());
+        match core_rx.try_recv() {
+            Ok(UiToWorkerCommand::EnqueueRemaining { scope, .. }) => {
+                assert_eq!(scope, bcvault_core::types::RemainingScope::Artists(vec![1]));
+            }
+            other => panic!("expected EnqueueRemaining, got {other:?}"),
+        }
+
+        // 2) Single artist >= 25 remaining -> opens bulk confirmation modal
+        state.artists = vec![make_artist(1, 30, 0, 0)];
+        state.trigger_download_remaining(RemainingTarget::ThisArtist, &core_tx);
+        assert!(state.bulk_confirm_modal.is_some());
+        assert!(state.has_open_modal());
+        assert!(core_rx.try_recv().is_err());
+
+        // Cancel via close_top_modal does not send
+        assert!(state.close_top_modal());
+        assert!(state.bulk_confirm_modal.is_none());
+        assert!(core_rx.try_recv().is_err());
+
+        // 3) AllArtists always opens bulk confirmation modal and confirm_bulk_modal sends
+        state.artists = vec![make_artist(1, 2, 0, 0), make_artist(2, 3, 0, 0)];
+        state.trigger_download_remaining(RemainingTarget::AllArtists, &core_tx);
+        let Some(modal) = state.bulk_confirm_modal.as_ref() else {
+            panic!("AllArtists should open bulk confirm modal");
+        };
+        assert_eq!(modal.total_new, 5);
+        assert_eq!(modal.total_queue, 5);
+        assert_eq!(modal.total_deferred, 0);
+
+        state.confirm_bulk_modal(&core_tx);
+        assert!(state.bulk_confirm_modal.is_none());
+        match core_rx.try_recv() {
+            Ok(UiToWorkerCommand::EnqueueRemaining {
+                scope,
+                ack_soft_quota,
+                ..
+            }) => {
+                assert_eq!(scope, bcvault_core::types::RemainingScope::Library);
+                assert!(ack_soft_quota);
+            }
+            other => panic!("expected EnqueueRemaining, got {other:?}"),
+        }
     }
 }

@@ -118,10 +118,52 @@ pub fn run_palette_search(
                 "",
             ),
             (
-                "Download Selected Releases",
+                "Select all in view",
+                "Select every release in the current view",
+                FxAction::SelectAll,
+                "Ctrl+A",
+            ),
+            (
+                "Select remaining in view",
+                "Select all undownloaded downloadable releases in view",
+                FxAction::SelectRemaining,
+                "",
+            ),
+            (
+                "Invert selection",
+                "Invert the current release selection",
+                FxAction::InvertSelection,
+                "",
+            ),
+            (
+                "Clear selection",
+                "Deselect all releases",
+                FxAction::ClearSelection,
+                "Esc",
+            ),
+            (
+                "Download selected",
                 "Enqueue currently selected releases",
                 FxAction::DownloadSelected,
                 "D",
+            ),
+            (
+                "Download remaining in view",
+                "Enqueue all remaining releases in the current view",
+                FxAction::DownloadRemaining(crate::actions::RemainingTarget::View),
+                "",
+            ),
+            (
+                "Download remaining for this artist",
+                "Enqueue all remaining releases for the active artist",
+                FxAction::DownloadRemaining(crate::actions::RemainingTarget::ThisArtist),
+                "",
+            ),
+            (
+                "Download remaining for all artists",
+                "Enqueue all remaining releases across the entire library",
+                FxAction::DownloadRemaining(crate::actions::RemainingTarget::AllArtists),
+                "",
             ),
             (
                 "Toggle Sidebar",

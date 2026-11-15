@@ -332,6 +332,70 @@ pub fn show(
                 }
             });
 
+            let stats_rem = state.selection_stats().remaining_in_view;
+            let lib_rem = state.library_remaining_count();
+            let rem_btn_label = format!("Download remaining ({stats_rem})");
+            ui.add_enabled_ui(stats_rem > 0, |ui| {
+                if paint::sharp_button(ui, rem_btn_label).clicked() {
+                    pending_actions.push(FxAction::DownloadRemaining(
+                        crate::actions::RemainingTarget::View,
+                    ));
+                }
+            });
+            ui.add_enabled_ui(stats_rem > 0 || lib_rem > 0, |ui| {
+                ui.menu_button("▾", |ui| {
+                    if ui
+                        .add_enabled(
+                            stats_rem > 0,
+                            egui::Button::new(format!("In this view ({stats_rem})"))
+                                .corner_radius(CornerRadius::ZERO),
+                        )
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::DownloadRemaining(
+                            crate::actions::RemainingTarget::View,
+                        ));
+                        ui.close();
+                    }
+                    let artist_rem = state.query.base.band_id.and_then(|bid| {
+                        state
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == bid)
+                            .map(|a| a.stats.eligible.saturating_sub(a.stats.eligible_downloaded))
+                    });
+                    if ui
+                        .add_enabled(
+                            artist_rem.is_some_and(|r| r > 0),
+                            egui::Button::new(match artist_rem {
+                                Some(r) => format!("This artist ({r})"),
+                                None => "This artist".to_string(),
+                            })
+                            .corner_radius(CornerRadius::ZERO),
+                        )
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::DownloadRemaining(
+                            crate::actions::RemainingTarget::ThisArtist,
+                        ));
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            lib_rem > 0,
+                            egui::Button::new(format!("All artists... ({lib_rem})"))
+                                .corner_radius(CornerRadius::ZERO),
+                        )
+                        .clicked()
+                    {
+                        pending_actions.push(FxAction::DownloadRemaining(
+                            crate::actions::RemainingTarget::AllArtists,
+                        ));
+                        ui.close();
+                    }
+                });
+            });
+
             egui::ComboBox::from_id_salt("fx_toolbar_fmt")
                 .selected_text(state.settings.format.label())
                 .width(72.0)
