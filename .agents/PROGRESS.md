@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/artist-groups  ·  Updated: 2026-11-15
 
 ## Done
+- none: document groups and rules (`ARTIST_GROUPS.md` step 10)
 - none: drag artists onto group headers (`ARTIST_GROUPS.md` step 9)
 - none: filter releases by several artists (`ARTIST_GROUPS.md` step 8)
 - none: add the group editor in fx UI (`ARTIST_GROUPS.md` step 7)

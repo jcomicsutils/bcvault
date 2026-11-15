@@ -79,12 +79,12 @@ A single agent works one phase or plan at a time. If you run two agents, split b
 | `0006_artist_folders_multi` | Multi-folder links per artist (`artist_folders` multi-link schema) | `MULTI_FOLDER.md` (`v0.1.3`, `Task: none`) | Breaking (`feat(db)!`) |
 | `0007_unavailable` | `'unavailable'` release classification CHECK constraint and 0-track backfill | Unavailable release fix (`v0.1.3`, `Task: none`) | Breaking (`feat(core)!`) |
 | `0008_rejected_matches` | `artist_folder_rejected` table for persistent rejected review pairs | `REVIEW-AND-MATCH-FIX.md` (`v0.1.3`, `Task: none`) | Breaking (`feat(db)!`) |
-| `0009` (lowest free) | `artist_groups` and `artist_group_pins` OR `auto_sync` / `sync_events` (whichever lands first) | `ARTIST_GROUPS.md` or `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
-| `0010` (or next free) | Next migration in landing order (`auto_sync` or `artist_groups` or `archive`) | `AUTO_SYNC.md` / `ARTIST_GROUPS.md` / `ARCHIVE.md` | Breaking (`feat(db)!`) |
+| `0009_artist_groups` | `artist_groups` and `artist_group_pins` tables | `ARTIST_GROUPS.md` (`Task: none`) | Breaking (`feat(db)!`) |
+| `0010` (lowest free) | `auto_sync` / `sync_events` (or next landing plan) | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
 | `0011` (or next free) | `release_archive` table (text archive in main DB; covers in `archive.sqlite`) | `ARCHIVE.md` | Breaking (`feat(core)!` / `feat(db)!`) |
 | next free | Mail accounts, messages, links, wait list | `MAIL_REDEEM_PLAN.md` (M0.4) | Breaking (`feat(db)!`) |
 
-Number by landing order: whichever plan lands first takes the lowest free number (currently `0009`); rename the unmerged file (and the plan text) before merging. The runner list is in `crates/bcvault-core/src/db/migrations.rs` (`MAX_VERSION = 8`). FX's sidecar database has its own numbering (`fx.sqlite`, `0001_fx_init.sql`) and is unaffected.
+Number by landing order: whichever plan lands next takes the lowest free number (currently `0010`); rename the unmerged file (and the plan text) before merging. The runner list is in `crates/bcvault-core/src/db/migrations.rs` (`MAX_VERSION = 9`). FX's sidecar database has its own numbering (`fx.sqlite`, `0001_fx_init.sql`) and is unaffected.
 
 ## 6. Cross-plan integration points
 

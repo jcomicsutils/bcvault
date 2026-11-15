@@ -27,6 +27,7 @@
 | **[Database Schema Reference](docs/database.md)** | Complete SQLite schema specification for `bcvault.db` (v8) and `fx.sqlite` (v1), partial indexes, migration history, and batch undo audit log. |
 | **[Bandcamp Endpoints & Scraping](docs/endpoints.md)** | Technical reference for `/music` grid scraping, `script[data-tralbum]` parsing, classification decision tree, `buy_for_nothing` checkout, `/statdownload/` polling, redeem validation, and artwork CDN tiers. |
 | **[Custom Themes (`bcvault-fx`)](docs/themes.md)** | File-based TOML theme format reference, `<data_dir>/themes` location, live theme editor, sharing/importing, and the 13 built-in themes. |
+| **[Artist Groups](docs/groups.md)** | Manual and rule-based collapsible sidebar artist groups, placement precedence, rule conditions/presets, drag-and-drop, and multi-artist release filtering. |
 
 ---
 
