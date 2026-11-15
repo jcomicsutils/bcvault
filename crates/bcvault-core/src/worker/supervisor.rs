@@ -299,10 +299,12 @@ impl Supervisor {
                 items,
                 opts,
                 ack_soft_quota,
+                mode,
             } => {
                 let mgr = self.dl_manager.clone();
                 tokio::spawn(async move {
-                    mgr.enqueue_downloads(items, opts, ack_soft_quota).await;
+                    mgr.enqueue_downloads(items, opts, ack_soft_quota, mode)
+                        .await;
                 });
             }
             UiToWorkerCommand::RedeemUrl { target, url, opts } => {

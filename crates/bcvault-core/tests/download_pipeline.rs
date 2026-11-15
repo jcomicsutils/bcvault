@@ -192,6 +192,7 @@ async fn wiremock_album_end_to_end_and_zip_extraction() {
             batch_limit: 150,
         },
         false,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -360,6 +361,7 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
             batch_limit: 150,
         },
         false,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -437,6 +439,7 @@ async fn wiremock_track_end_to_end_and_cover_404_tolerance() {
             batch_limit: 150,
         },
         false,
+        bcvault_core::types::EnqueueMode::Force,
     )
     .await;
 
@@ -675,6 +678,7 @@ async fn quota_enforcement_api_rejections_and_redeem() {
             batch_limit: 150,
         },
         false,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -723,6 +727,7 @@ async fn quota_enforcement_api_rejections_and_redeem() {
             batch_limit: 150,
         },
         true,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -758,6 +763,7 @@ async fn quota_enforcement_api_rejections_and_redeem() {
             batch_limit: 150,
         },
         true,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -852,6 +858,7 @@ async fn quota_enforcement_api_rejections_and_redeem() {
             batch_limit: 150,
         },
         true,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -950,6 +957,7 @@ async fn run_album_zip_download_case(
             batch_limit: 150,
         },
         false,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 
@@ -1145,6 +1153,7 @@ async fn update_settings_while_job_queued_applies_to_next_job_to_start() {
             batch_limit: 150,
         },
         false,
+        bcvault_core::types::EnqueueMode::New,
     )
     .await;
 

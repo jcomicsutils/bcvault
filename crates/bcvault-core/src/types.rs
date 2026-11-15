@@ -905,6 +905,13 @@ impl Default for Settings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EnqueueMode {
+    #[default]
+    New,
+    Force,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DownloadOpts {
     pub format: AudioFormat,

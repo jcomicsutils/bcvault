@@ -1397,6 +1397,7 @@ impl FxState {
                         items: keys,
                         opts,
                         ack_soft_quota: true,
+                        mode: bcvault_core::types::EnqueueMode::New,
                     });
                 }
             }
@@ -1410,6 +1411,7 @@ impl FxState {
                     items: vec![key],
                     opts,
                     ack_soft_quota: true,
+                    mode: bcvault_core::types::EnqueueMode::New,
                 });
             }
             FxAction::OpenInBrowser(key) => {

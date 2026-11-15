@@ -189,6 +189,7 @@ fn show_quota_modal(
                         items: modal.items.clone(),
                         opts: modal.opts.clone(),
                         ack_soft_quota: true,
+                        mode: bcvault_core::types::EnqueueMode::New,
                     });
                     keep_open = false;
                 }

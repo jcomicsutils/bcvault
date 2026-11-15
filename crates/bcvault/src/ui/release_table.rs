@@ -317,6 +317,7 @@ pub fn show(
                                 items: vec![r.key],
                                 opts,
                                 ack_soft_quota: false,
+                                mode: bcvault_core::types::EnqueueMode::Force,
                             });
                             ui.close();
                         }
@@ -511,6 +512,7 @@ fn draw_row_actions(
                 items: vec![r.key],
                 opts: opts.clone(),
                 ack_soft_quota: false,
+                mode: bcvault_core::types::EnqueueMode::Force,
             });
         }
 
@@ -559,6 +561,7 @@ fn draw_row_actions(
                 items: vec![r.key],
                 opts,
                 ack_soft_quota: false,
+                mode: bcvault_core::types::EnqueueMode::Force,
             });
         }
         return;
@@ -579,6 +582,7 @@ fn draw_row_actions(
                     items: vec![r.key],
                     opts,
                     ack_soft_quota: false,
+                    mode: bcvault_core::types::EnqueueMode::New,
                 });
             }
         }

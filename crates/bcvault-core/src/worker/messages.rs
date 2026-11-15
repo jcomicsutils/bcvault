@@ -1,6 +1,7 @@
 use crate::types::{
-    ArtistStats, ArtistView, DownloadOpts, ItemKey, JobId, JobState, JobView, LogEntry,
-    RateLimitStatus, ReleaseQuery, ReleaseRow, Settings, SyncMode, SyncProgress, SyncScope,
+    ArtistStats, ArtistView, DownloadOpts, EnqueueMode, ItemKey, JobId, JobState, JobView,
+    LogEntry, RateLimitStatus, ReleaseQuery, ReleaseRow, Settings, SyncMode, SyncProgress,
+    SyncScope,
 };
 use std::path::PathBuf;
 
@@ -36,6 +37,7 @@ pub enum UiToWorkerCommand {
         items: Vec<ItemKey>,
         opts: DownloadOpts,
         ack_soft_quota: bool,
+        mode: EnqueueMode,
     },
     RedeemUrl {
         target: ItemKey,

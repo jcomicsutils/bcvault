@@ -147,6 +147,7 @@ pub fn show(
                 items,
                 opts,
                 ack_soft_quota: false,
+                mode: bcvault_core::types::EnqueueMode::New,
             });
         }
 
@@ -178,6 +179,7 @@ pub fn show(
                 items: eligible_keys,
                 opts,
                 ack_soft_quota: false,
+                mode: bcvault_core::types::EnqueueMode::New,
             });
         }
 

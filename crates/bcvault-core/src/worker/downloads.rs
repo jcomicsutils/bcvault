@@ -14,8 +14,9 @@ use crate::{
     },
     error::{BcError, DbError, DownloadError},
     types::{
-        AudioFormat, Classification, DownloadOpts, DownloadSource, HistoryStatus, ItemKey,
-        ItemType, JobError, JobId, JobState, JobView, LogLevel, OutputLayout, ReleaseRow, Settings,
+        AudioFormat, Classification, DownloadOpts, DownloadSource, EnqueueMode, HistoryStatus,
+        ItemKey, ItemType, JobError, JobId, JobState, JobView, LogLevel, OutputLayout, ReleaseRow,
+        Settings,
     },
     worker::{
         bridge::UiBridge,
@@ -27,7 +28,7 @@ use crate::{
     },
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -54,6 +55,7 @@ struct ManagerState {
     artists_with_queue: VecDeque<i64>,
     per_artist_queue: HashMap<i64, VecDeque<JobSpec>>,
     all_jobs: HashMap<JobId, JobSpec>,
+    in_flight: HashSet<ItemKey>,
     active_cancels: HashMap<JobId, CancellationToken>,
     active_bands: HashMap<i64, usize>,
     artist_blocked_until: HashMap<i64, Instant>,
@@ -89,6 +91,7 @@ impl DownloadManager {
                 artists_with_queue: VecDeque::new(),
                 per_artist_queue: HashMap::new(),
                 all_jobs: HashMap::new(),
+                in_flight: HashSet::new(),
                 active_cancels: HashMap::new(),
                 active_bands: HashMap::new(),
                 artist_blocked_until: HashMap::new(),
@@ -130,10 +133,12 @@ impl DownloadManager {
                 tok.cancel();
             } else if let Some(spec) = st.all_jobs.get(&job_id) {
                 let bid = spec.band_id;
+                let key = spec.key;
                 if let Some(q) = st.per_artist_queue.get_mut(&bid)
                     && let Some(pos) = q.iter().position(|j| j.id == job_id)
                 {
                     q.remove(pos);
+                    st.in_flight.remove(&key);
                     removed_queued = true;
                 }
             }
@@ -149,10 +154,15 @@ impl DownloadManager {
     pub fn cancel_all(&self) {
         let mut cancelled_ids = Vec::new();
         if let Ok(mut st) = self.state.lock() {
+            let mut removed_keys = Vec::new();
             for q in st.per_artist_queue.values_mut() {
                 while let Some(spec) = q.pop_front() {
                     cancelled_ids.push(spec.id);
+                    removed_keys.push(spec.key);
                 }
+            }
+            for key in removed_keys {
+                st.in_flight.remove(&key);
             }
             st.artists_with_queue.clear();
             for tok in st.active_cancels.values() {
@@ -185,6 +195,7 @@ impl DownloadManager {
         items: Vec<ItemKey>,
         opts: DownloadOpts,
         ack_soft_quota: bool,
+        mode: EnqueueMode,
     ) {
         if items.is_empty() {
             return;
@@ -196,8 +207,12 @@ impl DownloadManager {
             .map(|st| st.settings.clone())
             .unwrap_or_default();
 
+        // Deduplicate keys while preserving order.
+        let mut seen = HashSet::with_capacity(items.len());
+        let unique_items: Vec<ItemKey> = items.into_iter().filter(|k| seen.insert(*k)).collect();
+
         // Fetch release rows and group by band_id in order
-        let items_clone = items.clone();
+        let items_clone = unique_items;
         let rows_res = self
             .pool
             .reader
@@ -214,10 +229,22 @@ impl DownloadManager {
 
         let Ok(rows) = rows_res else { return };
 
+        let in_flight_snapshot: HashSet<ItemKey> = self
+            .state
+            .lock()
+            .map(|st| st.in_flight.clone())
+            .unwrap_or_default();
+
         let mut by_band: HashMap<i64, Vec<ReleaseRow>> = HashMap::new();
         let mut band_order: Vec<i64> = Vec::new();
         for r in rows {
-            if r.is_preorder || !r.classification.auto_downloadable() {
+            if !r.is_downloadable() {
+                continue;
+            }
+            if mode == EnqueueMode::New && r.downloaded {
+                continue;
+            }
+            if in_flight_snapshot.contains(&r.key) {
                 continue;
             }
             if !by_band.contains_key(&r.band_id) {
@@ -381,7 +408,7 @@ impl DownloadManager {
         self.push_spec(spec);
     }
 
-    fn push_spec(&self, spec: JobSpec) {
+    fn push_spec(&self, spec: JobSpec) -> bool {
         let view = JobView {
             id: spec.id,
             key: spec.key,
@@ -390,21 +417,44 @@ impl DownloadManager {
             format: spec.opts.format,
             state: JobState::Queued,
         };
-        if let Ok(mut st) = self.state.lock() {
-            let bid = spec.band_id;
-            st.all_jobs.insert(spec.id, spec.clone());
-            let was_empty = {
-                let q = st.per_artist_queue.entry(bid).or_default();
-                let empty = q.is_empty();
-                q.push_back(spec);
-                empty
-            };
-            if was_empty && !st.artists_with_queue.contains(&bid) {
-                st.artists_with_queue.push_back(bid);
+        let inserted = if let Ok(mut st) = self.state.lock() {
+            if !st.in_flight.insert(spec.key) {
+                false
+            } else {
+                let bid = spec.band_id;
+                st.all_jobs.insert(spec.id, spec.clone());
+                let was_empty = {
+                    let q = st.per_artist_queue.entry(bid).or_default();
+                    let empty = q.is_empty();
+                    q.push_back(spec);
+                    empty
+                };
+                if was_empty && !st.artists_with_queue.contains(&bid) {
+                    st.artists_with_queue.push_back(bid);
+                }
+                true
             }
+        } else {
+            false
+        };
+        if inserted {
+            self.bridge.emit(WorkerToUiEvent::JobQueued(view));
+            self.notify.notify_one();
         }
-        self.bridge.emit(WorkerToUiEvent::JobQueued(view));
-        self.notify.notify_one();
+        inserted
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.state.lock().map(|st| st.in_flight.len()).unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_contains(&self, key: &ItemKey) -> bool {
+        self.state
+            .lock()
+            .map(|st| st.in_flight.contains(key))
+            .unwrap_or(false)
     }
 
     fn is_artist_blocked(&self, band_id: i64) -> bool {
@@ -425,10 +475,15 @@ impl DownloadManager {
         if let Ok(mut st) = self.state.lock() {
             st.artist_blocked_until
                 .insert(band_id, Instant::now() + Duration::from_secs(30 * 60));
+            let mut drained_keys = Vec::new();
             if let Some(q) = st.per_artist_queue.get_mut(&band_id) {
                 while let Some(spec) = q.pop_front() {
                     drained.push(spec.id);
+                    drained_keys.push(spec.key);
                 }
+            }
+            for key in drained_keys {
+                st.in_flight.remove(&key);
             }
         }
         for job_id in drained {
@@ -485,6 +540,7 @@ impl DownloadManager {
                                 *c = c.saturating_sub(1);
                             }
                             st.active_cancels.remove(&spec.id);
+                            st.in_flight.remove(&spec.key);
                         }
                         mgr_c.notify.notify_one();
                     });
@@ -1010,5 +1066,249 @@ fn map_download_error(err: &DownloadError) -> JobError {
             JobError::Io(format!("truncated: expected {expected}B, got {actual}B"))
         }
         DownloadError::Cancelled => JobError::Io("cancelled".to_string()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::{
+        bandcamp::gate::BandcampGate,
+        db::repo::{
+            artists::{self, UpsertArtist},
+            releases::{DiscoveredRelease, ReleaseMetadata},
+        },
+        types::Settings,
+    };
+    use tokio::sync::mpsc;
+
+    async fn setup_mgr() -> (
+        tempfile::TempDir,
+        DbPool,
+        DownloadManager,
+        mpsc::UnboundedReceiver<WorkerToUiEvent>,
+        CancellationToken,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.sqlite");
+        let pool = DbPool::open(&db_path).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let bridge = UiBridge::new(tx, None);
+        let root_cancel = CancellationToken::new();
+        let gate = BandcampGate::new(0, 0, 1, None);
+        let client = BandcampClient::new(gate, "bcvault-test")
+            .unwrap()
+            .with_base_urls("http://127.0.0.1:9", "http://127.0.0.1:9");
+        let settings = Settings {
+            out_dir: dir.path().join("out"),
+            ..Settings::default()
+        };
+        let mgr = DownloadManager::new(pool.clone(), client, bridge, settings, root_cancel.clone());
+        (dir, pool, mgr, rx, root_cancel)
+    }
+
+    async fn seed_release(pool: &DbPool, band_id: i64, id: i64, downloaded: bool) -> ItemKey {
+        let key = ItemKey {
+            kind: ItemType::Album,
+            id,
+        };
+        pool.writer
+            .call(move |c| {
+                artists::upsert(
+                    c,
+                    &UpsertArtist {
+                        band_id,
+                        slug: &format!("a-{band_id}"),
+                        name: &format!("Artist {band_id}"),
+                        url: &format!("https://a-{band_id}.bandcamp.com"),
+                        cover_url: None,
+                    },
+                )?;
+                releases::upsert_discovered(
+                    c,
+                    &DiscoveredRelease {
+                        key,
+                        band_id,
+                        title: &format!("Album {id}"),
+                        artist_name: &format!("Artist {band_id}"),
+                        url: &format!("https://a-{band_id}.bandcamp.com/album/a-{id}"),
+                        cover_url: None,
+                        art_id: None,
+                    },
+                )?;
+                releases::update_metadata(
+                    c,
+                    &ReleaseMetadata {
+                        key,
+                        classification: Classification::Free,
+                        pricing_json: Some(r#"{"minimum_price":0.0}"#),
+                        is_preorder: false,
+                        track_count: Some(3),
+                        published_at: None,
+                        modified_at: None,
+                        art_id: None,
+                    },
+                )?;
+                if downloaded {
+                    releases::set_downloaded_manual(c, key, true)?;
+                }
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+        key
+    }
+
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<WorkerToUiEvent>) -> Vec<WorkerToUiEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn test_3_enqueue_twice_while_paused_skips_in_flight() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        let k1 = seed_release(&pool, 1, 101, false).await;
+        let k2 = seed_release(&pool, 1, 102, false).await;
+        let k3 = seed_release(&pool, 1, 103, false).await;
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+
+        mgr.enqueue_downloads(vec![k1, k2, k3], opts.clone(), false, EnqueueMode::New)
+            .await;
+        let evs1 = drain_events(&mut rx);
+        let queued1 = evs1
+            .iter()
+            .filter(|e| matches!(e, WorkerToUiEvent::JobQueued(_)))
+            .count();
+        assert_eq!(queued1, 3);
+        assert_eq!(mgr.in_flight_len(), 3);
+
+        mgr.enqueue_downloads(vec![k1, k2, k3], opts, false, EnqueueMode::New)
+            .await;
+        let evs2 = drain_events(&mut rx);
+        let queued2 = evs2
+            .iter()
+            .filter(|e| matches!(e, WorkerToUiEvent::JobQueued(_)))
+            .count();
+        assert_eq!(queued2, 0);
+        assert_eq!(mgr.in_flight_len(), 3);
+
+        mgr.cancel_all();
+        assert_eq!(mgr.in_flight_len(), 0);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_4_in_flight_cleared_on_terminal_states_and_retry() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        let k1 = seed_release(&pool, 1, 201, false).await;
+        let k2 = seed_release(&pool, 1, 202, false).await;
+        let k3 = seed_release(&pool, 2, 203, false).await;
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+
+        mgr.enqueue_downloads(vec![k1, k2, k3], opts.clone(), false, EnqueueMode::New)
+            .await;
+        let evs = drain_events(&mut rx);
+        let mut job_ids = Vec::new();
+        for ev in evs {
+            if let WorkerToUiEvent::JobQueued(j) = ev {
+                job_ids.push((j.key, j.id));
+            }
+        }
+        assert_eq!(mgr.in_flight_len(), 3);
+
+        // Cancel single queued job
+        let j1 = job_ids.iter().find(|(k, _)| *k == k1).unwrap().1;
+        mgr.cancel_job(j1);
+        assert!(!mgr.in_flight_contains(&k1));
+        assert_eq!(mgr.in_flight_len(), 2);
+
+        // Retry re-adds to in_flight
+        mgr.retry_job(j1);
+        assert!(mgr.in_flight_contains(&k1));
+        assert_eq!(mgr.in_flight_len(), 3);
+
+        // Block artist 1 drains artist 1's queued jobs (k1, k2)
+        mgr.block_artist_for_30_mins(1);
+        assert!(!mgr.in_flight_contains(&k1));
+        assert!(!mgr.in_flight_contains(&k2));
+        assert!(mgr.in_flight_contains(&k3));
+        assert_eq!(mgr.in_flight_len(), 1);
+
+        // Cancel all drains remaining (k3)
+        mgr.cancel_all();
+        assert_eq!(mgr.in_flight_len(), 0);
+
+        // Failed job (active worker hitting closed port 127.0.0.1:9) leaves in_flight
+        mgr.resume();
+        mgr.enqueue_downloads(vec![k3], opts, false, EnqueueMode::New)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(WorkerToUiEvent::JobState {
+                    state: JobState::Failed(_),
+                    ..
+                }) = rx.recv().await
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // Give dispatcher cleanup a moment to drop the lock
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(mgr.in_flight_len(), 0);
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_5_new_skips_downloaded_force_queues_it() {
+        let (dir, pool, mgr, mut rx, cancel) = setup_mgr().await;
+        mgr.pause();
+        let k1 = seed_release(&pool, 1, 301, true).await;
+        let opts = DownloadOpts {
+            format: AudioFormat::Flac,
+            out_dir: dir.path().join("out"),
+            batch_limit: 50,
+        };
+
+        mgr.enqueue_downloads(vec![k1], opts.clone(), false, EnqueueMode::New)
+            .await;
+        let evs1 = drain_events(&mut rx);
+        assert!(
+            !evs1
+                .iter()
+                .any(|e| matches!(e, WorkerToUiEvent::JobQueued(_)))
+        );
+        assert_eq!(mgr.in_flight_len(), 0);
+
+        mgr.enqueue_downloads(vec![k1], opts, false, EnqueueMode::Force)
+            .await;
+        let evs2 = drain_events(&mut rx);
+        let queued2 = evs2
+            .iter()
+            .filter(|e| matches!(e, WorkerToUiEvent::JobQueued(_)))
+            .count();
+        assert_eq!(queued2, 1);
+        assert_eq!(mgr.in_flight_len(), 1);
+
+        mgr.cancel_all();
+        assert_eq!(mgr.in_flight_len(), 0);
+        cancel.cancel();
     }
 }

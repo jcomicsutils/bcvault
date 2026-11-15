@@ -87,6 +87,7 @@ impl App {
                     items,
                     opts,
                     ack_soft_quota: false,
+                    mode: bcvault_core::types::EnqueueMode::New,
                 });
             }
         }
