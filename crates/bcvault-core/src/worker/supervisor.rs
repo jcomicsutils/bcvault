@@ -2,7 +2,7 @@ use crate::{
     bandcamp::BandcampClient,
     db::{
         DbPool,
-        repo::{artists, history, library as lib_repo, releases, settings},
+        repo::{artists, groups as groups_repo, history, library as lib_repo, releases, settings},
     },
     error::DbError,
     paths::AppPaths,
@@ -99,12 +99,20 @@ impl Supervisor {
             .await
             .unwrap_or_default();
 
+        let (initial_groups, initial_pins) = pool
+            .reader
+            .call(|c| Ok((groups_repo::list_groups(c)?, groups_repo::list_pins(c)?)))
+            .await
+            .unwrap_or_default();
+
         let current_out_dir = initial_settings.out_dir.clone();
 
         bridge.emit(WorkerToUiEvent::Ready {
             artists: initial_artists,
             settings: initial_settings,
             folders: initial_folders.clone(),
+            groups: initial_groups,
+            pins: initial_pins,
         });
 
         if !initial_folders.is_empty() {
@@ -172,9 +180,19 @@ impl Supervisor {
                 let pool = self.pool.clone();
                 let bridge = self.bridge.clone();
                 tokio::spawn(async move {
-                    match pool.writer.call(move |c| artists::delete(c, band_id)).await {
-                        Ok(()) => {
+                    let res = pool
+                        .writer
+                        .call(move |c| {
+                            artists::delete(c, band_id)?;
+                            let groups = groups_repo::list_groups(c)?;
+                            let pins = groups_repo::list_pins(c)?;
+                            Ok((groups, pins))
+                        })
+                        .await;
+                    match res {
+                        Ok((groups, pins)) => {
                             bridge.emit(WorkerToUiEvent::ArtistRemoved { band_id });
+                            bridge.emit(WorkerToUiEvent::ArtistGroupsChanged { groups, pins });
                         }
                         Err(e) => {
                             bridge.log(
@@ -572,6 +590,30 @@ impl Supervisor {
                 self.library_cancel.cancel();
                 self.library_cancel = self.root_cancel.child_token();
             }
+            UiToWorkerCommand::CreateArtistGroup { name, rule } => {
+                self.run_group_write(move |c| {
+                    groups_repo::create_group(c, &name, rule.as_ref())?;
+                    Ok(())
+                });
+            }
+            UiToWorkerCommand::UpdateArtistGroup { id, name, rule } => {
+                self.run_group_write(move |c| {
+                    groups_repo::update_group(c, id, &name, rule.as_ref())?;
+                    Ok(())
+                });
+            }
+            UiToWorkerCommand::DeleteArtistGroup { id } => {
+                self.run_group_write(move |c| groups_repo::delete_group(c, id));
+            }
+            UiToWorkerCommand::ReorderArtistGroups { ids } => {
+                self.run_group_write(move |c| groups_repo::reorder_groups(c, &ids));
+            }
+            UiToWorkerCommand::SetArtistGroupCollapsed { id, collapsed } => {
+                self.run_group_write(move |c| groups_repo::set_collapsed(c, id, collapsed));
+            }
+            UiToWorkerCommand::PinArtists { band_ids, target } => {
+                self.run_group_write(move |c| groups_repo::set_pins(c, &band_ids, target));
+            }
             UiToWorkerCommand::UpdateSettings(mut new_settings) => {
                 new_settings.sanitize();
                 if new_settings.out_dir.to_string_lossy().trim().is_empty() {
@@ -612,5 +654,187 @@ impl Supervisor {
                 self.root_cancel.cancel();
             }
         }
+    }
+
+    fn run_group_write<F>(&self, op: F)
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<(), DbError> + Send + 'static,
+    {
+        let pool = self.pool.clone();
+        let bridge = self.bridge.clone();
+        tokio::spawn(async move {
+            let res = pool
+                .writer
+                .call(move |c| {
+                    op(c)?;
+                    let groups = groups_repo::list_groups(c)?;
+                    let pins = groups_repo::list_pins(c)?;
+                    Ok((groups, pins))
+                })
+                .await;
+            match res {
+                Ok((groups, pins)) => {
+                    bridge.emit(WorkerToUiEvent::ArtistGroupsChanged { groups, pins });
+                }
+                Err(e) => {
+                    let message = e.to_string();
+                    bridge.log(LogLevel::Warn, "groups", message.clone(), None);
+                    bridge.emit(WorkerToUiEvent::ArtistGroupError { message });
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::bandcamp::gate::BandcampGate;
+    use crate::groups::{Condition, ConditionKind, GroupRule, MatchMode, PinTarget};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    async fn next_group_event(rx: &mut UnboundedReceiver<WorkerToUiEvent>) -> WorkerToUiEvent {
+        loop {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(
+                ev,
+                WorkerToUiEvent::ArtistGroupsChanged { .. }
+                    | WorkerToUiEvent::ArtistGroupError { .. }
+            ) {
+                return ev;
+            }
+        }
+    }
+
+    // Tests 11 and 12: worker group commands, Ready snapshot, error event, and RemoveArtist pin cleanup
+    #[tokio::test]
+    async fn test_11_12_worker_artist_groups_and_remove_artist_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let pool = DbPool::open(&db_path).unwrap();
+
+        // Seed one artist
+        pool.writer
+            .call(|c| {
+                c.execute(
+                    "INSERT INTO artists (band_id, slug, name, url) VALUES (42, 'alpha', 'Alpha', 'https://alpha.bandcamp.com')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let paths = AppPaths {
+            data_dir: dir.path().to_path_buf(),
+            cache_dir: dir.path().to_path_buf(),
+            db_path,
+            fx_db_path: dir.path().join("fx.sqlite"),
+            cover_cache_dir: dir.path().join("covers"),
+            log_dir: dir.path().join("logs"),
+            themes_dir: dir.path().join("themes"),
+            default_download_dir: dir.path().join("downloads"),
+        };
+        let gate = BandcampGate::new(0, 0, 1, None);
+        let client = BandcampClient::new(gate, "bcvault-test/0.1").unwrap();
+        let (ev_tx, mut ev_rx) = unbounded_channel();
+        let (cmd_tx, cmd_rx) = unbounded_channel();
+        let bridge = UiBridge::new(ev_tx, None);
+
+        let handle = tokio::spawn(Supervisor::run(paths, pool, client, bridge, cmd_rx));
+
+        // Ready includes groups and pins
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(5), ev_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ready {
+            WorkerToUiEvent::Ready { groups, pins, .. } => {
+                assert!(groups.is_empty());
+                assert!(pins.is_empty());
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+
+        // Create group
+        let rule = GroupRule {
+            mode: MatchMode::All,
+            conditions: vec![Condition {
+                negate: false,
+                kind: ConditionKind::NeverSynced,
+            }],
+        };
+        cmd_tx
+            .send(UiToWorkerCommand::CreateArtistGroup {
+                name: "Ambient".into(),
+                rule: Some(rule),
+            })
+            .unwrap();
+        let gid = match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged { groups, .. } => {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].name, "Ambient");
+                groups[0].id
+            }
+            other => panic!("unexpected event: {other:?}"),
+        };
+
+        // Invalid create surfaces ArtistGroupError
+        cmd_tx
+            .send(UiToWorkerCommand::CreateArtistGroup {
+                name: "   ".into(),
+                rule: None,
+            })
+            .unwrap();
+        match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupError { message } => {
+                assert!(message.contains("empty"));
+            }
+            other => panic!("expected ArtistGroupError, got {other:?}"),
+        }
+
+        // Collapse + Pin + RemoveArtist
+        cmd_tx
+            .send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                id: gid,
+                collapsed: true,
+            })
+            .unwrap();
+        match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged { groups, .. } => {
+                assert!(groups[0].collapsed);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        cmd_tx
+            .send(UiToWorkerCommand::PinArtists {
+                band_ids: vec![42],
+                target: PinTarget::Group(gid),
+            })
+            .unwrap();
+        match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged { pins, .. } => {
+                assert_eq!(pins.get(&42), Some(&Some(gid)));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        cmd_tx
+            .send(UiToWorkerCommand::RemoveArtist { band_id: 42 })
+            .unwrap();
+        match next_group_event(&mut ev_rx).await {
+            WorkerToUiEvent::ArtistGroupsChanged { pins, .. } => {
+                assert!(!pins.contains_key(&42));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        cmd_tx.send(UiToWorkerCommand::Shutdown).unwrap();
+        handle.await.unwrap();
     }
 }

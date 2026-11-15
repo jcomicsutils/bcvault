@@ -978,6 +978,7 @@ impl UiState {
                 artists,
                 settings,
                 folders,
+                ..
             } => {
                 self.artists = artists;
                 self.settings = settings;
@@ -1239,6 +1240,8 @@ impl UiState {
                     self.show_unavailable_window = true;
                 }
             }
+            WorkerToUiEvent::ArtistGroupsChanged { .. }
+            | WorkerToUiEvent::ArtistGroupError { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }
@@ -1335,6 +1338,8 @@ mod tests {
             artists: vec![],
             settings: Settings::default(),
             folders: vec![f1.clone(), f2.clone()],
+            groups: vec![],
+            pins: std::collections::HashMap::new(),
         });
         assert_eq!(st.folders.len(), 2);
         assert_eq!(st.folders.get(&10).unwrap()[0].state, FolderState::Ok);
@@ -1718,6 +1723,8 @@ mod tests {
             artists: vec![],
             settings: Settings::default(),
             folders: vec![f1_a1.clone(), f2_a1.clone(), f3_a2.clone()],
+            groups: vec![],
+            pins: std::collections::HashMap::new(),
         });
 
         assert_eq!(st.folders.get(&10).unwrap().len(), 2);

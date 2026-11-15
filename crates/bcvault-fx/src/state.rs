@@ -1467,6 +1467,8 @@ impl FxState {
                     self.show_unavailable_window = true;
                 }
             }
+            WorkerToUiEvent::ArtistGroupsChanged { .. }
+            | WorkerToUiEvent::ArtistGroupError { .. } => {}
             WorkerToUiEvent::Log(entry) => {
                 if entry.level == bcvault_core::types::LogLevel::Error {
                     self.push_toast(ToastKind::Error, entry.message.clone(), now_s);
@@ -2350,6 +2352,8 @@ mod tests {
                 artists: vec![],
                 settings: Settings::default_with_dir(std::path::PathBuf::from("/out")),
                 folders: vec![f1],
+                groups: vec![],
+                pins: std::collections::HashMap::new(),
             },
             &fx_tx,
             0.0,
@@ -2587,6 +2591,8 @@ mod tests {
                 artists: vec![],
                 settings: Settings::default(),
                 folders: vec![f1_a1.clone(), f2_a1.clone(), f3_a2.clone()],
+                groups: vec![],
+                pins: std::collections::HashMap::new(),
             },
             &fx_tx,
             0.0,

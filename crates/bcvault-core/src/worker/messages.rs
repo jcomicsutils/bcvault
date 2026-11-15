@@ -1,8 +1,10 @@
+use crate::groups::{ArtistGroup, GroupRule, PinTarget};
 use crate::types::{
     ArtistStats, ArtistView, DownloadOpts, EnqueueMode, ItemKey, JobId, JobState, JobView,
     LogEntry, RateLimitStatus, ReleaseQuery, ReleaseRow, RemainingScope, Settings, SyncMode,
     SyncProgress, SyncScope,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -121,6 +123,30 @@ pub enum UiToWorkerCommand {
         new_path: PathBuf,
     },
     CancelLibrary,
+    // artist groups
+    CreateArtistGroup {
+        name: String,
+        rule: Option<GroupRule>,
+    },
+    UpdateArtistGroup {
+        id: i64,
+        name: String,
+        rule: Option<GroupRule>,
+    },
+    DeleteArtistGroup {
+        id: i64,
+    },
+    ReorderArtistGroups {
+        ids: Vec<i64>,
+    },
+    SetArtistGroupCollapsed {
+        id: i64,
+        collapsed: bool,
+    },
+    PinArtists {
+        band_ids: Vec<i64>,
+        target: PinTarget,
+    },
     // misc
     UpdateSettings(Settings),
     Shutdown,
@@ -132,6 +158,8 @@ pub enum WorkerToUiEvent {
         artists: Vec<ArtistView>,
         settings: Settings,
         folders: Vec<crate::types::ArtistFolder>,
+        groups: Vec<ArtistGroup>,
+        pins: HashMap<i64, Option<i64>>,
     },
     SettingsUpdated(Settings),
     ArtistUpserted(ArtistView),
@@ -215,6 +243,13 @@ pub enum WorkerToUiEvent {
         batch_id: u64,
         folders: Vec<crate::types::UnavailableFolder>,
         prompt: bool,
+    },
+    ArtistGroupsChanged {
+        groups: Vec<ArtistGroup>,
+        pins: HashMap<i64, Option<i64>>,
+    },
+    ArtistGroupError {
+        message: String,
     },
     Log(LogEntry),
 }
