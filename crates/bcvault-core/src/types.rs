@@ -620,6 +620,18 @@ pub struct ReleaseRow {
     pub remote_update_reason: Option<UpdateReason>,
 }
 
+impl ReleaseRow {
+    /// Whether the release can be selected for download (free or NYP, not a pre-order).
+    pub const fn is_downloadable(&self) -> bool {
+        !self.is_preorder && self.classification.auto_downloadable()
+    }
+
+    /// Whether the release is an eligible, not-yet-downloaded candidate for download.
+    pub const fn is_download_candidate(&self) -> bool {
+        !self.downloaded && self.is_downloadable()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseQuery {
     pub band_id: Option<i64>,

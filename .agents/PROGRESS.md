@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none  ·  Branch: main  ·  Updated: 2026-11-14
+Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: add download candidates, selection helpers and bulk preview (`DOWNLOAD_FLOW.md` step 1)
 - none: update README.md built-in theme count and Catppuccin Macchiato/Frappe/Latte list
 - none: fix clippy::needless_range_loop in bcvault-fx wall.rs for CI Rust 1.100.0
 - none: canonicalize tempdir roots in bcvault-core library tests to fix Windows CI 8.3 short-path failures (`RUNNER~1` vs `runneradmin`)
