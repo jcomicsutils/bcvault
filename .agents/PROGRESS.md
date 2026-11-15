@@ -4,7 +4,7 @@
 Task: none  ·  Branch: main  ·  Updated: 2026-11-15
 
 ## Done
-- none: fix Windows CI race in `test_4_in_flight_cleared_on_terminal_states_and_retry` by polling `in_flight_len() == 0` with timeout instead of fixed 20ms sleep
+- none: clear `in_flight` and worker slots in `run_job` before emitting terminal `JobState`, and drain stale events / avoid loopback TCP timeouts in `test_4_in_flight_cleared_on_terminal_states_and_retry`
 - none: release v0.4.0 (`DOWNLOAD_FLOW`, layered Unicode fallback fonts, and invisible char markers)
 - none: style marked invisible characters with distinct monospace warning color and background via `display_layout_job`
 - none: add layered Unicode fallback fonts across both UIs and `Settings::mark_invisible_chars` (`Mark non-space invisible characters`)

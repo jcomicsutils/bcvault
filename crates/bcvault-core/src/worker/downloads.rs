@@ -634,16 +634,7 @@ impl DownloadManager {
 
                     let mgr_c = mgr.clone();
                     tokio::spawn(async move {
-                        mgr_c.run_job(spec.clone(), job_cancel).await;
-                        if let Ok(mut st) = mgr_c.state.lock() {
-                            st.active_workers = st.active_workers.saturating_sub(1);
-                            if let Some(c) = st.active_bands.get_mut(&spec.band_id) {
-                                *c = c.saturating_sub(1);
-                            }
-                            st.active_cancels.remove(&spec.id);
-                            st.in_flight.remove(&spec.key);
-                        }
-                        mgr_c.notify.notify_one();
+                        mgr_c.run_job(spec, job_cancel).await;
                     });
                 }
             }
@@ -668,6 +659,17 @@ impl DownloadManager {
         } else {
             self.execute_api_job(&spec, &settings, cancel).await
         };
+
+        // Release worker slots and clear in_flight before emitting terminal JobState
+        if let Ok(mut st) = self.state.lock() {
+            st.active_workers = st.active_workers.saturating_sub(1);
+            if let Some(c) = st.active_bands.get_mut(&spec.band_id) {
+                *c = c.saturating_sub(1);
+            }
+            st.active_cancels.remove(&spec.id);
+            st.in_flight.remove(&spec.key);
+        }
+        self.notify.notify_one();
 
         match res {
             Ok((final_path, bytes)) => {
@@ -1362,17 +1364,36 @@ mod tests {
         // Cancel all drains remaining (k3)
         mgr.cancel_all();
         assert_eq!(mgr.in_flight_len(), 0);
+        let _ = drain_events(&mut rx);
 
-        // Failed job (active worker hitting closed port 127.0.0.1:9) leaves in_flight
-        mgr.resume();
+        // Failed job (active worker hitting missing release row) clears in_flight
+        // before emitting JobState::Failed without relying on loopback TCP timing.
         mgr.enqueue_downloads(vec![k3], opts, false, EnqueueMode::New)
             .await;
+        let Some(k3_job_id) = drain_events(&mut rx).into_iter().find_map(|ev| match ev {
+            WorkerToUiEvent::JobQueued(j) if j.key == k3 => Some(j.id),
+            _ => None,
+        }) else {
+            panic!("k3 job queued");
+        };
+        pool.writer
+            .call(move |c| {
+                c.execute(
+                    "DELETE FROM releases WHERE item_type = ?1 AND item_id = ?2",
+                    rusqlite::params![k3.kind.as_str(), k3.id],
+                )?;
+                Ok::<_, DbError>(())
+            })
+            .await
+            .unwrap();
+        mgr.resume();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(WorkerToUiEvent::JobState {
+                    job_id,
                     state: JobState::Failed(_),
-                    ..
                 }) = rx.recv().await
+                    && job_id == k3_job_id
                 {
                     break;
                 }
@@ -1380,13 +1401,6 @@ mod tests {
         })
         .await
         .unwrap();
-        // Wait for dispatcher cleanup to clear in_flight after JobState::Failed is emitted
-        let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            while mgr.in_flight_len() > 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
         assert_eq!(mgr.in_flight_len(), 0);
 
         cancel.cancel();
