@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/artist-groups  ·  Updated: 2026-11-15
 
 ## Done
+- none: render groups with a menu for moving artists in classic sidebar (`ARTIST_GROUPS.md` step 4)
 - none: manage artist groups in worker (`ARTIST_GROUPS.md` step 3)
 - none: add artist groups and manual placements (`ARTIST_GROUPS.md` step 2, migration 0009, breaking)
 - none: add group rules, artist placement and sidebar rows (`ARTIST_GROUPS.md` step 1)

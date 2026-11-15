@@ -10,6 +10,7 @@ use crate::{
     worker::messages::{UiToWorkerCommand, WorkerToUiEvent},
 };
 use bcvault_core::{
+    groups::{ArtistGroup, Assignment, SidebarRow, assign, build_sidebar_rows},
     selection::{self, SelectScope, SelectionStats},
     worker::quota::{preview_bulk, should_confirm_bulk},
 };
@@ -533,6 +534,18 @@ pub struct UiState {
     pub sync_mode: SyncMode,
     pub active_syncs: HashMap<i64, SyncProgress>,
 
+    pub groups: Vec<ArtistGroup>,
+    pub pins: HashMap<i64, Option<i64>>,
+    pub group_assignment: Assignment,
+    pub sidebar_rows: Vec<SidebarRow>,
+    pub ungrouped_collapsed: bool,
+    pub sidebar_dirty: bool,
+    pub sidebar_last_filter: String,
+    pub sidebar_last_recompute_ts: i64,
+    pub sidebar_recompute_count: u64,
+    pub group_error: Option<String>,
+    pub confirm_delete_group: Option<(i64, String, usize)>,
+
     pub rows: Vec<CachedRow>,
     pub index: HashMap<ItemKey, usize>,
     pub artist_interner: HashMap<String, Arc<str>>,
@@ -609,6 +622,18 @@ impl UiState {
             add_artist_pending: false,
             sync_mode: SyncMode::Incremental,
             active_syncs: HashMap::new(),
+
+            groups: Vec::new(),
+            pins: HashMap::new(),
+            group_assignment: Assignment::default(),
+            sidebar_rows: vec![SidebarRow::AllArtists],
+            ungrouped_collapsed: false,
+            sidebar_dirty: true,
+            sidebar_last_filter: String::new(),
+            sidebar_last_recompute_ts: 0,
+            sidebar_recompute_count: 0,
+            group_error: None,
+            confirm_delete_group: None,
 
             rows: Vec::new(),
             index: HashMap::new(),
@@ -730,6 +755,126 @@ impl UiState {
             *existing = entry;
         } else {
             self.quota_warnings.push(entry);
+        }
+    }
+
+    pub fn ensure_sidebar_rows(&mut self, now_ts: bcvault_core::types::Ts) {
+        let filter_changed = self.artist_filter != self.sidebar_last_filter;
+        let age_refresh =
+            !self.groups.is_empty() && now_ts.saturating_sub(self.sidebar_last_recompute_ts) >= 60;
+        if !self.sidebar_dirty && !filter_changed && !age_refresh {
+            return;
+        }
+        self.group_assignment = assign(
+            &self.artists,
+            &self.groups,
+            &self.pins,
+            &self.folders,
+            now_ts,
+        );
+        let artists_by_id: HashMap<i64, usize> = self
+            .artists
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.band_id, i))
+            .collect();
+        self.sidebar_rows = build_sidebar_rows(
+            &self.group_assignment,
+            &self.groups,
+            &artists_by_id,
+            &self.artists,
+            &self.artist_filter,
+            self.ungrouped_collapsed,
+        );
+        self.sidebar_last_filter = self.artist_filter.clone();
+        self.sidebar_last_recompute_ts = now_ts;
+        self.sidebar_dirty = false;
+        self.sidebar_recompute_count += 1;
+    }
+
+    pub fn start_remaining_for_artists(
+        &mut self,
+        title: String,
+        ids: Vec<i64>,
+        cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    ) {
+        let opts = DownloadOpts {
+            format: self.settings.format,
+            out_dir: self.settings.out_dir.clone(),
+            batch_limit: self.settings.batch_limit,
+        };
+        let per_artist: Vec<(i64, u32, u32)> = ids
+            .iter()
+            .filter_map(|&bid| {
+                self.artists.iter().find(|a| a.band_id == bid).map(|a| {
+                    let rem = a.stats.eligible.saturating_sub(a.stats.eligible_downloaded);
+                    (bid, rem, a.stats.quota_used_30d)
+                })
+            })
+            .filter(|&(_, rem, _)| rem > 0)
+            .collect();
+        if per_artist.is_empty() {
+            return;
+        }
+        let is_multi = ids.len() > 1;
+        let preview = preview_bulk(
+            &per_artist,
+            self.settings.batch_limit,
+            self.settings.quota_soft,
+            self.settings.quota_hard,
+            false,
+        );
+        let action = BulkAction::Remaining(RemainingScope::Artists(ids));
+        if should_confirm_bulk(is_multi, &preview) {
+            let mut rows = Vec::with_capacity(preview.len());
+            let mut total_new = 0u32;
+            let mut total_queue = 0u32;
+            let mut total_deferred = 0u32;
+            for p in &preview {
+                total_new += p.requested;
+                total_queue += p.allowed;
+                total_deferred += p.deferred;
+                let artist_name = self
+                    .artists
+                    .iter()
+                    .find(|a| a.band_id == p.band_id)
+                    .map(|a| a.display_name().to_string())
+                    .unwrap_or_else(|| format!("Artist {}", p.band_id));
+                let cause_note = if p.blocked {
+                    "Hard cap reached"
+                } else if p.deferred > 0 {
+                    if p.used_30d + p.allowed >= self.settings.quota_hard {
+                        "Hard cap"
+                    } else {
+                        "Batch limit"
+                    }
+                } else {
+                    ""
+                };
+                rows.push(BulkConfirmRow {
+                    band_id: p.band_id,
+                    artist_name,
+                    new_releases: p.requested,
+                    will_queue: p.allowed,
+                    deferred: p.deferred,
+                    cause_note,
+                });
+            }
+            self.bulk_confirm_modal = Some(BulkConfirmModalState {
+                title,
+                rows,
+                total_new,
+                total_queue,
+                total_deferred,
+                action,
+                focus_init: true,
+            });
+        } else if let BulkAction::Remaining(scope) = action {
+            let _ = cmd_tx.send(UiToWorkerCommand::EnqueueRemaining {
+                scope,
+                opts,
+                ack_soft_quota: false,
+            });
         }
     }
 
@@ -978,7 +1123,8 @@ impl UiState {
                 artists,
                 settings,
                 folders,
-                ..
+                groups,
+                pins,
             } => {
                 self.artists = artists;
                 self.settings = settings;
@@ -986,6 +1132,9 @@ impl UiState {
                 for f in folders {
                     self.folders.entry(f.band_id).or_default().push(f);
                 }
+                self.groups = groups;
+                self.pins = pins;
+                self.sidebar_dirty = true;
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::SettingsUpdated(settings) => {
@@ -1001,6 +1150,7 @@ impl UiState {
                 }
                 self.artists
                     .sort_by_key(|a| a.display_name().to_lowercase());
+                self.sidebar_dirty = true;
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::ArtistRemoved { band_id } => {
@@ -1008,11 +1158,13 @@ impl UiState {
                 self.selected_artists.remove(&band_id);
                 self.active_syncs.remove(&band_id);
                 self.folders.remove(&band_id);
+                self.sidebar_dirty = true;
                 self.mark_query_immediate();
             }
             WorkerToUiEvent::ArtistStats { band_id, stats } => {
                 if let Some(a) = self.artists.iter_mut().find(|a| a.band_id == band_id) {
                     a.stats = stats;
+                    self.sidebar_dirty = true;
                 }
             }
             WorkerToUiEvent::ReleasesLoaded { request_id, rows } => {
@@ -1170,6 +1322,7 @@ impl UiState {
                 } else {
                     self.folders.insert(band_id, folders);
                 }
+                self.sidebar_dirty = true;
             }
             WorkerToUiEvent::ReconcileReport { report } => {
                 self.reconcile_report_modal = Some(ReconcileReportModalState::new(report));
@@ -1240,8 +1393,15 @@ impl UiState {
                     self.show_unavailable_window = true;
                 }
             }
-            WorkerToUiEvent::ArtistGroupsChanged { .. }
-            | WorkerToUiEvent::ArtistGroupError { .. } => {}
+            WorkerToUiEvent::ArtistGroupsChanged { groups, pins } => {
+                self.groups = groups;
+                self.pins = pins;
+                self.group_error = None;
+                self.sidebar_dirty = true;
+            }
+            WorkerToUiEvent::ArtistGroupError { message } => {
+                self.group_error = Some(message);
+            }
             WorkerToUiEvent::Log(entry) => {
                 self.push_log(entry);
             }
@@ -1985,5 +2145,98 @@ mod tests {
         // Library scope -> always confirmation modal
         st.trigger_download_remaining(ClassicRemainingTarget::AllArtists, &tx);
         assert!(st.bulk_confirm_modal.is_some());
+    }
+
+    #[test]
+    fn test_14_classic_sidebar_groups_dirty_cache_and_filter() {
+        use bcvault_core::groups::{Condition, ConditionKind, GroupRule, MatchMode};
+        use bcvault_core::types::ArtistStats;
+
+        let mut st = UiState::new();
+        let a1 = ArtistView {
+            band_id: 1,
+            slug: "alpha".into(),
+            name: "Alpha".into(),
+            custom_name: None,
+            url: "https://alpha.bandcamp.com".into(),
+            last_synced_at: None,
+            stats: ArtistStats::default(),
+        };
+        let a2 = ArtistView {
+            band_id: 2,
+            slug: "zeta".into(),
+            name: "Zeta".into(),
+            custom_name: None,
+            url: "https://zeta.bandcamp.com".into(),
+            last_synced_at: None,
+            stats: ArtistStats::default(),
+        };
+        let g1 = ArtistGroup {
+            id: 10,
+            name: "A-F".into(),
+            pos: 0,
+            collapsed: true,
+            rule: Some(GroupRule {
+                mode: MatchMode::All,
+                conditions: vec![Condition {
+                    negate: false,
+                    kind: ConditionKind::NameInitial { from: 'a', to: 'f' },
+                }],
+            }),
+        };
+
+        st.apply_event(WorkerToUiEvent::Ready {
+            artists: vec![a1, a2],
+            settings: Settings::default(),
+            folders: vec![],
+            groups: vec![g1],
+            pins: HashMap::new(),
+        });
+
+        st.ensure_sidebar_rows(1000);
+        assert_eq!(st.sidebar_recompute_count, 1);
+        assert_eq!(
+            st.sidebar_rows,
+            vec![
+                SidebarRow::AllArtists,
+                SidebarRow::GroupHeader {
+                    id: 10,
+                    name: "A-F".into(),
+                    count: 1,
+                    collapsed: true,
+                },
+                SidebarRow::UngroupedHeader {
+                    count: 1,
+                    collapsed: false,
+                },
+                SidebarRow::Artist { band_id: 2 },
+            ]
+        );
+
+        // Calling again with no changes does not recompute
+        st.ensure_sidebar_rows(1010);
+        assert_eq!(st.sidebar_recompute_count, 1);
+
+        // 60s elapsed triggers age refresh
+        st.ensure_sidebar_rows(1060);
+        assert_eq!(st.sidebar_recompute_count, 2);
+
+        // Filter change triggers recompute and expands matching collapsed group
+        st.artist_filter = "alp".into();
+        st.ensure_sidebar_rows(1065);
+        assert_eq!(st.sidebar_recompute_count, 3);
+        assert_eq!(
+            st.sidebar_rows,
+            vec![
+                SidebarRow::AllArtists,
+                SidebarRow::GroupHeader {
+                    id: 10,
+                    name: "A-F".into(),
+                    count: 1,
+                    collapsed: false,
+                },
+                SidebarRow::Artist { band_id: 1 },
+            ]
+        );
     }
 }

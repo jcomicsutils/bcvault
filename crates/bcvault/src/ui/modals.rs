@@ -35,6 +35,7 @@ pub fn show(
         || state.bulk_confirm_modal.is_some()
         || state.settings_draft.is_some()
         || state.confirm_remove_artist.is_some()
+        || state.confirm_delete_group.is_some()
         || state.rename_artist_modal.is_some()
         || state.link_folder_modal.is_some()
         || state.reconcile_report_modal.is_some();
@@ -72,6 +73,9 @@ pub fn show(
     }
     if state.confirm_remove_artist.is_some() {
         show_confirm_remove_modal(ctx, state, cmd_tx, esc);
+    }
+    if state.confirm_delete_group.is_some() {
+        show_confirm_delete_group_modal(ctx, state, cmd_tx, esc);
     }
     if state.rename_artist_modal.is_some() {
         show_rename_artist_modal(ctx, state, cmd_tx, esc);
@@ -415,6 +419,48 @@ fn show_confirm_remove_modal(
 
     if keep_open {
         state.confirm_remove_artist = Some((band_id, name));
+    }
+}
+
+fn show_confirm_delete_group_modal(
+    ctx: &Context,
+    state: &mut UiState,
+    cmd_tx: &UnboundedSender<UiToWorkerCommand>,
+    esc: bool,
+) {
+    let Some((id, name, pin_count)) = state.confirm_delete_group.take() else {
+        return;
+    };
+    let mut keep_open = !esc;
+
+    egui::Window::new("Delete Group")
+        .order(Order::Foreground)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            ui.label(format!("Delete group '{name}'?"));
+            let pin_msg = match pin_count {
+                0 => "This group has no manual artist placements.".to_string(),
+                1 => "1 artist is manually placed in this group and will fall back to automatic rules or Ungrouped.".to_string(),
+                n => format!("{n} artists are manually placed in this group and will fall back to automatic rules or Ungrouped."),
+            };
+            ui.label(RichText::new(pin_msg).color(pal::TEXT_DIM));
+            ui.separator();
+            ui.horizontal(|ui| {
+                if sharp_button(ui, "Delete").clicked() {
+                    let _ = cmd_tx.send(UiToWorkerCommand::DeleteArtistGroup { id });
+                    keep_open = false;
+                }
+                if sharp_button(ui, "Cancel").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
+
+    if keep_open {
+        state.confirm_delete_group = Some((id, name, pin_count));
     }
 }
 
