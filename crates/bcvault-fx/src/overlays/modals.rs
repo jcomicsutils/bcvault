@@ -467,6 +467,36 @@ pub fn show_modals(
         }
     }
 
+    // 5b. Confirm Delete Group Modal
+    if let Some((id, name, pin_count)) = state.confirm_delete_group.clone() {
+        let mut close_del = esc;
+        egui::Window::new("Delete Group")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Delete group '{name}'?"));
+                let pin_msg = match pin_count {
+                    0 => "This group has no manual artist placements.".to_string(),
+                    1 => "1 artist is manually placed in this group and will fall back to automatic rules or Ungrouped.".to_string(),
+                    n => format!("{n} artists are manually placed in this group and will fall back to automatic rules or Ungrouped."),
+                };
+                ui.label(RichText::new(pin_msg).color(th.text_dim));
+                ui.horizontal(|ui| {
+                    if paint::sharp_button(ui, "Delete").clicked() {
+                        let _ = core_tx.send(UiToWorkerCommand::DeleteArtistGroup { id });
+                        close_del = true;
+                    }
+                    if paint::sharp_button(ui, "Cancel").clicked() {
+                        close_del = true;
+                    }
+                });
+            });
+        if close_del {
+            state.confirm_delete_group = None;
+        }
+    }
+
     show_link_folder_modal(ctx, state, core_tx, rt_handle, esc);
     show_reconcile_report_modal(ctx, state, core_tx, esc);
     show_resolve_missing_modal(ctx, state, core_tx, rt_handle, esc);

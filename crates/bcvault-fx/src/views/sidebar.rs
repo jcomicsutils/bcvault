@@ -160,19 +160,8 @@ pub fn show(
     ui.separator();
 
     let list_height = (ui.available_height() - 78.0).max(80.0);
-    let filter_lower = state.artist_filter.trim().to_lowercase();
-    let filtered_indices: Vec<usize> = state
-        .artists
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| {
-            filter_lower.is_empty()
-                || a.display_name().to_lowercase().contains(&filter_lower)
-                || a.name.to_lowercase().contains(&filter_lower)
-                || a.slug.to_lowercase().contains(&filter_lower)
-        })
-        .map(|(i, _)| i)
-        .collect();
+    state.ensure_sidebar_rows(chrono::Utc::now().timestamp());
+    let rows = state.sidebar_rows.clone();
 
     let mut total_stats = ArtistStats::default();
     for a in &state.artists {
@@ -186,204 +175,305 @@ pub fn show(
         total_stats.quota_used_30d += a.stats.quota_used_30d;
     }
 
-    let total_rows = 1 + filtered_indices.len();
+    let total_rows = rows.len();
 
     egui::ScrollArea::vertical()
         .max_height(list_height)
         .auto_shrink([false, false])
         .show_rows(ui, 28.0, total_rows, |ui, row_range| {
             for row_idx in row_range {
-                if row_idx == 0 {
-                    let is_selected = state.query.base.band_id.is_none();
-                    let resp = draw_artist_row(
-                        ui,
-                        state,
-                        0,
-                        "All artists",
-                        total_stats,
-                        is_selected,
-                        None,
-                        now_s,
-                    );
-                    if resp.clicked() {
-                        pending_actions.push(FxAction::SelectArtist(None));
-                    }
-                } else {
-                    let artist_idx = filtered_indices[row_idx - 1];
-                    let artist = state.artists[artist_idx].clone();
-                    let is_selected = state.query.base.band_id == Some(artist.band_id);
-                    let sync_frac = state.active_syncs.get(&artist.band_id).map(|p| {
-                        if p.total == 0 {
-                            0.15_f32
-                        } else {
-                            (p.done as f32 / p.total as f32).clamp(0.05, 1.0)
+                match &rows[row_idx] {
+                    bcvault_core::groups::SidebarRow::AllArtists => {
+                        let is_selected = state.query.base.band_id.is_none();
+                        let resp = draw_artist_row(
+                            ui,
+                            state,
+                            0,
+                            "All artists",
+                            total_stats,
+                            is_selected,
+                            None,
+                            now_s,
+                        );
+                        if resp.clicked() {
+                            pending_actions.push(FxAction::SelectArtist(None));
                         }
-                    });
-
-                    let name_disp = bcvault_core::text::format_display_text(
-                        artist.display_name(),
-                        state.settings.mark_invisible_chars,
-                    );
-                    let resp = draw_artist_row(
-                        ui,
-                        state,
-                        artist.band_id,
-                        name_disp.as_ref(),
-                        artist.stats,
-                        is_selected,
-                        sync_frac,
-                        now_s,
-                    );
-
-                    if resp.clicked() {
-                        pending_actions.push(FxAction::SelectArtist(Some(artist.band_id)));
+                        resp.context_menu(|ui| {
+                            if paint::sharp_button(ui, "New group...").clicked() {
+                                pending_actions.push(FxAction::NewGroup);
+                                ui.close();
+                            }
+                            if !state.groups.is_empty() {
+                                ui.separator();
+                                if paint::sharp_button(ui, "Collapse all groups").clicked() {
+                                    pending_actions.push(FxAction::CollapseAllGroups);
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Expand all groups").clicked() {
+                                    pending_actions.push(FxAction::ExpandAllGroups);
+                                    ui.close();
+                                }
+                            }
+                        });
                     }
-
-                    resp.context_menu(|ui| {
-                        if paint::sharp_button(ui, "Sync Artist").clicked() {
-                            let _ = core_tx.send(UiToWorkerCommand::Sync {
-                                scope: SyncScope::Selected(vec![artist.band_id]),
-                                mode: state.sync_mode,
-                            });
-                            ui.close();
+                    bcvault_core::groups::SidebarRow::GroupHeader {
+                        id,
+                        name,
+                        count,
+                        collapsed,
+                    } => {
+                        let member_ids = state.group_member_ids(*id);
+                        let (dl, elig) = sum_fx_member_stats(state, &member_ids);
+                        let resp =
+                            draw_fx_group_header_row(ui, state, name, *count, *collapsed, dl, elig);
+                        if resp.clicked() {
+                            pending_actions.push(FxAction::ToggleGroup(*id));
                         }
-                        let artist_folders = state
-                            .folders
-                            .get(&artist.band_id)
+                        let group_id = *id;
+                        let group_name = name.clone();
+                        resp.context_menu(|ui| {
+                            show_fx_group_context_menu(
+                                ui,
+                                state,
+                                core_tx,
+                                &mut pending_actions,
+                                group_id,
+                                &group_name,
+                                &member_ids,
+                            );
+                        });
+                    }
+                    bcvault_core::groups::SidebarRow::UngroupedHeader { count, collapsed } => {
+                        let member_ids = state.group_assignment.ungrouped.clone();
+                        let (dl, elig) = sum_fx_member_stats(state, &member_ids);
+                        let resp = draw_fx_group_header_row(
+                            ui,
+                            state,
+                            "Ungrouped",
+                            *count,
+                            *collapsed,
+                            dl,
+                            elig,
+                        );
+                        if resp.clicked() {
+                            pending_actions.push(FxAction::ToggleUngrouped);
+                        }
+                        resp.context_menu(|ui| {
+                            if paint::sharp_button(ui, "Sync ungrouped").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::Sync {
+                                    scope: SyncScope::Selected(member_ids.clone()),
+                                    mode: state.sync_mode,
+                                });
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Download remaining for ungrouped").clicked()
+                            {
+                                state.trigger_download_remaining_artists(
+                                    "Download Remaining for Ungrouped".to_string(),
+                                    member_ids.clone(),
+                                    core_tx,
+                                );
+                                ui.close();
+                            }
+                        });
+                    }
+                    bcvault_core::groups::SidebarRow::Artist { band_id } => {
+                        let Some(artist) = state
+                            .artists
+                            .iter()
+                            .find(|a| a.band_id == *band_id)
                             .cloned()
-                            .unwrap_or_default();
-                        if artist_folders.is_empty() {
-                            if paint::sharp_button(ui, "Link Folder...").clicked() {
-                                state.link_folder_modal =
-                                    Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
-                                ui.close();
+                        else {
+                            continue;
+                        };
+                        let is_selected = state.query.base.band_id == Some(artist.band_id);
+                        let sync_frac = state.active_syncs.get(&artist.band_id).map(|p| {
+                            if p.total == 0 {
+                                0.15_f32
+                            } else {
+                                (p.done as f32 / p.total as f32).clamp(0.05, 1.0)
                             }
-                        } else if artist_folders.len() == 1 {
-                            let folder = &artist_folders[0];
-                            if folder.state != FolderState::Ok
-                                && paint::sharp_button(ui, "Resolve unavailable folder...")
-                                    .clicked()
-                            {
-                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
-                                    scope: SyncScope::Selected(vec![artist.band_id]),
-                                });
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Add Folder...").clicked() {
-                                state.link_folder_modal =
-                                    Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Change Folder...").clicked() {
-                                state.link_folder_modal =
-                                    Some(FxLinkFolderModalState::for_repoint(
-                                        artist.band_id,
-                                        folder.id,
-                                        folder.path.display().to_string(),
-                                    ));
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Match Folder").clicked() {
-                                let _ = core_tx.send(UiToWorkerCommand::MatchArtistFolder {
-                                    band_id: artist.band_id,
-                                    auto_apply_confident: true,
-                                });
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Verify Files").clicked() {
-                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
-                                    scope: SyncScope::Selected(vec![artist.band_id]),
-                                });
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Unlink Folder").clicked() {
-                                let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
-                                    folder_id: folder.id,
-                                });
-                                ui.close();
-                            }
-                        } else {
-                            if artist_folders.iter().any(|f| f.state != FolderState::Ok)
-                                && paint::sharp_button(ui, "Resolve unavailable folder...")
-                                    .clicked()
-                            {
-                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
-                                    scope: SyncScope::Selected(vec![artist.band_id]),
-                                });
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Add Folder...").clicked() {
-                                state.link_folder_modal =
-                                    Some(FxLinkFolderModalState::new_empty(Some(artist.band_id)));
-                                ui.close();
-                            }
-                            if paint::sharp_button(ui, "Match Folder").clicked() {
-                                let _ = core_tx.send(UiToWorkerCommand::MatchArtistFolder {
-                                    band_id: artist.band_id,
-                                    auto_apply_confident: true,
-                                });
-                                ui.close();
-                            }
-                            ui.menu_button("Change folder...", |ui| {
-                                for folder in &artist_folders {
-                                    let label =
-                                        crate::state::folder_display_label(folder, &artist_folders);
-                                    if paint::sharp_button(
-                                        ui,
-                                        format!("Folder moved: change {label}..."),
-                                    )
-                                    .clicked()
-                                    {
-                                        state.link_folder_modal =
-                                            Some(FxLinkFolderModalState::for_repoint(
-                                                artist.band_id,
-                                                folder.id,
-                                                folder.path.display().to_string(),
-                                            ));
-                                        ui.close();
-                                    }
-                                }
-                            });
-                            ui.menu_button("Unlink folder...", |ui| {
-                                for folder in &artist_folders {
-                                    let label =
-                                        crate::state::folder_display_label(folder, &artist_folders);
-                                    if paint::sharp_button(ui, format!("Unlink {label}..."))
-                                        .clicked()
-                                    {
-                                        let _ =
-                                            core_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
-                                                folder_id: folder.id,
-                                            });
-                                        ui.close();
-                                    }
-                                }
-                            });
-                            if paint::sharp_button(ui, "Verify Files").clicked() {
-                                let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
-                                    scope: SyncScope::Selected(vec![artist.band_id]),
-                                });
-                                ui.close();
-                            }
+                        });
+
+                        let name_disp = bcvault_core::text::format_display_text(
+                            artist.display_name(),
+                            state.settings.mark_invisible_chars,
+                        );
+                        let resp = draw_artist_row(
+                            ui,
+                            state,
+                            artist.band_id,
+                            name_disp.as_ref(),
+                            artist.stats,
+                            is_selected,
+                            sync_frac,
+                            now_s,
+                        );
+
+                        if resp.clicked() {
+                            pending_actions.push(FxAction::SelectArtist(Some(artist.band_id)));
                         }
-                        if paint::sharp_button(ui, "Rename Artist...").clicked() {
-                            state.rename_artist_modal = Some((
+
+                        resp.context_menu(|ui| {
+                            if paint::sharp_button(ui, "Sync Artist").clicked() {
+                                let _ = core_tx.send(UiToWorkerCommand::Sync {
+                                    scope: SyncScope::Selected(vec![artist.band_id]),
+                                    mode: state.sync_mode,
+                                });
+                                ui.close();
+                            }
+                            show_fx_move_to_group_submenu(
+                                ui,
+                                state,
+                                &mut pending_actions,
                                 artist.band_id,
-                                artist.name.clone(),
-                                artist.display_name().to_string(),
-                            ));
-                            ui.close();
-                        }
-                        if paint::sharp_button(ui, "Open in Browser").clicked() {
-                            let _ = open::that_detached(&artist.url);
-                            ui.close();
-                        }
-                        if paint::sharp_button(ui, "Remove Artist...").clicked() {
-                            state.confirm_remove_artist =
-                                Some((artist.band_id, artist.display_name().to_string()));
-                            ui.close();
-                        }
-                    });
+                            );
+                            let artist_folders = state
+                                .folders
+                                .get(&artist.band_id)
+                                .cloned()
+                                .unwrap_or_default();
+                            if artist_folders.is_empty() {
+                                if paint::sharp_button(ui, "Link Folder...").clicked() {
+                                    state.link_folder_modal = Some(
+                                        FxLinkFolderModalState::new_empty(Some(artist.band_id)),
+                                    );
+                                    ui.close();
+                                }
+                            } else if artist_folders.len() == 1 {
+                                let folder = &artist_folders[0];
+                                if folder.state != FolderState::Ok
+                                    && paint::sharp_button(ui, "Resolve unavailable folder...")
+                                        .clicked()
+                                {
+                                    let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                        scope: SyncScope::Selected(vec![artist.band_id]),
+                                    });
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Add Folder...").clicked() {
+                                    state.link_folder_modal = Some(
+                                        FxLinkFolderModalState::new_empty(Some(artist.band_id)),
+                                    );
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Change Folder...").clicked() {
+                                    state.link_folder_modal =
+                                        Some(FxLinkFolderModalState::for_repoint(
+                                            artist.band_id,
+                                            folder.id,
+                                            folder.path.display().to_string(),
+                                        ));
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Match Folder").clicked() {
+                                    let _ = core_tx.send(UiToWorkerCommand::MatchArtistFolder {
+                                        band_id: artist.band_id,
+                                        auto_apply_confident: true,
+                                    });
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Verify Files").clicked() {
+                                    let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                        scope: SyncScope::Selected(vec![artist.band_id]),
+                                    });
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Unlink Folder").clicked() {
+                                    let _ = core_tx.send(UiToWorkerCommand::UnlinkArtistFolder {
+                                        folder_id: folder.id,
+                                    });
+                                    ui.close();
+                                }
+                            } else {
+                                if artist_folders.iter().any(|f| f.state != FolderState::Ok)
+                                    && paint::sharp_button(ui, "Resolve unavailable folder...")
+                                        .clicked()
+                                {
+                                    let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                        scope: SyncScope::Selected(vec![artist.band_id]),
+                                    });
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Add Folder...").clicked() {
+                                    state.link_folder_modal = Some(
+                                        FxLinkFolderModalState::new_empty(Some(artist.band_id)),
+                                    );
+                                    ui.close();
+                                }
+                                if paint::sharp_button(ui, "Match Folder").clicked() {
+                                    let _ = core_tx.send(UiToWorkerCommand::MatchArtistFolder {
+                                        band_id: artist.band_id,
+                                        auto_apply_confident: true,
+                                    });
+                                    ui.close();
+                                }
+                                ui.menu_button("Change folder...", |ui| {
+                                    for folder in &artist_folders {
+                                        let label = crate::state::folder_display_label(
+                                            folder,
+                                            &artist_folders,
+                                        );
+                                        if paint::sharp_button(
+                                            ui,
+                                            format!("Folder moved: change {label}..."),
+                                        )
+                                        .clicked()
+                                        {
+                                            state.link_folder_modal =
+                                                Some(FxLinkFolderModalState::for_repoint(
+                                                    artist.band_id,
+                                                    folder.id,
+                                                    folder.path.display().to_string(),
+                                                ));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                ui.menu_button("Unlink folder...", |ui| {
+                                    for folder in &artist_folders {
+                                        let label = crate::state::folder_display_label(
+                                            folder,
+                                            &artist_folders,
+                                        );
+                                        if paint::sharp_button(ui, format!("Unlink {label}..."))
+                                            .clicked()
+                                        {
+                                            let _ = core_tx.send(
+                                                UiToWorkerCommand::UnlinkArtistFolder {
+                                                    folder_id: folder.id,
+                                                },
+                                            );
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                if paint::sharp_button(ui, "Verify Files").clicked() {
+                                    let _ = core_tx.send(UiToWorkerCommand::VerifyFiles {
+                                        scope: SyncScope::Selected(vec![artist.band_id]),
+                                    });
+                                    ui.close();
+                                }
+                            }
+                            if paint::sharp_button(ui, "Rename Artist...").clicked() {
+                                state.rename_artist_modal = Some((
+                                    artist.band_id,
+                                    artist.name.clone(),
+                                    artist.display_name().to_string(),
+                                ));
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Open in Browser").clicked() {
+                                let _ = open::that_detached(&artist.url);
+                                ui.close();
+                            }
+                            if paint::sharp_button(ui, "Remove Artist...").clicked() {
+                                state.confirm_remove_artist =
+                                    Some((artist.band_id, artist.display_name().to_string()));
+                                ui.close();
+                            }
+                        });
+                    }
                 }
             }
         });
@@ -664,6 +754,165 @@ fn draw_artist_row(
         state.settings.quota_hard,
         folder_tooltip,
     ))
+}
+
+fn sum_fx_member_stats(state: &FxState, member_ids: &[i64]) -> (u32, u32) {
+    let mut dl = 0u32;
+    let mut elig = 0u32;
+    for &bid in member_ids {
+        if let Some(a) = state.artists.iter().find(|a| a.band_id == bid) {
+            dl += a.stats.eligible_downloaded;
+            elig += a.stats.eligible;
+        }
+    }
+    (dl, elig)
+}
+
+fn draw_fx_group_header_row(
+    ui: &mut egui::Ui,
+    state: &FxState,
+    name: &str,
+    count: usize,
+    collapsed: bool,
+    dl: u32,
+    elig: u32,
+) -> egui::Response {
+    let th = &state.active_theme;
+    let desired = Vec2::new(ui.available_width(), 26.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let bg = if resp.hovered() { th.bg2 } else { th.bg0 };
+        paint::rect(
+            ui.painter(),
+            rect,
+            bg,
+            egui::Stroke::new(1.0_f32, th.border),
+        );
+        let inner = rect.shrink2(Vec2::new(8.0, 2.0));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let arrow = if collapsed { ">" } else { "v" };
+        child.label(
+            RichText::new(arrow)
+                .monospace()
+                .size(11.0)
+                .color(th.text_dim),
+        );
+        child.add_space(4.0);
+        child.add(egui::Label::new(RichText::new(name).strong().color(th.text)).truncate());
+        child.add_space(4.0);
+        child.label(
+            RichText::new(format!("({count})"))
+                .size(11.0)
+                .color(th.text_dim),
+        );
+        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{dl}/{elig}"))
+                    .monospace()
+                    .size(11.0)
+                    .color(th.text_dim),
+            );
+        });
+    }
+    resp
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_fx_group_context_menu(
+    ui: &mut egui::Ui,
+    state: &FxState,
+    core_tx: &UnboundedSender<UiToWorkerCommand>,
+    pending_actions: &mut Vec<FxAction>,
+    group_id: i64,
+    _group_name: &str,
+    _member_ids: &[i64],
+) {
+    if paint::sharp_button(ui, "Rename...").clicked() {
+        pending_actions.push(FxAction::EditGroup(group_id));
+        ui.close();
+    }
+    if paint::sharp_button(ui, "Edit rule...").clicked() {
+        pending_actions.push(FxAction::EditGroup(group_id));
+        ui.close();
+    }
+    ui.separator();
+    if paint::sharp_button(ui, "Sync group").clicked() {
+        pending_actions.push(FxAction::SyncGroup(group_id));
+        ui.close();
+    }
+    if paint::sharp_button(ui, "Download remaining for group").clicked() {
+        pending_actions.push(FxAction::DownloadRemainingGroup(group_id));
+        ui.close();
+    }
+    if paint::sharp_button(ui, "View releases of group").clicked() {
+        pending_actions.push(FxAction::ViewGroup(group_id));
+        ui.close();
+    }
+    ui.separator();
+    if let Some(pos) = state.groups.iter().position(|g| g.id == group_id) {
+        if pos > 0 && paint::sharp_button(ui, "Move up").clicked() {
+            let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
+            ids.swap(pos, pos - 1);
+            let _ = core_tx.send(UiToWorkerCommand::ReorderArtistGroups { ids });
+            ui.close();
+        }
+        if pos + 1 < state.groups.len() && paint::sharp_button(ui, "Move down").clicked() {
+            let mut ids: Vec<i64> = state.groups.iter().map(|g| g.id).collect();
+            ids.swap(pos, pos + 1);
+            let _ = core_tx.send(UiToWorkerCommand::ReorderArtistGroups { ids });
+            ui.close();
+        }
+    }
+    if paint::sharp_button(ui, "Delete group...").clicked() {
+        pending_actions.push(FxAction::DeleteGroup(group_id));
+        ui.close();
+    }
+}
+
+fn show_fx_move_to_group_submenu(
+    ui: &mut egui::Ui,
+    state: &FxState,
+    pending_actions: &mut Vec<FxAction>,
+    band_id: i64,
+) {
+    let target_ids = vec![band_id];
+    ui.menu_button("Move to group", |ui| {
+        for g in &state.groups {
+            if paint::sharp_button(ui, &g.name).clicked() {
+                pending_actions.push(FxAction::MoveArtistsToGroup(
+                    target_ids.clone(),
+                    bcvault_core::groups::PinTarget::Group(g.id),
+                ));
+                ui.close();
+            }
+        }
+        if !state.groups.is_empty() {
+            ui.separator();
+        }
+        if paint::sharp_button(ui, "Ungrouped").clicked() {
+            pending_actions.push(FxAction::MoveArtistsToGroup(
+                target_ids.clone(),
+                bcvault_core::groups::PinTarget::Ungrouped,
+            ));
+            ui.close();
+        }
+        if paint::sharp_button(ui, "Automatic (remove manual placement)").clicked() {
+            pending_actions.push(FxAction::MoveArtistsToGroup(
+                target_ids.clone(),
+                bcvault_core::groups::PinTarget::Auto,
+            ));
+            ui.close();
+        }
+        ui.separator();
+        if paint::sharp_button(ui, "New group from selection...").clicked() {
+            pending_actions.push(FxAction::NewGroupFromSelection(target_ids.clone()));
+            ui.close();
+        }
+    });
 }
 
 #[cfg(test)]

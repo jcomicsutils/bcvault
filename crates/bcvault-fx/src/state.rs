@@ -561,6 +561,20 @@ pub struct FxState {
         std::sync::Arc<std::sync::Mutex<Option<(ItemKey, std::path::PathBuf)>>>,
     pub pending_relink_pick: Option<ItemKey>,
 
+    // Artist Groups
+    pub groups: Vec<bcvault_core::groups::ArtistGroup>,
+    pub pins: HashMap<i64, Option<i64>>,
+    pub group_assignment: bcvault_core::groups::Assignment,
+    pub sidebar_rows: Vec<bcvault_core::groups::SidebarRow>,
+    pub ungrouped_collapsed: bool,
+    pub sidebar_dirty: bool,
+    pub sidebar_last_filter: String,
+    pub sidebar_last_recompute_ts: i64,
+    pub sidebar_recompute_count: u64,
+    pub group_error: Option<String>,
+    pub confirm_delete_group: Option<(i64, String, usize)>,
+    pub pending_group_pins: Option<(String, Vec<i64>)>,
+
     // Jobs, Speed Sparkline, Rate limit, Toasts & Logs
     pub jobs: Vec<FxJob>,
     pub speed_samples: std::collections::VecDeque<f64>,
@@ -716,6 +730,18 @@ impl FxState {
             folders: HashMap::new(),
             relink_picked_folder: std::sync::Arc::new(std::sync::Mutex::new(None)),
             pending_relink_pick: None,
+            groups: Vec::new(),
+            pins: HashMap::new(),
+            group_assignment: bcvault_core::groups::Assignment::default(),
+            sidebar_rows: vec![bcvault_core::groups::SidebarRow::AllArtists],
+            ungrouped_collapsed: false,
+            sidebar_dirty: true,
+            sidebar_last_filter: String::new(),
+            sidebar_last_recompute_ts: 0,
+            sidebar_recompute_count: 0,
+            group_error: None,
+            confirm_delete_group: None,
+            pending_group_pins: None,
             jobs: Vec::new(),
             speed_samples: std::collections::VecDeque::from(vec![0.0; 30]),
             last_speed_sample_at: now,
@@ -752,6 +778,7 @@ impl FxState {
 
     pub fn has_open_modal(&self) -> bool {
         self.confirm_remove_artist.is_some()
+            || self.confirm_delete_group.is_some()
             || self.rename_artist_modal.is_some()
             || self.save_view_modal.is_some()
             || self.redeem_modal.is_some()
@@ -779,6 +806,9 @@ impl FxState {
             return true;
         }
         if self.confirm_remove_artist.take().is_some() {
+            return true;
+        }
+        if self.confirm_delete_group.take().is_some() {
             return true;
         }
         if self.rename_artist_modal.take().is_some() {
@@ -902,6 +932,120 @@ impl FxState {
             .iter()
             .map(|a| a.stats.eligible.saturating_sub(a.stats.eligible_downloaded))
             .sum()
+    }
+
+    pub fn ensure_sidebar_rows(&mut self, now_ts: bcvault_core::types::Ts) {
+        let filter_changed = self.artist_filter != self.sidebar_last_filter;
+        let age_refresh =
+            !self.groups.is_empty() && now_ts.saturating_sub(self.sidebar_last_recompute_ts) >= 60;
+        if !self.sidebar_dirty && !filter_changed && !age_refresh {
+            return;
+        }
+        self.group_assignment = bcvault_core::groups::assign(
+            &self.artists,
+            &self.groups,
+            &self.pins,
+            &self.folders,
+            now_ts,
+        );
+        let artists_by_id: HashMap<i64, usize> = self
+            .artists
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.band_id, i))
+            .collect();
+        self.sidebar_rows = bcvault_core::groups::build_sidebar_rows(
+            &self.group_assignment,
+            &self.groups,
+            &artists_by_id,
+            &self.artists,
+            &self.artist_filter,
+            self.ungrouped_collapsed,
+        );
+        self.sidebar_last_filter = self.artist_filter.clone();
+        self.sidebar_last_recompute_ts = now_ts;
+        self.sidebar_dirty = false;
+        self.sidebar_recompute_count += 1;
+    }
+
+    pub fn group_member_ids(&self, group_id: i64) -> Vec<i64> {
+        self.group_assignment
+            .groups
+            .iter()
+            .find(|g| g.group_id == group_id)
+            .map(|g| g.band_ids.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn trigger_download_remaining_artists(
+        &mut self,
+        title: String,
+        ids: Vec<i64>,
+        core_tx: &UnboundedSender<UiToWorkerCommand>,
+    ) {
+        let opts = DownloadOpts {
+            format: self.settings.format,
+            out_dir: self.settings.out_dir.clone(),
+            batch_limit: self.settings.batch_limit,
+        };
+        let per_artist: Vec<(i64, u32, u32)> = ids
+            .iter()
+            .filter_map(|&bid| {
+                self.artists.iter().find(|a| a.band_id == bid).map(|a| {
+                    let rem = a.stats.eligible.saturating_sub(a.stats.eligible_downloaded);
+                    (bid, rem, a.stats.quota_used_30d)
+                })
+            })
+            .filter(|&(_, rem, _)| rem > 0)
+            .collect();
+        if per_artist.is_empty() {
+            return;
+        }
+        let is_multi = ids.len() > 1;
+        let preview = bcvault_core::worker::quota::preview_bulk(
+            &per_artist,
+            self.settings.batch_limit,
+            self.settings.quota_soft,
+            self.settings.quota_hard,
+            false,
+        );
+        let action = FxBulkAction::Remaining(bcvault_core::types::RemainingScope::Artists(ids));
+        if bcvault_core::worker::quota::should_confirm_bulk(is_multi, &preview) {
+            let mut rows = Vec::with_capacity(preview.len());
+            let mut total_new = 0u32;
+            let mut total_queue = 0u32;
+            let mut total_deferred = 0u32;
+            for p in preview {
+                let artist_name = self
+                    .artists
+                    .iter()
+                    .find(|a| a.band_id == p.band_id)
+                    .map(|a| a.display_name().to_string())
+                    .unwrap_or_else(|| format!("Artist {}", p.band_id));
+                total_new = total_new.saturating_add(p.requested);
+                total_queue = total_queue.saturating_add(p.allowed);
+                total_deferred = total_deferred.saturating_add(p.deferred);
+                rows.push(FxBulkConfirmRow {
+                    artist_name,
+                    preview: p,
+                });
+            }
+            self.bulk_confirm_modal = Some(FxBulkConfirmModalState {
+                title,
+                rows,
+                total_new,
+                total_queue,
+                total_deferred,
+                action,
+                focus_init: true,
+            });
+        } else if let FxBulkAction::Remaining(scope) = action {
+            let _ = core_tx.send(UiToWorkerCommand::EnqueueRemaining {
+                scope,
+                opts,
+                ack_soft_quota: false,
+            });
+        }
     }
 
     pub fn trigger_download_remaining(
@@ -1209,7 +1353,8 @@ impl FxState {
                 artists,
                 settings,
                 folders,
-                ..
+                groups,
+                pins,
             } => {
                 self.artists = artists;
                 self.settings = settings;
@@ -1217,6 +1362,9 @@ impl FxState {
                 for f in folders {
                     self.folders.entry(f.band_id).or_default().push(f);
                 }
+                self.groups = groups;
+                self.pins = pins;
+                self.sidebar_dirty = true;
                 self.booted = true;
                 self.issue_wall_and_facets_query(fx_tx);
             }
@@ -1232,18 +1380,21 @@ impl FxState {
                             .cmp(&b.display_name().to_lowercase())
                     });
                 }
+                self.sidebar_dirty = true;
             }
             WorkerToUiEvent::ArtistRemoved { band_id } => {
                 self.artists.retain(|a| a.band_id != band_id);
                 if self.query.base.band_id == Some(band_id) {
                     self.query.base.band_id = None;
                 }
+                self.sidebar_dirty = true;
                 self.issue_wall_and_facets_query(fx_tx);
             }
             WorkerToUiEvent::ArtistStats { band_id, stats } => {
                 if let Some(a) = self.artists.iter_mut().find(|a| a.band_id == band_id) {
                     a.stats = stats;
                 }
+                self.sidebar_dirty = true;
                 self.issue_wall_and_facets_query(fx_tx);
             }
             WorkerToUiEvent::SyncProgress(prog) => {
@@ -1330,6 +1481,7 @@ impl FxState {
                 } else {
                     self.folders.insert(band_id, folders);
                 }
+                self.sidebar_dirty = true;
             }
             WorkerToUiEvent::LibraryApplied { batch_id, summary } => {
                 let mut parts = Vec::new();
@@ -1467,8 +1619,16 @@ impl FxState {
                     self.show_unavailable_window = true;
                 }
             }
-            WorkerToUiEvent::ArtistGroupsChanged { .. }
-            | WorkerToUiEvent::ArtistGroupError { .. } => {}
+            WorkerToUiEvent::ArtistGroupsChanged { groups, pins } => {
+                self.groups = groups;
+                self.pins = pins;
+                self.group_error = None;
+                self.sidebar_dirty = true;
+            }
+            WorkerToUiEvent::ArtistGroupError { message } => {
+                self.push_toast(ToastKind::Error, message.clone(), now_s);
+                self.group_error = Some(message);
+            }
             WorkerToUiEvent::Log(entry) => {
                 if entry.level == bcvault_core::types::LogLevel::Error {
                     self.push_toast(ToastKind::Error, entry.message.clone(), now_s);
@@ -2013,6 +2173,80 @@ impl FxState {
             }
             FxAction::UndoBatch(batch_id) => {
                 let _ = core_tx.send(UiToWorkerCommand::UndoBatch { batch_id });
+            }
+            FxAction::NewGroup | FxAction::NewGroupFromSelection(_) | FxAction::EditGroup(_) => {
+                // Group editor modal is wired in the next step.
+            }
+            FxAction::DeleteGroup(id) => {
+                if let Some(g) = self.groups.iter().find(|g| g.id == id) {
+                    let pin_count = self.pins.values().filter(|&&p| p == Some(id)).count();
+                    self.confirm_delete_group = Some((id, g.name.clone(), pin_count));
+                }
+            }
+            FxAction::ToggleGroup(id) => {
+                if let Some(g) = self.groups.iter().find(|g| g.id == id) {
+                    let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                        id,
+                        collapsed: !g.collapsed,
+                    });
+                }
+            }
+            FxAction::ToggleUngrouped => {
+                self.ungrouped_collapsed = !self.ungrouped_collapsed;
+                self.sidebar_dirty = true;
+            }
+            FxAction::CollapseAllGroups => {
+                for g in &self.groups {
+                    if !g.collapsed {
+                        let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                            id: g.id,
+                            collapsed: true,
+                        });
+                    }
+                }
+                self.ungrouped_collapsed = true;
+                self.sidebar_dirty = true;
+            }
+            FxAction::ExpandAllGroups => {
+                for g in &self.groups {
+                    if g.collapsed {
+                        let _ = core_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
+                            id: g.id,
+                            collapsed: false,
+                        });
+                    }
+                }
+                self.ungrouped_collapsed = false;
+                self.sidebar_dirty = true;
+            }
+            FxAction::MoveArtistsToGroup(band_ids, target) => {
+                let _ = core_tx.send(UiToWorkerCommand::PinArtists { band_ids, target });
+            }
+            FxAction::SyncGroup(id) => {
+                let members = self.group_member_ids(id);
+                if !members.is_empty() {
+                    let _ = core_tx.send(UiToWorkerCommand::Sync {
+                        scope: SyncScope::Selected(members),
+                        mode: self.sync_mode,
+                    });
+                }
+            }
+            FxAction::DownloadRemainingGroup(id) => {
+                let members = self.group_member_ids(id);
+                let title = self
+                    .groups
+                    .iter()
+                    .find(|g| g.id == id)
+                    .map(|g| format!("Download Remaining for {}", g.name))
+                    .unwrap_or_else(|| "Download Remaining for Group".to_string());
+                self.trigger_download_remaining_artists(title, members, core_tx);
+            }
+            FxAction::ViewGroup(id) => {
+                let members = self.group_member_ids(id);
+                if let Some(&first) = members.first() {
+                    self.query.base.band_id = Some(first);
+                    self.issue_wall_and_facets_query(fx_tx);
+                }
             }
         }
     }

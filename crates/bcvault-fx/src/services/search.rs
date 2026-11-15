@@ -213,6 +213,24 @@ pub fn run_palette_search(
                 FxAction::VerifyFiles,
                 "",
             ),
+            (
+                "Groups: New Artist Group...",
+                "Create a manual or rule-based sidebar artist group",
+                FxAction::NewGroup,
+                "",
+            ),
+            (
+                "Groups: Collapse All Groups",
+                "Collapse all artist groups in the sidebar",
+                FxAction::CollapseAllGroups,
+                "",
+            ),
+            (
+                "Groups: Expand All Groups",
+                "Expand all artist groups in the sidebar",
+                FxAction::ExpandAllGroups,
+                "",
+            ),
         ];
 
         for (title, sub, act, hint) in commands {
