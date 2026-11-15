@@ -364,7 +364,7 @@ pub fn show(
             let is_selected = state.selected_keys.contains(&key);
             let show_sel_chk = is_selected || !state.selected_keys.is_empty();
             let sel_chk_base = Rect::from_min_size(
-                Pos2::new(base_rect.min.x + 6.0, base_rect.min.y + 6.0),
+                Pos2::new(base_rect.max.x - 24.0, base_rect.min.y + 6.0),
                 Vec2::new(18.0, 18.0),
             );
             let sel_chk_resp = ui.interact(
@@ -483,20 +483,9 @@ pub fn show(
                 badge_col,
             );
 
-            // Top-right downloaded or remote-update badge
-            if row.rel.has_remote_update {
-                let upd_r = Rect::from_min_size(
-                    Pos2::new(cov_rect.max.x - 52.0, cov_rect.min.y + 6.0),
-                    Vec2::new(46.0, 16.0),
-                );
-                paint::rect(painter, upd_r, th.bg0, Stroke::new(1.0_f32, th.warn));
-                painter.text(
-                    upd_r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "UPDATE",
-                    FontId::monospace(9.5),
-                    th.warn,
-                );
+            // Status badge below classification badge on cover (UPDATE / MISSING / ARCHIVED / DOWNLOADED)
+            let status_badge = if row.rel.has_remote_update {
+                Some(("UPDATE", 46.0_f32, th.warn, th.warn))
             } else if row.rel.downloaded {
                 let is_archived =
                     row.rel.local_status == Some(bcvault_core::types::LocalStatus::Archived);
@@ -531,48 +520,42 @@ pub fn show(
                         });
 
                 if is_folder_missing {
-                    let unavail_r = Rect::from_min_size(
-                        Pos2::new(cov_rect.max.x - 52.0, cov_rect.min.y + 6.0),
-                        Vec2::new(46.0, 16.0),
-                    );
                     let border_col = if is_selected { th.accent } else { th.warn };
-                    paint::rect(painter, unavail_r, th.bg0, Stroke::new(1.0_f32, border_col));
-                    painter.text(
-                        unavail_r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "MISSING",
-                        FontId::monospace(9.5),
-                        th.warn,
-                    );
+                    Some(("MISSING", 46.0_f32, border_col, th.warn))
                 } else if is_archived {
-                    let arch_r = Rect::from_min_size(
-                        Pos2::new(cov_rect.max.x - 60.0, cov_rect.min.y + 6.0),
-                        Vec2::new(54.0, 16.0),
-                    );
                     let border_col = if is_selected { th.accent } else { th.border };
-                    paint::rect(painter, arch_r, th.bg0, Stroke::new(1.0_f32, border_col));
-                    painter.text(
-                        arch_r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "ARCHIVED",
-                        FontId::monospace(9.5),
-                        th.text_dim,
-                    );
+                    Some(("ARCHIVED", 54.0_f32, border_col, th.text_dim))
                 } else {
-                    let chk_r = Rect::from_min_size(
-                        Pos2::new(cov_rect.max.x - 22.0, cov_rect.min.y + 6.0),
-                        Vec2::new(16.0, 16.0),
-                    );
-                    let fill = if is_selected { th.accent } else { th.ok };
-                    paint::rect_filled(painter, chk_r, fill);
-                    let prog = state.motion.val(("dl_check", key), 1.0, SpringCfg::POP);
-                    paint::drawn_check(painter, chk_r, prog, Stroke::new(1.8_f32, th.bg0));
+                    let border_col = if is_selected { th.accent } else { th.ok };
+                    Some(("DOWNLOADED", 72.0_f32, border_col, th.ok))
                 }
+            } else {
+                None
+            };
+
+            if let Some((label, width, border_col, text_col)) = status_badge {
+                let status_r = Rect::from_min_size(
+                    Pos2::new(cov_rect.min.x + 6.0, cov_rect.min.y + 26.0),
+                    Vec2::new(width, 16.0),
+                );
+                paint::rect(
+                    painter,
+                    status_r,
+                    th.bg0.gamma_multiply(0.88),
+                    Stroke::new(1.0_f32, border_col),
+                );
+                painter.text(
+                    status_r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    FontId::monospace(9.5),
+                    text_col,
+                );
             }
 
             if show_sel_chk || is_hovered {
                 let box_r = Rect::from_min_size(
-                    Pos2::new(cov_rect.min.x + 6.0, cov_rect.min.y + 6.0),
+                    Pos2::new(cov_rect.max.x - 22.0, cov_rect.min.y + 6.0),
                     Vec2::new(16.0, 16.0),
                 );
                 let fill = if is_selected { th.accent } else { th.bg0 };
@@ -938,8 +921,17 @@ mod tests {
             ..Default::default()
         };
 
+        let has_text = |out: &egui::FullOutput, needle: &str| {
+            out.shapes.iter().any(|s| {
+                matches!(
+                    &s.shape,
+                    egui::epaint::Shape::Text(t) if t.galley.text() == needle
+                )
+            })
+        };
+
         // Render with downloaded = false
-        let _ = ctx.run(raw.clone(), |ctx| {
+        let out_undl = ctx.run(raw.clone(), |ctx| {
             state.motion.begin_frame_dt(1.0 / 60.0);
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(ui, &mut state, &core_tx, &fx_tx, 0.0);
@@ -947,12 +939,11 @@ mod tests {
             state.motion.end_frame(ctx);
         });
 
-        // dl_check spring should NOT have been touched
-        assert!(!state.motion.has(("dl_check", key)));
+        assert!(!has_text(&out_undl, "DOWNLOADED"));
 
         // Now set downloaded = true and re-render
         state.rows[0].rel.downloaded = true;
-        let _ = ctx.run(raw, |ctx| {
+        let out_dl = ctx.run(raw, |ctx| {
             state.motion.begin_frame_dt(1.0 / 60.0);
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(ui, &mut state, &core_tx, &fx_tx, 0.016);
@@ -960,8 +951,7 @@ mod tests {
             state.motion.end_frame(ctx);
         });
 
-        // dl_check spring SHOULD now be registered
-        assert!(state.motion.has(("dl_check", key)));
+        assert!(has_text(&out_dl, "DOWNLOADED"));
     }
 
     #[test]
@@ -995,7 +985,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = ctx.run(raw, |ctx| {
+        let out = ctx.run(raw, |ctx| {
             state.motion.begin_frame_dt(1.0 / 60.0);
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(ui, &mut state, &core_tx, &fx_tx, 0.0);
@@ -1003,7 +993,16 @@ mod tests {
             state.motion.end_frame(ctx);
         });
 
-        // dl_check spring should NOT have been registered because card is MISSING
+        let has_text = |needle: &str| {
+            out.shapes.iter().any(|s| {
+                matches!(
+                    &s.shape,
+                    egui::epaint::Shape::Text(t) if t.galley.text() == needle
+                )
+            })
+        };
+        assert!(has_text("MISSING"));
+        assert!(!has_text("DOWNLOADED"));
         assert!(!state.motion.has(("dl_check", key)));
     }
 }

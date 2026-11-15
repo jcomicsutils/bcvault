@@ -343,7 +343,7 @@ pub fn show(
                 }
             });
             ui.add_enabled_ui(stats_rem > 0 || lib_rem > 0, |ui| {
-                ui.menu_button("▾", |ui| {
+                ui.menu_button("Scope", |ui| {
                     if ui
                         .add_enabled(
                             stats_rem > 0,
@@ -392,7 +392,11 @@ pub fn show(
                         ));
                         ui.close();
                     }
-                });
+                })
+                .response
+                .on_hover_text(
+                    "Choose Download remaining scope (In this view, This artist, All artists)",
+                );
             });
 
             egui::ComboBox::from_id_salt("fx_toolbar_fmt")
