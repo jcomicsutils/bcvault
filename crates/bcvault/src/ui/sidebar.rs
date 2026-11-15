@@ -140,6 +140,20 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                         let member_ids = group_member_ids(state, *id);
                         let (dl, elig) = sum_member_stats(state, &member_ids);
                         let resp = draw_group_header_row(ui, name, *count, *collapsed, dl, elig);
+                        if resp.dnd_hover_payload::<i64>().is_some() {
+                            sharp_rect(
+                                ui.painter(),
+                                resp.rect,
+                                egui::Color32::TRANSPARENT,
+                                Stroke::new(2.0_f32, pal::ACCENT),
+                            );
+                        }
+                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
+                            let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+                                band_ids: vec![*dragged_band_id],
+                                target: PinTarget::Group(*id),
+                            });
+                        }
                         if resp.clicked() {
                             let _ = cmd_tx.send(UiToWorkerCommand::SetArtistGroupCollapsed {
                                 id: *id,
@@ -164,6 +178,20 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                         let (dl, elig) = sum_member_stats(state, &member_ids);
                         let resp =
                             draw_group_header_row(ui, "Ungrouped", *count, *collapsed, dl, elig);
+                        if resp.dnd_hover_payload::<i64>().is_some() {
+                            sharp_rect(
+                                ui.painter(),
+                                resp.rect,
+                                egui::Color32::TRANSPARENT,
+                                Stroke::new(2.0_f32, pal::ACCENT),
+                            );
+                        }
+                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
+                            let _ = cmd_tx.send(UiToWorkerCommand::PinArtists {
+                                band_ids: vec![*dragged_band_id],
+                                target: PinTarget::Ungrouped,
+                            });
+                        }
                         if resp.clicked() {
                             state.ungrouped_collapsed = !*collapsed;
                             state.sidebar_dirty = true;
@@ -227,6 +255,12 @@ pub fn show(ui: &mut Ui, state: &mut UiState, cmd_tx: &UnboundedSender<UiToWorke
                             state.settings.quota_hard,
                             &artist_folders,
                         );
+                        if resp.drag_started() {
+                            resp.dnd_set_drag_payload(artist.band_id);
+                        }
+                        if resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
 
                         let modifiers = ui.input(|i| i.modifiers);
                         if resp.clicked() {
@@ -498,7 +532,7 @@ fn draw_artist_row(
     folders: &[ArtistFolder],
 ) -> egui::Response {
     let desired = Vec2::new(ui.available_width(), 24.0);
-    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -678,7 +712,7 @@ fn draw_group_header_row(
     elig: u32,
 ) -> egui::Response {
     let desired = Vec2::new(ui.available_width(), 24.0);
-    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     if ui.is_rect_visible(rect) {
         let bg = if resp.hovered() { pal::BG2 } else { pal::BG0 };
         sharp_rect(ui.painter(), rect, bg, Stroke::new(1.0_f32, pal::BORDER));

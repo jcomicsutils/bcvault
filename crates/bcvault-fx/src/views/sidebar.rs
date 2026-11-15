@@ -238,6 +238,20 @@ pub fn show(
                         let (dl, elig) = sum_fx_member_stats(state, &member_ids);
                         let resp =
                             draw_fx_group_header_row(ui, state, name, *count, *collapsed, dl, elig);
+                        if resp.dnd_hover_payload::<i64>().is_some() {
+                            paint::rect(
+                                ui.painter(),
+                                resp.rect,
+                                egui::Color32::TRANSPARENT,
+                                egui::Stroke::new(2.0_f32, state.active_theme.accent),
+                            );
+                        }
+                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
+                            pending_actions.push(FxAction::MoveArtistsToGroup(
+                                vec![*dragged_band_id],
+                                bcvault_core::groups::PinTarget::Group(*id),
+                            ));
+                        }
                         if resp.clicked() {
                             pending_actions.push(FxAction::ToggleGroup(*id));
                         }
@@ -267,6 +281,20 @@ pub fn show(
                             dl,
                             elig,
                         );
+                        if resp.dnd_hover_payload::<i64>().is_some() {
+                            paint::rect(
+                                ui.painter(),
+                                resp.rect,
+                                egui::Color32::TRANSPARENT,
+                                egui::Stroke::new(2.0_f32, state.active_theme.accent),
+                            );
+                        }
+                        if let Some(dragged_band_id) = resp.dnd_release_payload::<i64>() {
+                            pending_actions.push(FxAction::MoveArtistsToGroup(
+                                vec![*dragged_band_id],
+                                bcvault_core::groups::PinTarget::Ungrouped,
+                            ));
+                        }
                         if resp.clicked() {
                             pending_actions.push(FxAction::ToggleUngrouped);
                         }
@@ -542,7 +570,13 @@ fn draw_artist_row(
 ) -> egui::Response {
     let th = state.active_theme;
     let desired = Vec2::new(ui.available_width(), 26.0);
-    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+    if resp.drag_started() {
+        resp.dnd_set_drag_payload(band_id);
+    }
+    if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
     let empty_folders = Vec::new();
     let artist_folders = if band_id > 0 {
         state
