@@ -189,6 +189,7 @@ cargo run --release -p bcvault-fx --example fx_bench -- --check
 | <kbd>Ctrl</kbd> + <kbd>K</kbd> / <kbd>Ctrl</kbd> + <kbd>P</kbd> | Open **Command Palette** (`@` artists, `#` filters, `>` commands) |
 | <kbd>/</kbd> or <kbd>Ctrl</kbd> + <kbd>F</kbd> | Focus toolbar release search input |
 | <kbd>Ctrl</kbd> + <kbd>B</kbd> | Toggle left sidebar visibility |
+| <kbd>Ctrl</kbd> + <kbd>A</kbd> | Select all releases in current view |
 | <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> / <kbd>4</kbd> | Switch primary view (**Wall**, **Table**, **Artists**, **Stats**) |
 | <kbd>Alt</kbd> + <kbd>Left</kbd> | Navigate view history backward |
 | <kbd>Alt</kbd> + <kbd>Right</kbd> | Navigate view history forward |

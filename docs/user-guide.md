@@ -89,14 +89,25 @@ Right-click any release row/card (or use the Detail Drawer in `bcvault-fx`):
 
 ## 5. Downloading Releases and Quota Protection
 
+### Selecting Releases
+Both `bcvault` (Classic) and `bcvault-fx` share consistent bulk selection controls:
+- **Keyboard**: Press `Ctrl+A` (or `Cmd+A` on macOS) to select every release in the current view; press `Esc` to clear the selection (after any open modal/palette/drawer is closed).
+- **Checkboxes**: Click the top-left checkbox on any Cover Wall card, or use the tri-state header checkbox (`☐` / `⊟` / `☑`) in the Table view to select or clear all rows in the current view.
+- **Selection Action Bar**: Appears in the toolbar whenever at least one release is selected, showing `N selected (M downloadable)` along with **Download N**, **Select all (T)**, **Select remaining (R)**, **Invert**, and **Clear**.
+
 ### Enqueuing Downloads
-- **Download Selected**: Select rows/cards and click **Download Selected** (or press `Ctrl+Enter` in `bcvault-fx`).
-- **Download All Eligible**: Enqueues all undownloaded `FREE` and `NYP` releases in the current view (excluding pre-orders), capped at `batch_limit` per batch.
+- **Download Selected**: Select rows/cards and click **Download (N)** (or press `Ctrl+Enter` in `bcvault-fx`, or run **Download selected** from the command palette).
+- **Download Remaining**: Click **Download remaining (M)** in the toolbar (or open its `▾` scope menu) to queue all undownloaded `FREE` and `NYP` releases without pre-orders across:
+  - **In this view**: Remaining releases matching the active search/filter.
+  - **This artist** / **Selected artists**: Remaining releases across the selected artist(s), independent of view filters.
+  - **All artists...**: Remaining releases across the entire library.
+- **Bulk Confirmation Modal**: Shown before enqueuing when targeting all artists, multiple artists, `>= 25` releases, or when quota limits defer part of the batch. Displays a per-artist breakdown (`new`, `queue`, `deferred`, and projected 30-day usage) with **Cancel** focused by default. Deferred releases stay remaining so you can press **Download remaining** again later.
+- **Idempotent Enqueue & Re-download**: **Download Selected** and **Download remaining** automatically skip already-downloaded and currently in-flight releases, reporting queued, skipped, and deferred counts in the enqueue summary. To intentionally fetch an already-downloaded release again, use the explicit **Re-download** button in the release detail drawer, table row, or card context menu.
 
 ### Rolling 30-Day Quota Protection
 Bandcamp allocates each artist a limited pool of free `NYP` downloads per month. To protect artists from exhausting their free download credits:
 - `bcvault` tracks `NYP` checkouts per artist over a rolling 30-day window in `download_history`.
-- **Soft Warning (`quota_soft`, default `150`)**: Displays a confirmation modal before enqueuing jobs that would cross the soft threshold.
+- **Soft Warning (`quota_soft`, default `150`)**: Both `bcvault` and `bcvault-fx` display a deduplicated per-artist confirmation modal (**Continue** / **Cancel**, with **Cancel** focused by default) before enqueuing jobs that would cross the soft threshold.
 - **Hard Cap (`quota_hard`, default `200`)**: Prevents enqueuing beyond the hard limit for that artist.
 - **Server-Side Exhaustion**: If Bandcamp returns a quota-exhausted error during `buy_for_nothing`, `bcvault` immediately halts remaining queued downloads for that artist.
 

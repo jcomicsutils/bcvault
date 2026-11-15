@@ -357,13 +357,12 @@ pub fn show(
                         ));
                         ui.close();
                     }
-                    let artist_rem = state.query.base.band_id.and_then(|bid| {
-                        state
-                            .artists
-                            .iter()
-                            .find(|a| a.band_id == bid)
-                            .map(|a| a.stats.eligible.saturating_sub(a.stats.eligible_downloaded))
-                    });
+                    let artist_rem =
+                        state.query.base.band_id.and_then(|bid| {
+                            state.artists.iter().find(|a| a.band_id == bid).map(|a| {
+                                a.stats.eligible.saturating_sub(a.stats.eligible_downloaded)
+                            })
+                        });
                     if ui
                         .add_enabled(
                             artist_rem.is_some_and(|r| r > 0),

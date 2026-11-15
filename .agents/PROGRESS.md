@@ -4,6 +4,7 @@
 Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 
 ## Done
+- none: document selection and download remaining (`DOWNLOAD_FLOW.md` step 9)
 - none: add download remaining with scope menu and confirmation in fx (`DOWNLOAD_FLOW.md` step 8)
 - none: add select all, remaining, invert and selection bar in fx (`DOWNLOAD_FLOW.md` step 7)
 - none: show the quota warning dialog and enqueue summaries in fx (`DOWNLOAD_FLOW.md` step 6)
@@ -144,6 +145,7 @@ Task: none  ·  Branch: feat/download-flow  ·  Updated: 2026-11-14
 - [x] T0: guard checks updated (commit hook ceremony skipped per user decision)
 - [x] SETTINGS_TABS: Tabbed settings, settings parity, and ZIP extraction options (Steps 1 to 7)
 - [x] USER_THEMES: File-based TOML themes for `bcvault-fx` with 13 built-ins (including Catppuccin Mocha, Macchiato, Frappé, and Latte), theme picker, live editor, import/export/drop/delete, and `docs/themes.md` (Steps 1 to 9)
+- [x] DOWNLOAD_FLOW: Select all, download remaining, idempotent enqueue, and quota parity across both UIs (Steps 1 to 9)
 - Note: no `milestone/*` tags exist; releases follow SemVer version tags (`v0.1.0` covers base, FX and library; `v0.1.1` and `v0.1.2` cover unavailable folder fixes, archived release display, pre-push tooling, and `.agents` tracking; `v0.1.3` covers multi-folder links, download-dir fixes, unavailable classification, review rejection & URL/slug picker, verify relink/rescan, full `docs/` suite, and `.agents/` audit; `v0.2.0` covers `SETTINGS_TABS`—tabbed settings, settings parity, ZIP extraction options, tab-switch animations, and fixed-width linked-folders scrollbar; `v0.3.0` covers `USER_THEMES`—file-based TOML themes, 13 built-in themes including Catppuccin Mocha/Macchiato/Frappé/Latte, swatch picker, live editor, import/export/drop/delete, and `docs/themes.md`; current HEAD is `v0.3.0`).
 
 ## Open questions (needs the user)
