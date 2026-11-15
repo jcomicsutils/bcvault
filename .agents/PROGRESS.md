@@ -1,9 +1,10 @@
 # PROGRESS
 
 ## Current
-Task: none  ·  Branch: main  ·  Updated: 2026-11-15
+Task: none  ·  Branch: feat/artist-groups  ·  Updated: 2026-11-15
 
 ## Done
+- none: add group rules, artist placement and sidebar rows (`ARTIST_GROUPS.md` step 1)
 - none: clear `in_flight` and worker slots in `run_job` before emitting terminal `JobState`, and drain stale events / avoid loopback TCP timeouts in `test_4_in_flight_cleared_on_terminal_states_and_retry`
 - none: release v0.4.0 (`DOWNLOAD_FLOW`, layered Unicode fallback fonts, and invisible char markers)
 - none: style marked invisible characters with distinct monospace warning color and background via `display_layout_job`

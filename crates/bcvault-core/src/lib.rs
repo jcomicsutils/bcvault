@@ -1,6 +1,7 @@
 pub mod bandcamp;
 pub mod db;
 pub mod error;
+pub mod groups;
 pub mod library;
 pub mod paths;
 pub mod selection;
