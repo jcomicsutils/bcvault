@@ -23,11 +23,12 @@
 | `PLANS/KEYBOARD/KEYBOARD.md` | Complete keyboard operation, shortcut registry, focus regions, and modal focus scopes across both UIs. Not started (`Task: none` commits). |
 | `PLANS/AUTO_SYNC/AUTO_SYNC.md` | Scheduled auto sync, quick check, per-artist sync exclusion, removed-release tracking, and change feed. Not started (`Task: none` commits). |
 | `PLANS/ARCHIVE/ARCHIVE.md` | Selectable release archive (text and covers, optional JPEG XL). Not started; merges after `AUTO_SYNC.md` (`Task: none` commits). |
+| `PLANS/ARTIST_STATS/ARTIST_STATS.md` | Per-artist "Artist stats" page in `bcvault-fx`, computed only from the local database (no network, no migration); merges after `ARCHIVE.md`. Not started (`Task: none` commits). |
 | `PLANS/MAIL_REDEEM/MAIL_REDEEM_PLAN.md` | Mailbox redeem and cleanup (Phases M0 to M6). Not started. |
 | `PLANS/USER_THEMES/USER_THEMES.md` | File-based TOML themes for `bcvault-fx`. Not started (`Task: none` commits). |
 | `PROGRESS.md` | Live status across all plans and releases. Wins over the status lines in every other document. |
 
-Paths are relative to `.agents/`. `SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, `KEYBOARD.md`, `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`, `MATCH-FIX.md`, `MISSING-FOLDER-FIX.md`, `MULTI_FOLDER.md`, `DOWNLOAD-DIR-FIX.md`, `REVIEW-AND-MATCH-FIX.md` and `VERIFY-DOWNLOAD-DIR-FIX.md` are step lists without phase IDs: their commits use `Task: none` and their step number goes in `PROGRESS.md`. (Earlier drafts referenced a separate `COMMIT_PLAN.md` and `FX/PROGRESS-FX.md`; commit sequences now live directly inside each plan document and all progress is consolidated in `.agents/PROGRESS.md`.)
+Paths are relative to `.agents/`. `SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, `KEYBOARD.md`, `AUTO_SYNC.md`, `ARCHIVE.md`, `ARTIST_STATS.md`, `USER_THEMES.md`, `MATCH-FIX.md`, `MISSING-FOLDER-FIX.md`, `MULTI_FOLDER.md`, `DOWNLOAD-DIR-FIX.md`, `REVIEW-AND-MATCH-FIX.md` and `VERIFY-DOWNLOAD-DIR-FIX.md` are step lists without phase IDs: their commits use `Task: none` and their step number goes in `PROGRESS.md`. (Earlier drafts referenced a separate `COMMIT_PLAN.md` and `FX/PROGRESS-FX.md`; commit sequences now live directly inside each plan document and all progress is consolidated in `.agents/PROGRESS.md`.)
 
 **Precedence:** the user's latest message, then this file, then the feature plan, then `Initial Plan.md`. Where a feature plan amends the base plan (for example the main-DB migrations `0004` to `0008` added by the library plans, which amend FX's "main schema untouched"), the amendment wins. Fixtures beat assumptions: if captured data disagrees with a plan's hypothesis about Bandcamp or an email format, follow the fixture and note it in `PROGRESS.md`.
 
@@ -106,7 +107,7 @@ Task: <ID>
 
 ### 5.2 Scopes
 
-Top-level scope is mandatory and validated; add `/sub` for a module. Allowed top-level scopes: `workspace`, `core`, `db`, `bandcamp`, `gate`, `worker`, `sync`, `downloads`, `quota`, `types`, `classic`, `ui`, `fx`, `library`, `mail`, `settings`, `groups`, `keyboard`, `theme`, `archive`, `tooling`, `deps`, `docs`, `plans`, `release`.
+Top-level scope is mandatory and validated; add `/sub` for a module. Allowed top-level scopes: `workspace`, `core`, `db`, `bandcamp`, `gate`, `worker`, `sync`, `downloads`, `quota`, `types`, `classic`, `ui`, `fx`, `library`, `mail`, `settings`, `groups`, `keyboard`, `theme`, `archive`, `insights`, `tooling`, `deps`, `docs`, `plans`, `release`.
 
 Examples of sub-scopes: `fx/motion`, `fx/theme`, `fx/paint`, `fx/thumbs`, `fx/wall`, `fx/table`, `fx/sidebar`, `fx/toolbar`, `fx/dock`, `fx/toasts`, `fx/drawer`, `fx/nav`, `fx/palette`, `fx/artists`, `fx/stats`, `fx/shader`, `fx/db`, `fx/settings`, `fx/selection`, `fx/groups`, `fx/keys`, `fx/actions`, ` fx/modals`, `classic/settings`, `classic/sidebar`, `classic/groups`, `classic/keys`, `classic/modals`, `library/scan`, `mail/imap`, `mail/parse`, `mail/links`, `mail/cleanup`.
 
@@ -175,7 +176,7 @@ Bad (all rejected by the hook): `Update stuff`, `feat: add wall` (no scope), `fe
 
 ## 6. Branches, merging, tags
 
-- Branch per phase: `phase/<PHASEID>-<slug>`, for example `phase/F3-cover-wall`, `phase/L0-library-model`. Hotfixes: `fix/<slug>`. Plans without phase IDs (`SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, `KEYBOARD.md`, `AUTO_SYNC.md`, `ARCHIVE.md`, `USER_THEMES.md`) use the `feat/<slug>` branch they name (or land directly on `main` when approved by the user).
+- Branch per phase: `phase/<PHASEID>-<slug>`, for example `phase/F3-cover-wall`, `phase/L0-library-model`. Hotfixes: `fix/<slug>`. Plans without phase IDs (`SETTINGS_TABS.md`, `DOWNLOAD_FLOW.md`, `ARTIST_GROUPS.md`, `KEYBOARD.md`, `AUTO_SYNC.md`, `ARCHIVE.md`, `ARTIST_STATS.md`, `USER_THEMES.md`) use the `feat/<slug>` branch they name (or land directly on `main` when approved by the user).
 - Open a pull request (or ask the user to review) **per phase or plan** once all milestone boxes pass. Then `git rebase origin/main` and fast-forward merge.
 - Always follow SemVer and tag: after merge, create an annotated version tag `vMAJOR.MINOR.PATCH`. Never skip git tags when releasing versions or completing milestone phases.
 - `main` is always green and shippable. No direct commits to `main` except `docs(plans)` and `chore` housekeeping approved by the user (or when executing a plan directly on `main` at the user's request).

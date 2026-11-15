@@ -24,6 +24,7 @@
 | Complete keyboard operation (`PLANS/KEYBOARD/KEYBOARD.md`) | Planned, not started; per-UI shortcut registry, `F6` focus regions, spatial wall/table/sidebar/dock navigation, modal focus scope, and `?`/`F1` help overlay. |
 | Auto sync (`PLANS/AUTO_SYNC/AUTO_SYNC.md`) | Planned, not started; scheduled sync, quick check, removed-release tracking, change feed (`0009_auto_sync.sql` or next free migration). |
 | Archive (`PLANS/ARCHIVE/ARCHIVE.md`) | Planned, not started; selectable release archive (text & covers). Depends on auto sync (`0010_archive.sql` or next free migration). |
+| Artist stats (`PLANS/ARTIST_STATS/ARTIST_STATS.md`) | Planned, not started; per-artist "Artist stats" page in `bcvault-fx`, built only from the local database (no network, no migration). Depends on archive. |
 | Mail (`PLANS/MAIL_REDEEM/MAIL_REDEEM_PLAN.md`) | Planned, not started (Phases M0 to M6); mailbox redeem and cleanup. First real email fixture received. |
 | File themes (`PLANS/USER_THEMES/USER_THEMES.md`) | Planned, not started; file-based TOML themes for `bcvault-fx` (FX only, independent). |
 
@@ -32,7 +33,7 @@
 ```text
 T0 tooling (done) ──┬──► SETTINGS_TABS ──► DOWNLOAD_FLOW ──► ARTIST_GROUPS ──► KEYBOARD
                     │
-                    ├──► AUTO_SYNC ──► ARCHIVE
+                    ├──► AUTO_SYNC ──► ARCHIVE ──► ARTIST_STATS
                     │
                     ├──► M0 ► M1 ► M2 ► M3 ► M4 ──┬──► M5 (classic UI)
                     │    (core mail; reuses matcher)└──► M6 (FX UI)
@@ -45,6 +46,7 @@ F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, MISSING-FOLDER-FIX, MULTI_FOLDER, D
 - `DOWNLOAD_FLOW.md` precedes `ARTIST_GROUPS.md` (which reuses `RemainingScope::Artists` for group downloads), and `KEYBOARD.md` lands after `SETTINGS_TABS`, `DOWNLOAD_FLOW`, and `ARTIST_GROUPS` to bind and audit their final controls.
 - M0.1 reuses `bcvault_core::library::textmatch` and the matcher's scoring (both exist). M0.4's follow-up updates FX's schema contract check.
 - `ARCHIVE.md` rebases onto `AUTO_SYNC.md` (both edit `worker/sync.rs`).
+- `ARTIST_STATS.md` merges after `ARCHIVE.md`: it reads `release_archive` (`captured_mask`, `tracks_json`, `tags_json`) and the `missing_kind` column from `AUTO_SYNC.md`. It adds no migration and makes no network request.
 - `USER_THEMES.md` touches only `bcvault-fx` (with a minor `AppPaths` addition in core) and has no migration dependencies.
 
 ## 3. Recommended order
@@ -57,8 +59,9 @@ F0 to F8, L0 to L6, MATCH-FIX, BADGE-REFORM, MISSING-FOLDER-FIX, MULTI_FOLDER, D
 | 4 | **KEYBOARD** | Audits and binds the final UI from steps 1–3 into a single shortcut registry with focus regions, spatial navigation, and modal focus scopes. |
 | 5 | **AUTO_SYNC** | Unblocked. Takes next free migration (`0009_auto_sync.sql` or next free), verifying and rescanning multiple folders cleanly. |
 | 6 | **ARCHIVE** | Merges after `AUTO_SYNC` and rebases onto it (both touch `worker/sync.rs`; takes next free migration). |
-| 7 | **M0 to M4** mail core | Needs the real-mailbox fixture and cock.li check. Takes the next free migration number when it lands. |
-| 8 | **M5 and M6** mail UI in both front-ends | Both apps exist; wires mail redeem into classic and FX. |
+| 7 | **ARTIST_STATS** | Merges after `ARCHIVE` (needs archived tracklists and tags). No migration. FX only; adds the "Artist stats" view and `docs/artist-stats.md`. |
+| 8 | **M0 to M4** mail core | Needs the real-mailbox fixture and cock.li check. Takes the next free migration number when it lands. |
+| 9 | **M5 and M6** mail UI in both front-ends | Both apps exist; wires mail redeem into classic and FX. |
 | any | **USER_THEMES** | FX-only, no migration; extends the `Appearance` tab and can interleave with anything. |
 | any | **T0** remaining tooling | Optional commit message checks, `.gitmessage`, and changelog generation with `git-cliff`. |
 
@@ -83,6 +86,7 @@ A single agent works one phase or plan at a time. If you run two agents, split b
 | `0010` (lowest free) | `auto_sync` / `sync_events` (or next landing plan) | `AUTO_SYNC.md` | Breaking (`feat(db)!`) |
 | `0011` (or next free) | `release_archive` table (text archive in main DB; covers in `archive.sqlite`) | `ARCHIVE.md` | Breaking (`feat(core)!` / `feat(db)!`) |
 | next free | Mail accounts, messages, links, wait list | `MAIL_REDEEM_PLAN.md` (M0.4) | Breaking (`feat(db)!`) |
+| none | `ARTIST_STATS.md` adds no migration (statistics are derived on read) | `ARTIST_STATS.md` | Compatible |
 
 Number by landing order: whichever plan lands next takes the lowest free number (currently `0010`); rename the unmerged file (and the plan text) before merging. The runner list is in `crates/bcvault-core/src/db/migrations.rs` (`MAX_VERSION = 9`). FX's sidecar database has its own numbering (`fx.sqlite`, `0001_fx_init.sql`) and is unaffected.
 
@@ -101,6 +105,8 @@ Number by landing order: whichever plan lands next takes the lowest free number 
 | Shortcut registry (`keys.rs`), focus regions (`F6`), and `modal_scope` | `KEYBOARD.md` | Both UIs, all modals and future panels (`AGENTS.md` rule 15) |
 | `validate_redeem_url` | Base 3.8, refactored in M1.4 | Manual redeem modal, mail links |
 | `fetch_release_raw`, gate `fetch_bytes`, `WorkerHandle` | F0.3 (done) | FX services, archive |
+| `release_archive` columns (`captured_mask`, `tracks_json`, `tags_json`) and `releases.missing_kind` | `ARCHIVE.md`, `AUTO_SYNC.md` | `ARTIST_STATS.md` loader (`db/repo/insights.rs`); keep names and meanings or update only that loader |
+| `insights` module (`compute_insights`, `Stat`, `Missing`, `Record`, page-artist matching) | `ARTIST_STATS.md` | fx Artist stats view; later group-level statistics (section 9 of the plan) |
 | Instance lock | F0.3 (done) | Classic and FX `main` |
 | FX schema contract check | F1.2 (done), updated by L0.7 | Follow-up to M0.4, auto-sync, archive, artist-groups, and library migrations whenever they add/alter columns or tables FX queries |
 | `Settings` new fields | L0.2, MATCH-FIX (folder style) | Must use `#[serde(default)]` and be classified in `SettingsTab` (`AGENTS.md` rule 16); M phases keep secrets out of `Settings` |
@@ -122,7 +128,7 @@ All crates share `workspace.package.version`. While `0.x`: `feat` bumps minor (o
 | `v0.1.1` | Unavailable folder handling fixes (`MISSING-FOLDER-FIX`). |
 | `v0.1.2` | Unavailable folder resolution for empty/archived releases, archived visual differentiation, and pre-push hook. |
 | `v0.1.3` | Multi-folder links (`0006`), download-dir guard & local-only matching fix (`DOWNLOAD-DIR-FIX`), `unavailable` release classification (`0007`), persistent review rejection & URL/slug release picker (`REVIEW-AND-MATCH-FIX`, `0008`), verify download-dir relink & rescan (`VERIFY-DOWNLOAD-DIR-FIX`), complete `docs/` suite, and `.agents/` plan synchronization. |
-| following releases (`v0.2.0`, ...) | Settings tabs, download flow, artist groups, keyboard operation, auto sync, archive, mail, file themes, in landing order. |
+| following releases (`v0.2.0`, ...) | Settings tabs, download flow, artist groups, keyboard operation, auto sync, archive, artist stats, mail, file themes, in landing order. |
 
 Every release that includes a new main-DB migration must ship `bcvault` and `bcvault-fx` together.
 
@@ -145,6 +151,9 @@ Every release that includes a new main-DB migration must ship `bcvault` and `bcv
 
 **Archive**
 > Read `AGENTS.md`, `ROADMAP.md`, and `PLANS/ARCHIVE/ARCHIVE.md`. Make sure `AUTO_SYNC` has landed first. Execute the steps in section 5 in order (using the lowest free migration number). Implement text and artwork archiving into the database, cover fallback in both front-ends, and the detail view in the FX drawer. Stop for confirmation before merging JPEG XL AGPL-licensed dependencies.
+
+**Artist stats**
+> Read `AGENTS.md`, `ROADMAP.md`, and `PLANS/ARTIST_STATS/ARTIST_STATS.md`. Make sure `ARCHIVE` has landed first. Execute the 10 steps in section 7 in order, one commit per step, keeping `scripts/check.sh` green. Add the pure `insights` module, the read-only facts loader, the fx query service and the "Artist stats" view with its 13 cards. Use only data already in the databases: never add a request path, worker job or database write, and report missing data in words instead of fetching it. No migration.
 
 **Mail core**
 > Read `AGENTS.md`, `ROADMAP.md`, and `PLANS/MAIL_REDEEM/MAIL_REDEEM_PLAN.md`. Execute phases M0 to M4 (using the lowest free migration number). For M1.1 ask me to supply the sanitised `.eml` files (one real sample already exists; I will provide a cock.li-forwarded one). Never log secrets or signed links; never run against a real mailbox without my explicit go-ahead.
